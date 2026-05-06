@@ -4,7 +4,6 @@
  */
 const App = (() => {
     const AUTO_DOWNLOAD_CONSENT_KEY = "alertCreatorAutoDownloadConsent";
-    const ONBOARDING_INTRO_DONE_KEY = "onboarding_intro_done";
     const DEFAULT_THEME_ID = "cobalt-night";
     const AVAILABLE_THEME_IDS = new Set([
         "cobalt-night",
@@ -30,63 +29,9 @@ const App = (() => {
     let lastDeps = null;
     let onboardingFlow = null;
     let onboardingStep = 0;
-    const SHARED_ONBOARDING_START_STEP = {
-        title: "Start With The Right Tool",
-        body: "Alert Creator is the fast utility for downloading one source, replacing audio, normalizing levels, and exporting a finished clip. Video Editor is the Twitch VOD workflow for pulling streams, markers, clips, shorts, captions, and longform follow-ups. Pick the workspace you want to start in.",
-        isChooserStep: true,
-    };
 
     const ONBOARDING_FLOWS = {
-        alert: [
-            SHARED_ONBOARDING_START_STEP,
-            {
-                title: "Alert Creator Is The Fast Utility Tool",
-                body: "Use it when you want one source in, one finished file out, without opening the full Twitch editing workflow.",
-                features: [
-                    "Download a source from a URL or load one local video file",
-                    "Replace the original audio with a second URL or local audio file",
-                    "Normalize loudness, add fades, and trim the replacement audio",
-                    "Swap in a different image or video and export a finished alert clip",
-                ],
-            },
-            {
-                title: "Install required tools",
-                body: "Install the core download and processing tools once. After that, Alert Creator can download and process clips locally.",
-                isRuntimeStep: true,
-            },
-            {
-                title: "Load The Clip You Want To Work From",
-                body: "Paste a video URL or choose a local file. This is the fastest path when you just need one clip, one download, or one alert asset.",
-                features: [
-                    "Works with YouTube, Twitch, TikTok, and other supported URLs",
-                    "Local files work too when you already have the source on disk",
-                    "The source opens directly in preview so you can trim immediately",
-                ],
-            },
-            {
-                title: "Shape The Clip And Audio",
-                body: "Set the crop, trim range, and audio options in one pass.",
-                features: [
-                    "Crop for square, widescreen, vertical, or custom framing",
-                    "Add an end-buffer freeze frame for alert timing",
-                    "Replace audio, trim the audio range, and keep it in sync",
-                    "Normalize levels so the export lands at a more consistent volume",
-                ],
-            },
-            {
-                title: "Process And Export",
-                body: "Render the finished MP4 and drop it into OBS, your stream deck, Discord, or whatever tool needs the final file.",
-                features: [
-                    "Stream Alert, Shorts, Discord, and higher-quality export presets",
-                    "Saves to your configured output folder",
-                    "Built for fast turnarounds, not a multi-clip timeline",
-                ],
-                isLast: true,
-                doneLabel: "Open Alert Creator",
-            },
-        ],
         reel: [
-            SHARED_ONBOARDING_START_STEP,
             {
                 title: "Video Editor Is The Twitch VOD Workflow",
                 body: "Use it when a stream session needs to turn into many deliverables: imported clips, polished shorts, captions, and a longform follow-up.",
@@ -1069,13 +1014,8 @@ const App = (() => {
     }
 
     function skipOnboarding() {
-        const flow = ONBOARDING_FLOWS[onboardingFlow];
-        const step = flow?.[onboardingStep];
         const overlay = $("onboarding-overlay");
         if (overlay) overlay.classList.add("hidden");
-        if (step?.isChooserStep) {
-            localStorage.setItem(ONBOARDING_INTRO_DONE_KEY, "1");
-        }
         markOnboardingDone(onboardingFlow);
         onboardingFlow = null;
     }
@@ -1107,47 +1047,29 @@ const App = (() => {
     }
 
     function restartOnboarding() {
-        const isReel = $("mode-reel-btn")?.classList.contains("active");
-        const mode = isReel ? "reel" : "alert";
         setPanelOpen("dependency-settings-panel", false);
-        showOnboarding(mode, { step: 0 });
+        showOnboarding("reel", { step: 0 });
     }
 
     function checkOnboardingForMode(mode) {
         if (onboardingFlow) return;
         if (!localStorage.getItem(`onboarding_${mode}_done`)) {
-            const introDone = !!localStorage.getItem(ONBOARDING_INTRO_DONE_KEY);
-            showOnboarding(mode, { step: introDone ? 1 : 0 });
+            showOnboarding(mode, { step: 0 });
         }
-    }
-
-    function chooseOnboardingMode(mode) {
-        if (!ONBOARDING_FLOWS[mode]) return;
-        localStorage.setItem(ONBOARDING_INTRO_DONE_KEY, "1");
-        if (typeof switchMode === "function") {
-            switchMode(mode);
-        }
-        showOnboarding(mode, { step: 1 });
     }
 
     function renderOnboardingStep() {
         const flow = ONBOARDING_FLOWS[onboardingFlow];
         if (!flow) return;
         const step = flow[onboardingStep];
-        const hasChooserStep = Boolean(flow[0]?.isChooserStep);
-        const showingChooser = Boolean(step?.isChooserStep);
-        const total = hasChooserStep && !showingChooser ? flow.length - 1 : flow.length;
-        const current = hasChooserStep && !showingChooser ? onboardingStep : onboardingStep + 1;
+        const total = flow.length;
+        const current = onboardingStep + 1;
 
         const progressFill = $("onboarding-progress-fill");
         if (progressFill) progressFill.style.width = `${(current / total) * 100}%`;
 
         const stepLabel = $("onboarding-step-label");
-        if (stepLabel) {
-            stepLabel.textContent = showingChooser
-                ? "Choose your starting tool"
-                : `Step ${current} of ${total}`;
-        }
+        if (stepLabel) stepLabel.textContent = `Step ${current} of ${total}`;
 
         const icon = $("onboarding-icon");
         if (icon) {
@@ -1164,9 +1086,7 @@ const App = (() => {
 
         const contentArea = $("onboarding-content-area");
         if (contentArea) {
-            if (step.isChooserStep) {
-                contentArea.innerHTML = buildOnboardingChooserHtml(onboardingFlow);
-            } else if (step.isRuntimeStep) {
+            if (step.isRuntimeStep) {
                 contentArea.innerHTML = buildOnboardingRuntimeHtml();
             } else if (step.isDepsStep) {
                 contentArea.innerHTML = buildOnboardingDepsHtml();
@@ -1184,59 +1104,9 @@ const App = (() => {
 
         const nextBtn = $("onboarding-next-btn");
         if (nextBtn) {
-            nextBtn.disabled = Boolean(step.isChooserStep);
-            nextBtn.textContent = step.isChooserStep
-                ? "Choose a Tool Below"
-                : (step.isLast ? (step.doneLabel || "Done") : "Next");
+            nextBtn.disabled = false;
+            nextBtn.textContent = step.isLast ? (step.doneLabel || "Done") : "Next";
         }
-    }
-
-    function buildOnboardingChooserHtml(currentFlow) {
-        const cards = [
-            {
-                mode: "alert",
-                kicker: "Fast Utility Tool",
-                title: "Alert Creator",
-                body: "The single-source utility for quick downloads, audio swaps, level cleanup, and fast exports.",
-                features: [
-                    "Download one source from a URL or local file",
-                    "Replace audio, trim it, and normalize the final level",
-                    "Great for alerts, overlays, Discord clips, and quick promo exports",
-                ],
-            },
-            {
-                mode: "reel",
-                kicker: "Twitch VOD Workflow",
-                title: "Video Editor",
-                body: "The stream-session workflow for turning a Twitch VOD into an inbox, a stack of shorts, and a later longform cut.",
-                features: [
-                    "Pull connected Twitch VODs, markers, and viewer clips",
-                    "Prep shorts, stitch sequences, and run captions in one project",
-                    "Best when one stream needs many deliverables instead of one quick export",
-                ],
-            },
-        ];
-
-        return `<div class="onboarding-tool-grid">${
-            cards.map((card) => `
-                <div class="onboarding-tool-card ${card.mode === currentFlow ? "active" : ""}">
-                    <div class="onboarding-tool-kicker">${escapeHtml(card.kicker)}</div>
-                    <h3 class="onboarding-tool-title">${escapeHtml(card.title)}</h3>
-                    <p class="onboarding-tool-body">${escapeHtml(card.body)}</p>
-                    <div class="onboarding-features onboarding-tool-list">${
-                        card.features.map((feature) => `
-                            <div class="onboarding-feature">
-                                <div class="onboarding-feature-dot"></div>
-                                <span>${escapeHtml(feature)}</span>
-                            </div>
-                        `).join("")
-                    }</div>
-                    <button class="onboarding-install-btn onboarding-tool-start" onclick="App.chooseOnboardingMode('${card.mode}')">
-                        ${card.mode === currentFlow ? "Start Here" : `Start with ${escapeHtml(card.title)}`}
-                    </button>
-                </div>
-            `).join("")
-        }</div>`;
     }
 
     function buildOnboardingRuntimeHtml() {
@@ -1447,11 +1317,6 @@ const App = (() => {
                             <dt>Shift + ← →</dt><dd>Step 5 seconds</dd>
                             <dt>L</dt><dd>Toggle Loop</dd>
                         </dl>
-                        <p class="shortcut-section">Alert Creator</p>
-                        <dl>
-                            <dt>I</dt><dd>Set Trim In</dd>
-                            <dt>O</dt><dd>Set Trim Out</dd>
-                        </dl>
                     </div>
                     <div>
                         <p class="shortcut-section">Caption Editor</p>
@@ -1499,9 +1364,8 @@ const App = (() => {
                 }
             }
 
-            // Show onboarding for first-time alert mode users (after deps settle)
             if (!shouldOfferAutoInstall || consent) {
-                checkOnboardingForMode("alert");
+                checkOnboardingForMode("reel");
             }
         } catch (e) {
             // Server not running - show connection error
@@ -2901,7 +2765,6 @@ const App = (() => {
         skipOnboarding,
         restartOnboarding,
         checkOnboardingForMode,
-        chooseOnboardingMode,
         onboardingInstallCaptioning,
         onboardingInstallRuntime,
         chooseOutputFolder,
