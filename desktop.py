@@ -239,9 +239,14 @@ class DesktopWindow(QMainWindow):
 
         reload_action = QAction("Reload App", self)
         reload_action.setShortcut(QKeySequence("F5"))
-        reload_action.setStatusTip("Reload the app UI")
-        reload_action.triggered.connect(self.view.reload)
+        reload_action.setStatusTip("Reload the Clipline UI (always returns to localhost)")
+        reload_action.triggered.connect(self.load_app)
         app_menu.addAction(reload_action)
+
+        open_log_action = QAction("Open Log Folder", self)
+        open_log_action.setStatusTip(f"Open {LOG_PATH.parent} (where desktop.log is written)")
+        open_log_action.triggered.connect(lambda: os.startfile(str(LOG_PATH.parent)))
+        app_menu.addAction(open_log_action)
 
         open_browser = QAction("Open in Browser", self)
         open_browser.setShortcut(QKeySequence("Ctrl+Shift+B"))
