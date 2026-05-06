@@ -637,10 +637,13 @@ class DesktopWindow(QMainWindow):
             log.info("Webview is on non-local host: %s (%s)", host, full_url)
 
     def _on_loaded(self, ok):
+        current_url = self.view.url().toString()
         if ok:
+            log.info("Page load succeeded: %s", current_url)
             self.statusBar().showMessage("Ready", 3000)
         else:
-            self.statusBar().showMessage("Failed to load app UI.")
+            log.error("Page load failed: %s", current_url)
+            self.statusBar().showMessage(f"Failed to load: {current_url}")
 
     def handle_download_requested(self, download: QWebEngineDownloadRequest):
         suggested_name = download.downloadFileName() or "clipline-download.bin"
