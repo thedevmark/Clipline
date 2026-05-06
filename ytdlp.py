@@ -1,16 +1,4 @@
-# Vendored from alert-alert.
-# Source: https://github.com/thedeutschmark/alert-alert
-# Branch:  refactor/ytdlp-extract
-# SHA:     f378150099001359a4d92dcd67faa1c7f4e2fc26
-#
-# Clipline is a fork of alert-alert and shares this yt-dlp scaffolding.
-# Keep this file in sync with alert-alert/ytdlp.py until the two trees diverge.
-
-"""yt-dlp profile builder, retry-loop runner, and stderr classification helpers.
-
-Single source of truth for the duplicated download scaffolding that previously
-lived in both ``app.py`` (audio) and ``alert.py`` (video).
-"""
+"""yt-dlp profile builder, retry-loop runner, and stderr classification helpers."""
 
 from typing import Callable, List, Literal, Optional, Sequence, Tuple
 
@@ -64,9 +52,8 @@ def looks_like_age_restricted_issue(stderr_text: str) -> bool:
 
 # ── Profile builder ────────────────────────────────────────────────
 
-# Per-media-kind constants. Names are user-visible (alert.py surfaces video
-# profile names in the job stage string) so they MUST stay byte-identical to
-# what was previously hardcoded in app.py / alert.py.
+# Per-media-kind constants. Names are user-visible — they surface in the job
+# stage string — so they MUST stay byte-identical across the audio/video paths.
 _AUDIO_NAMES = {
     "web": "web client",
     "android": "android client",
@@ -239,8 +226,8 @@ def run_ytdlp_with_retries(
             ``on_attempt(attempt_idx, total_attempts, profile, use_sections)``.
             Used by the video pipeline to update job progress + stage.
         clean_first_attempt: If False, skip the stale-file cleanup on the
-            very first attempt. Matches alert.py's video loop, which only
-            cleans on ``attempt_idx > 1``. Audio uses True (clean every time).
+            very first attempt. The video loop only cleans on
+            ``attempt_idx > 1``. Audio uses True (clean every time).
     """
     total_attempts = len(section_modes) * len(profiles)
     attempt_idx = 0

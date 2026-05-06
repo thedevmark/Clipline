@@ -1,6 +1,6 @@
 # Clipline
 
-**Streamer-focused video editor.** Turn stream VOD moments into shortform clips, transcribe captions, build longform derivatives, and export. Extracted from `alert-alert` so the editor can evolve independently of the alert tool.
+**Streamer-focused video editor.** Turn stream VOD moments into shortform clips, transcribe captions, build longform derivatives, and export.
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)
 ![Flask](https://img.shields.io/badge/Flask-Backend-green?logo=flask&logoColor=white)
