@@ -1127,19 +1127,6 @@
     <script src="/static/js/auth.js"></script>
     <script src="/static/js/reel.js"></script>
     <script src="/static/js/caption-editor.js"></script>
-    <script>
-        // Clipline is single-mode (video editor). The legacy switchMode helper
-        // is kept as a stub so any callers in app.js do not throw, and we make
-        // sure the reel workflow is visible on load.
-        function switchMode(_mode) {
-            const reelWorkflow = document.getElementById('reel-workflow');
-            if (reelWorkflow) reelWorkflow.classList.remove('hidden');
-            if (typeof App !== "undefined" && typeof App.checkOnboardingForMode === "function") {
-                App.checkOnboardingForMode("reel");
-            }
-        }
-        document.addEventListener("DOMContentLoaded", () => switchMode("reel"));
-    </script>
 </body>
 
 </html>

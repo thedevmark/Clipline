@@ -493,7 +493,6 @@ class DesktopWindow(QMainWindow):
 
         script = f"""
 (() => {{
-    if (typeof switchMode === 'function') switchMode('reel');
     const run = () => {{
         try {{
             {focus_script}
