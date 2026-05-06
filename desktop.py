@@ -1,20 +1,34 @@
+import logging
 import os
 import sys
 import threading
 import time
+import traceback
 import webbrowser
 from http.client import HTTPConnection, HTTPException
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from PySide6.QtCore import QTimer, QUrl, Qt
 from PySide6.QtGui import QAction, QIcon, QKeySequence
-from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox, QStatusBar
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QStatusBar,
+    QVBoxLayout,
+    QWidget,
+)
 from PySide6.QtWebEngineCore import QWebEngineDownloadRequest, QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
-from app import DEFAULT_APP_PORT, INTERNAL_DIR, find_available_port, get_output_dir, start_server
+from app import APP_STATE_DIR, DEFAULT_APP_PORT, INTERNAL_DIR, find_available_port, get_output_dir, start_server
 
 
 APP_TITLE = "Clipline"
@@ -22,7 +36,30 @@ APP_TITLE = "Clipline"
 APP_HOST = "localhost"
 APP_PORT = find_available_port(APP_HOST, DEFAULT_APP_PORT)
 APP_URL = f"http://{APP_HOST}:{APP_PORT}"
-INTERNAL_NAV_HOSTS = {APP_HOST, "", "localhost", "auth.deutschmark.online", "id.twitch.tv", "passport.twitch.tv"}
+LOCAL_NAV_HOSTS = {APP_HOST, "", "localhost", "127.0.0.1"}
+EXTERNAL_NAV_HOSTS = {"auth.deutschmark.online", "id.twitch.tv", "passport.twitch.tv"}
+INTERNAL_NAV_HOSTS = LOCAL_NAV_HOSTS | EXTERNAL_NAV_HOSTS
+
+LOG_PATH = APP_STATE_DIR / "desktop.log"
+log = logging.getLogger("clipline.desktop")
+
+
+def configure_logging():
+    """Always log to a file under APP_STATE_DIR so failures aren't silent in console=False builds."""
+    APP_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(LOG_PATH, maxBytes=512_000, backupCount=2, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    if not any(isinstance(h, RotatingFileHandler) and getattr(h, "baseFilename", "") == str(LOG_PATH)
+               for h in root.handlers):
+        root.addHandler(handler)
+    if sys.stderr is not None:
+        stream_handler = logging.StreamHandler(sys.stderr)
+        stream_handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, RotatingFileHandler)
+                   for h in root.handlers):
+            root.addHandler(stream_handler)
 
 
 def wait_for_server(timeout_seconds=60):
@@ -61,11 +98,23 @@ class QThreadSleeper:
 
 
 class DesktopPage(QWebEnginePage):
+    def __init__(self, parent=None, on_navigation=None):
+        super().__init__(parent)
+        self._on_navigation = on_navigation
+
     def acceptNavigationRequest(self, url, nav_type, is_main_frame):
-        if url.host() not in INTERNAL_NAV_HOSTS and url.scheme() in {"http", "https"}:
+        host = url.host()
+        scheme = url.scheme()
+        if host not in INTERNAL_NAV_HOSTS and scheme in {"http", "https"}:
+            log.info("External navigation deflected to system browser: %s", url.toString())
             webbrowser.open(url.toString())
             return False
+        if is_main_frame and self._on_navigation and scheme in {"http", "https"}:
+            self._on_navigation(host, url.toString())
         return super().acceptNavigationRequest(url, nav_type, is_main_frame)
+
+    def javaScriptConsoleMessage(self, level, message, line, source):
+        log.warning("[webview] %s:%s %s", source or "<inline>", line, message)
 
 
 class DesktopWindow(QMainWindow):
@@ -78,13 +127,34 @@ class DesktopWindow(QMainWindow):
             self.setWindowIcon(QIcon(str(icon_path)))
 
         self.view = QWebEngineView(self)
-        self.page = DesktopPage(self.view)
+        self.page = DesktopPage(self.view, on_navigation=self._on_navigation)
         self.view.setPage(self.page)
-        self.setCentralWidget(self.view)
+
+        self.away_banner = QWidget(self)
+        banner_layout = QHBoxLayout(self.away_banner)
+        banner_layout.setContentsMargins(12, 6, 12, 6)
+        self.away_banner_label = QLabel("Webview navigated away from Clipline.")
+        self.away_banner_label.setStyleSheet("color: #1a1a1a;")
+        banner_layout.addWidget(self.away_banner_label, 1)
+        return_btn = QPushButton("← Back to Clipline")
+        return_btn.clicked.connect(self.load_app)
+        banner_layout.addWidget(return_btn)
+        self.away_banner.setStyleSheet("background-color: #ffd668;")
+        self.away_banner.hide()
+
+        container = QWidget(self)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.away_banner)
+        layout.addWidget(self.view, 1)
+        self.setCentralWidget(container)
+
         self._build_menubar()
         self._build_statusbar()
         self.view.page().profile().downloadRequested.connect(self.handle_download_requested)
         self.view.loadFinished.connect(self._on_loaded)
+        self._current_host = ""
 
     def _build_menubar(self):
         mb = self.menuBar()
@@ -551,7 +621,20 @@ class DesktopWindow(QMainWindow):
         self.setStatusBar(status)
 
     def load_app(self):
+        log.info("Loading app URL: %s", APP_URL)
+        self.away_banner.hide()
         self.view.setUrl(QUrl(APP_URL))
+
+    def _on_navigation(self, host, full_url):
+        self._current_host = host
+        is_local = host in LOCAL_NAV_HOSTS
+        self.away_banner.setVisible(not is_local)
+        if not is_local:
+            short = host or "external page"
+            self.away_banner_label.setText(
+                f"You're on {short}. Menu actions that need Clipline won't work here."
+            )
+            log.info("Webview is on non-local host: %s (%s)", host, full_url)
 
     def _on_loaded(self, ok):
         if ok:
@@ -591,11 +674,24 @@ class DesktopWindow(QMainWindow):
         event.accept()
 
 
+SERVER_CRASH = {"error": ""}
+
+
 def launch_server():
-    start_server(host=APP_HOST, port=APP_PORT, open_browser=False)
+    log.info("Starting Flask server on %s:%s", APP_HOST, APP_PORT)
+    try:
+        start_server(host=APP_HOST, port=APP_PORT, open_browser=False)
+    except Exception as e:
+        tb = traceback.format_exc()
+        SERVER_CRASH["error"] = f"{type(e).__name__}: {e}"
+        log.exception("Flask server thread crashed: %s", e)
+        sys.stderr.write(tb)
 
 
 def main():
+    configure_logging()
+    log.info("Clipline starting. log=%s app_url=%s", LOG_PATH, APP_URL)
+
     qt_app = QApplication(sys.argv)
     qt_app.setApplicationName(APP_TITLE)
     qt_app.setOrganizationName("deutschmark")
@@ -607,12 +703,17 @@ def main():
     window.show()
 
     if wait_for_server():
+        log.info("Server health check passed. Loading webview.")
         window.load_app()
     else:
+        crash_detail = SERVER_CRASH["error"] or "No crash recorded — server is just slow or blocked."
+        log.error("Server did not pass health check in time. Detail: %s", crash_detail)
         QMessageBox.critical(
             window,
             "Startup Failed",
-            "The local app server did not start in time. Check the console output for details.",
+            f"The local app server did not start in time.\n\n"
+            f"Detail: {crash_detail}\n\n"
+            f"Full log: {LOG_PATH}",
         )
         return 1
 
