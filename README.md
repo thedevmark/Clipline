@@ -8,7 +8,7 @@
   <img src="https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white">
   <img src="https://img.shields.io/badge/FFmpeg-Powered-orange?logo=ffmpeg&logoColor=white">
   <img src="https://img.shields.io/badge/faster--whisper-captions-5fb0c8">
-  <img src="https://img.shields.io/badge/License-MIT-yellow">
+  <img src="https://img.shields.io/badge/License-AGPL_v3-blue">
 </p>
 
 ---
@@ -98,4 +98,4 @@ Clipline stores its settings, runtime tools, and captioning virtualenv in:
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+AGPL-3.0 — see [LICENSE](LICENSE).
