@@ -71,3 +71,6 @@ output/*
 build/
 dist/
 .superpowers/
+
+# Regenerable native-PoC test clip
+native/poc_sample.mp4
