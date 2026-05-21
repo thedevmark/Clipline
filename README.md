@@ -84,18 +84,17 @@ Clipline stores its settings, runtime tools, and captioning virtualenv in:
 
 ---
 
-## You might also like
+## deutschmark's other apps
 
-Part of the [deutschmark](https://github.com/thedeutschmark) stream toolset — tools built to work together:
+<table>
+<tr><td><img src=".github/apps/alert-alert.svg" width="34"></td><td><b><a href="https://github.com/thedeutschmark/alert-alert">Alert! Alert!</a></b><br>Stream-alert clips from any video source.</td></tr>
+<tr><td><img src=".github/apps/toolset.svg" width="34"></td><td><b><a href="https://toolset.deutschmark.online">The Stream Toolset</a></b><br>OBS overlays + companion apps. One login, no subscriptions.</td></tr>
+<tr><td><img src=".github/apps/forgetmenot.png" width="34"></td><td><b><a href="https://github.com/thedeutschmark/forgetmenot">ForgetMeNot</a></b><br>A Twitch chat bot that remembers your regulars.</td></tr>
+<tr><td><img src=".github/apps/collab.svg" width="34"></td><td><b><a href="https://collab.deutschmark.online">Collab Planner</a></b><br>Finds collab windows from streamers' broadcast history.</td></tr>
+<tr><td><img src=".github/apps/pathos.svg" width="34"></td><td><b><a href="https://yourpathos.app">P.A.T.H.O.S.</a></b><br>AI career platform — resume tailoring + ATS scoring.</td></tr>
+</table>
 
-| Tool | What it is |
-| --- | --- |
-| **[The Stream Toolset](https://toolset.deutschmark.online)** | OBS overlays + companion apps. One login, no subscriptions. |
-| **[Alert! Alert!](https://github.com/thedeutschmark/alert-alert)** | Make clean stream-alert clips from any video source. |
-
-<sub>See everything → [github.com/thedeutschmark](https://github.com/thedeutschmark)</sub>
-
----
+<sub>All projects → <a href="https://github.com/thedeutschmark">github.com/thedeutschmark</a></sub>
 
 ## License
 
