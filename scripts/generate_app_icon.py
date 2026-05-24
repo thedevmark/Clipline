@@ -63,14 +63,21 @@ def main() -> None:
 
     (IMG_DIR / "logo.png").write_bytes(render_png(renderer, 1024))
 
-    frames = [
-        Image.open(io.BytesIO(render_png(renderer, size))).convert("RGBA")
-        for size in ICO_SIZES
-    ]
+    # Render each ICO frame from the SVG at its native size so Windows has a
+    # crisp image at every taskbar / Alt-Tab / file-explorer DPI bucket.
+    # Save the largest frame first; rely on append_images (NOT the `sizes`
+    # kwarg, which makes Pillow downscale a single frame and loses quality).
+    frames = sorted(
+        (
+            Image.open(io.BytesIO(render_png(renderer, size))).convert("RGBA")
+            for size in ICO_SIZES
+        ),
+        key=lambda im: im.size[0],
+        reverse=True,
+    )
     frames[0].save(
         STATIC_DIR / "favicon.ico",
         format="ICO",
-        sizes=[(s, s) for s in ICO_SIZES],
         append_images=frames[1:],
     )
 

@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PySide6.QtWebEngineCore import QWebEngineDownloadRequest, QWebEnginePage
+from PySide6.QtWebEngineCore import QWebEngineDownloadRequest, QWebEnginePage, QWebEngineProfile
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from app import APP_STATE_DIR, DEFAULT_APP_PORT, INTERNAL_DIR, find_available_port, get_output_dir, start_server
@@ -127,6 +127,12 @@ class DesktopWindow(QMainWindow):
             self.setWindowIcon(QIcon(str(icon_path)))
 
         self.view = QWebEngineView(self)
+        # Clear the disk cache on every launch so a newly installed EXE never
+        # serves stale assets (index.html / app.js / css) from the previous
+        # version's QtWebEngine cache. App assets are bundled and load
+        # locally, so the perf cost is zero.
+        profile = QWebEngineProfile.defaultProfile()
+        profile.clearHttpCache()
         self.page = DesktopPage(self.view, on_navigation=self._on_navigation)
         self.view.setPage(self.page)
 
