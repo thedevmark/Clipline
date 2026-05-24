@@ -57,6 +57,7 @@ output/*
 !static/**/*.png
 !static/**/*.gif
 !.github/apps/*.png
+!docs/**/*.png
 
 # Logs
 *.log
