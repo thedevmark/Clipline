@@ -1,13 +1,11 @@
-"""Native Clipline main window — Phase 0 skeleton.
+"""Main window for the native Clipline shell.
 
-Five-stage nav spine (Project / Ingest / Inbox / Shorts / Output) backed by a
-``QStackedWidget`` of placeholder widgets. Each stage gets fleshed out in a
-subsequent phase per ``native/MIGRATION_PLAN.md``. This file intentionally
-holds no styling — Phase 1 adds QSS and the polished menubar layout.
+Holds the menubar, the stage stack, the project state, the JobRunner that
+drives export work, and the status bar. Stage widgets are dumb — they emit
+``request_*`` signals; the window routes those to the worker and the model.
 
-The Phase 0 demo button on the Project stage runs ``ffmpeg_export`` on a
-QThread so we can confirm the full pipeline (UI → JobRunner → ffmpeg →
-output file) works end-to-end without the web stack.
+ALERT §7 reminder: do not gate any of the launch-time screens behind a
+QSettings flag. The Project stage greets every launch.
 """
 from __future__ import annotations
 
@@ -17,117 +15,28 @@ from typing import Optional
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QIcon, QKeySequence
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
-    QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QProgressBar,
-    QPushButton,
     QStackedWidget,
     QStatusBar,
-    QVBoxLayout,
-    QWidget,
 )
 
+from native.services.settings import get_output_dir
+from native.ui import theme
+from native.ui.project_state import Clip, ProjectState
+from native.ui.stages.ingest import IngestStage
+from native.ui.stages.inbox import InboxStage
+from native.ui.stages.placeholder import PlaceholderStage
+from native.ui.stages.project import ProjectStage
 from native.workers import JobRunner, ffmpeg_export
 
 
-STAGES = ("Project", "Ingest", "Inbox", "Shorts", "Output")
-
-
-class _ProjectStage(QWidget):
-    """Phase 0 stage: bare smoke test for the worker pipeline.
-
-    The other four stages get their real widgets in later phases. Project is
-    first because the funnel naturally starts here (open / new project) and
-    it's the right home for the size/integrity self-test button.
-    """
-
-    def __init__(
-        self,
-        runner: JobRunner,
-        ffmpeg: str,
-        ffprobe: str,
-        output_dir: Path,
-    ) -> None:
-        super().__init__()
-        self._runner = runner
-        self._ffmpeg = ffmpeg
-        self._ffprobe = ffprobe
-        self._output_dir = output_dir
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(48, 48, 48, 48)
-        layout.setSpacing(16)
-
-        title = QLabel("Clipline — Phase 0 skeleton")
-        title.setStyleSheet("font-size: 22px; font-weight: 600;")
-        layout.addWidget(title)
-
-        body = QLabel(
-            "Native shell is live. No Flask, no QtWebEngine. Use the button below "
-            "to push a sample clip through the worker pipeline end-to-end."
-        )
-        body.setWordWrap(True)
-        body.setFixedWidth(640)  # ALERT §4: constrain wrapping labels or text clips.
-        layout.addWidget(body)
-
-        actions = QHBoxLayout()
-        self._pick_btn = QPushButton("Run sample export…")
-        self._pick_btn.clicked.connect(self._on_run_export_clicked)
-        actions.addWidget(self._pick_btn)
-        actions.addStretch(1)
-        layout.addLayout(actions)
-
-        self._status = QLabel("Idle.")
-        layout.addWidget(self._status)
-
-        self._progress = QProgressBar()
-        self._progress.setRange(0, 100)
-        self._progress.setValue(0)
-        layout.addWidget(self._progress)
-
-        layout.addStretch(1)
-
-    def _on_run_export_clicked(self) -> None:
-        path_str, _ = QFileDialog.getOpenFileName(
-            self, "Pick a clip to re-encode", "", "Video files (*.mp4 *.mov *.mkv *.webm)"
-        )
-        if not path_str:
-            return
-        source = Path(path_str)
-        output = self._output_dir / f"phase0-{source.stem}.mp4"
-        self._pick_btn.setEnabled(False)
-        self._status.setText(f"Exporting → {output.name}")
-        self._progress.setValue(0)
-        self._runner.run(
-            ffmpeg_export,
-            self._ffmpeg,
-            self._ffprobe,
-            source,
-            output,
-            on_progress=self._status.setText,
-            on_progress_pct=lambda pct: self._progress.setValue(int(pct * 100)),
-            on_finished=self._on_finished,
-            on_error=self._on_error,
-        )
-
-    def _on_finished(self, result: object) -> None:
-        self._pick_btn.setEnabled(True)
-        self._status.setText(f"Wrote {result}")
-
-    def _on_error(self, message: str) -> None:
-        self._pick_btn.setEnabled(True)
-        self._status.setText(f"Failed: {message}")
-
-
-class _PlaceholderStage(QWidget):
-    def __init__(self, name: str) -> None:
-        super().__init__()
-        layout = QVBoxLayout(self)
-        label = QLabel(f"{name} — fills in during Phase {STAGES.index(name) + 1}.")
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(label)
+STAGE_PROJECT, STAGE_INGEST, STAGE_INBOX, STAGE_SHORTS, STAGE_OUTPUT = range(5)
+STAGE_NAMES = ("Project", "Ingest", "Inbox", "Shorts", "Output")
 
 
 class MainWindow(QMainWindow):
@@ -142,29 +51,214 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Clipline")
         self.setMinimumSize(1280, 800)
-        if icon_path is not None and icon_path.exists():
+        self.resize(1440, 900)
+        if icon_path is not None and Path(icon_path).exists():
             self.setWindowIcon(QIcon(str(icon_path)))
 
+        self._runner = runner
+        self._ffmpeg = ffmpeg
+        self._ffprobe = ffprobe
+        self._output_dir = output_dir
+        self._icon_path = icon_path
+        self._state = ProjectState()
+
+        self.setStyleSheet(theme.GLOBAL_QSS)
+
+        # ---- Stages -----------------------------------------------------
         self._stack = QStackedWidget(self)
-        self._stack.addWidget(_ProjectStage(runner, ffmpeg, ffprobe, output_dir))
-        for name in STAGES[1:]:
-            self._stack.addWidget(_PlaceholderStage(name))
+        self._project_stage = ProjectStage(
+            on_open_local=self._open_local_via_dialog,
+            on_start_session=lambda: self._set_stage(STAGE_INGEST),
+            icon_path=icon_path,
+        )
+        self._ingest_stage = IngestStage(self._state)
+        self._ingest_stage.request_export.connect(self._export_marked_range)
+        self._inbox_stage = InboxStage(self._state)
+        self._inbox_stage.request_export_clip.connect(self._export_clip)
+        self._inbox_stage.request_remove_clip.connect(self._state.remove_clip)
+
+        self._stack.addWidget(self._project_stage)
+        self._stack.addWidget(self._ingest_stage)
+        self._stack.addWidget(self._inbox_stage)
+        self._stack.addWidget(
+            PlaceholderStage(
+                "Shorts",
+                "Caption + preset polish lands in Phase 4 of native/MIGRATION_PLAN.md. "
+                "Run a caption pass over the inbox, pick a Gameplay Focus / Facecam Top / "
+                "Baked Text Punch preset, then move on to Output.",
+            )
+        )
+        self._stack.addWidget(
+            PlaceholderStage(
+                "Output",
+                "Shorts render + the longform-from-shorts hero pivot lands in Phase 5. "
+                "Until then, render single clips from the Inbox stage to confirm the worker "
+                "pipeline.",
+            )
+        )
+
         self.setCentralWidget(self._stack)
 
+        # ---- Status bar ------------------------------------------------
         self.setStatusBar(QStatusBar(self))
-        self.statusBar().showMessage("Ready")
+        self._stage_label = QLabel("Project")
+        self._source_label = QLabel("No source loaded")
+        self._source_label.setProperty("hint", True)
+        self._jobs_label = QLabel("")
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 100)
+        self._progress.setVisible(False)
+        self._progress.setMaximumWidth(200)
+        self.statusBar().addWidget(self._stage_label)
+        self.statusBar().addWidget(self._source_label, 1)
+        self.statusBar().addPermanentWidget(self._jobs_label)
+        self.statusBar().addPermanentWidget(self._progress)
+
+        self._state.source_changed.connect(self._on_source_changed)
 
         self._build_menubar()
-        self._set_stage(0)
+        self._set_stage(STAGE_PROJECT)
+
+    # ────────────────────────────────────────────────────────────────────
+    # Menubar
+    # ────────────────────────────────────────────────────────────────────
 
     def _build_menubar(self) -> None:
-        menubar = self.menuBar()
-        for index, name in enumerate(STAGES):
+        bar = self.menuBar()
+
+        file_menu = bar.addMenu("File")
+        new_action = QAction("New Project", self)
+        new_action.setShortcut(QKeySequence.StandardKey.New)
+        new_action.triggered.connect(self._new_project)
+        file_menu.addAction(new_action)
+
+        open_action = QAction("Open Local Video…", self)
+        open_action.setShortcut(QKeySequence.StandardKey.Open)
+        open_action.triggered.connect(self._open_local_via_dialog)
+        file_menu.addAction(open_action)
+
+        file_menu.addSeparator()
+        reveal = QAction("Reveal Output Folder", self)
+        reveal.triggered.connect(self._reveal_output)
+        file_menu.addAction(reveal)
+
+        file_menu.addSeparator()
+        quit_action = QAction("Quit", self)
+        quit_action.setShortcut(QKeySequence.StandardKey.Quit)
+        quit_action.triggered.connect(QApplication.quit)
+        file_menu.addAction(quit_action)
+
+        stage_menu = bar.addMenu("Stage")
+        for index, name in enumerate(STAGE_NAMES):
             action = QAction(name, self)
             action.setShortcut(QKeySequence(f"Ctrl+{index + 1}"))
             action.triggered.connect(lambda _checked=False, idx=index: self._set_stage(idx))
-            menubar.addAction(action)
+            stage_menu.addAction(action)
+
+        help_menu = bar.addMenu("Help")
+        about = QAction("About Clipline", self)
+        about.triggered.connect(self._show_about)
+        help_menu.addAction(about)
+
+    # ────────────────────────────────────────────────────────────────────
+    # Stage routing
+    # ────────────────────────────────────────────────────────────────────
 
     def _set_stage(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
-        self.statusBar().showMessage(f"Stage: {STAGES[index]}")
+        self._stage_label.setText(STAGE_NAMES[index])
+
+    # ────────────────────────────────────────────────────────────────────
+    # File / source actions
+    # ────────────────────────────────────────────────────────────────────
+
+    def _new_project(self) -> None:
+        self._state.set_source(None)
+        for i in range(len(self._state.clips), 0, -1):
+            self._state.remove_clip(i - 1)
+        self._set_stage(STAGE_PROJECT)
+
+    def _open_local_via_dialog(self) -> None:
+        self._ingest_stage.open_local_file_dialog()
+        if self._state.source is not None:
+            self._set_stage(STAGE_INGEST)
+
+    def _reveal_output(self) -> None:
+        path = self._output_dir
+        path.mkdir(parents=True, exist_ok=True)
+        try:
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        except Exception as exc:
+            QMessageBox.warning(self, "Reveal failed", f"Could not open: {exc}")
+
+    def _on_source_changed(self, path) -> None:
+        if path is None:
+            self._source_label.setText("No source loaded")
+        else:
+            self._source_label.setText(f"Source: {path}")
+
+    # ────────────────────────────────────────────────────────────────────
+    # Worker dispatch
+    # ────────────────────────────────────────────────────────────────────
+
+    def _export_marked_range(self, start_ms: int, end_ms: int) -> None:
+        if self._state.source is None:
+            return
+        clip = Clip(title="Marked range", start_ms=start_ms, end_ms=end_ms)
+        self._export_clip(clip)
+
+    def _export_clip(self, clip: Clip) -> None:
+        source = self._state.source
+        if source is None:
+            return
+        out_name = f"{source.stem}-{clip.title.replace(' ', '_')}-{clip.start_ms}.mp4"
+        output = self._output_dir / out_name
+        self._progress.setVisible(True)
+        self._progress.setValue(0)
+        self._jobs_label.setText(f"Rendering {clip.title}…")
+        extra = [
+            "-ss", f"{clip.start_ms / 1000:.3f}",
+            "-to", f"{clip.end_ms / 1000:.3f}",
+            "-c:v", "libx264",
+            "-c:a", "aac",
+            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-pix_fmt", "yuv420p",
+        ]
+        self._runner.run(
+            ffmpeg_export,
+            self._ffmpeg,
+            self._ffprobe,
+            source,
+            output,
+            extra,
+            on_progress=lambda msg: self._jobs_label.setText(msg),
+            on_progress_pct=lambda pct: self._progress.setValue(int(pct * 100)),
+            on_finished=self._on_render_finished,
+            on_error=self._on_render_error,
+        )
+
+    def _on_render_finished(self, result: object) -> None:
+        self._progress.setValue(100)
+        self._jobs_label.setText(f"Wrote {Path(str(result)).name}")
+        # Hide the progress bar after a brief delay so the 100% reads.
+        self._progress.setVisible(False)
+
+    def _on_render_error(self, message: str) -> None:
+        self._progress.setVisible(False)
+        self._jobs_label.setText("Render failed")
+        QMessageBox.warning(self, "Render failed", message)
+
+    # ────────────────────────────────────────────────────────────────────
+    # Help
+    # ────────────────────────────────────────────────────────────────────
+
+    def _show_about(self) -> None:
+        QMessageBox.information(
+            self,
+            "About Clipline",
+            "Clipline — native PySide6 video editor for streamers.\n\n"
+            "Phase 2 native build. See native/MIGRATION_PLAN.md for the phased plan.",
+        )
