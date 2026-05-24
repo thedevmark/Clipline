@@ -182,74 +182,37 @@ def _draw_step_row(
     draw: ImageDraw.ImageDraw,
     y: int,
     steps: list[tuple[str, str]],
-    num_font: ImageFont.FreeTypeFont,
-    label_font: ImageFont.FreeTypeFont,
+    font: ImageFont.FreeTypeFont,
 ) -> int:
-    """Render ``1 Ingest   2 Cut   3 Caption   4 Ship`` style row, centered."""
+    """Render ``1 Ingest   2 Cut   3 Caption   4 Ship``, centered, single baseline.
+
+    Number and label use the **same font and size** so digit bboxes and word
+    bboxes have matching ascent/descent — earlier versions used semibold-50
+    for digits and regular-48 for labels and the numbers sat visibly above
+    the words. Color is what carries the visual emphasis on the number now,
+    not weight.
+    """
     gap_between_items = 96
     gap_num_label = 18
+    ascent, descent = font.getmetrics()
+    row_h = ascent + descent
 
-    # Measure first to compute centering.
-    widths = []
-    heights = []
+    widths: list[int] = []
     for num, label in steps:
-        nb = draw.textbbox((0, 0), num, font=num_font)
-        lb = draw.textbbox((0, 0), label, font=label_font)
-        nw, nh = nb[2] - nb[0], nb[3] - nb[1]
-        lw, lh = lb[2] - lb[0], lb[3] - lb[1]
-        widths.append(nw + gap_num_label + lw)
-        heights.append(max(nh, lh))
+        nw = draw.textlength(num, font=font)
+        lw = draw.textlength(label, font=font)
+        widths.append(int(nw + gap_num_label + lw))
 
     total = sum(widths) + gap_between_items * (len(steps) - 1)
     x = CENTER_X - total // 2
-    row_h = max(heights)
 
     for (num, label), w in zip(steps, widths):
-        nb = draw.textbbox((0, 0), num, font=num_font)
-        nh = nb[3] - nb[1]
-        # Vertically align number and label to the same baseline by tweaking
-        # the y of the smaller piece.
-        draw.text((x, y + (row_h - nh) // 2), num, font=num_font, fill=ACCENT)
-        nw = nb[2] - nb[0]
-        lb = draw.textbbox((0, 0), label, font=label_font)
-        lh = lb[3] - lb[1]
-        draw.text(
-            (x + nw + gap_num_label, y + (row_h - lh) // 2),
-            label,
-            font=label_font,
-            fill=INK_MUTED,
-        )
+        # ``anchor="lt"`` (the default) measures from the top of the line box,
+        # so both glyphs share the same baseline at ``y + ascent``.
+        nw = draw.textlength(num, font=font)
+        draw.text((x, y), num, font=font, fill=ACCENT)
+        draw.text((x + nw + gap_num_label, y), label, font=font, fill=INK_MUTED)
         x += w + gap_between_items
-    return y + row_h
-
-
-def _draw_feature_tags(
-    draw: ImageDraw.ImageDraw,
-    y: int,
-    tags: list[str],
-    font: ImageFont.FreeTypeFont,
-) -> int:
-    sep = "   ·   "
-    pieces: list[tuple[str, tuple[int, int, int]]] = []
-    for i, tag in enumerate(tags):
-        if i > 0:
-            # Separator in the same accent as the tags so it reads as one
-            # unified row (alert-alert uses the same orange for both).
-            pieces.append((sep, ACCENT))
-        pieces.append((tag, ACCENT))
-    total = 0
-    heights = []
-    for text, _ in pieces:
-        bbox = draw.textbbox((0, 0), text, font=font)
-        total += bbox[2] - bbox[0]
-        heights.append(bbox[3] - bbox[1])
-    x = CENTER_X - total // 2
-    row_h = max(heights)
-    for text, color in pieces:
-        bbox = draw.textbbox((0, 0), text, font=font)
-        h = bbox[3] - bbox[1]
-        draw.text((x, y + (row_h - h) // 2), text, font=font, fill=color)
-        x += bbox[2] - bbox[0]
     return y + row_h
 
 
@@ -267,15 +230,12 @@ def main() -> None:
     icon_size = 220
     head_font = _font_bold(140)
     sub_font = _font_regular(46)
-    step_num_font = _font_semibold(50)
-    step_label_font = _font_regular(48)
-    tag_font = _font_regular(32)
+    step_font = _font_semibold(50)  # single font for numbers + labels
 
     head_text = "Clipline"
     sub_line1 = "Turn livestream VOD moments into shortform clips."
-    sub_line2 = "Batch crop, auto-caption, ship. One stream becomes a tray of shorts."
+    sub_line2 = "Native preview, mark in/out, one-click longform stitch."
     steps = [("1", "Ingest"), ("2", "Cut"), ("3", "Caption"), ("4", "Ship")]
-    tags = ["Twitch VOD import", "Auto captions", "Longform builder"]
 
     canvas_img = bg.convert("RGBA")
     draw = ImageDraw.Draw(canvas_img)
@@ -284,21 +244,19 @@ def main() -> None:
     _, head_h = _measure_text(draw, head_text, head_font)
     _, sub1_h = _measure_text(draw, sub_line1, sub_font)
     _, sub2_h = _measure_text(draw, sub_line2, sub_font)
-    _, step_h = _measure_text(draw, "Cy", step_num_font)
-    _, tag_h = _measure_text(draw, "Cy", tag_font)
+    step_ascent, step_descent = step_font.getmetrics()
+    step_h = step_ascent + step_descent
 
     gap_icon_head = 72
     gap_head_sub = 56
     gap_sub_lines = 14
-    gap_sub_steps = 76
-    gap_steps_tags = 48
+    gap_sub_steps = 80
 
     stack_h = (
         icon_size + gap_icon_head
         + head_h + gap_head_sub
         + sub1_h + gap_sub_lines + sub2_h + gap_sub_steps
-        + step_h + gap_steps_tags
-        + tag_h
+        + step_h
     )
     stack_top = (CANVAS[1] - stack_h) // 2
 
@@ -315,11 +273,9 @@ def main() -> None:
     y = _draw_centered(draw, y, sub_line1, sub_font, INK_MUTED) + gap_sub_lines
     y = _draw_centered(draw, y, sub_line2, sub_font, INK_MUTED) + gap_sub_steps
 
-    # Step row — Clipline's funnel.
-    y = _draw_step_row(draw, y, steps, step_num_font, step_label_font) + gap_steps_tags
-
-    # Feature tags
-    _draw_feature_tags(draw, y, tags, tag_font)
+    # Step row — Clipline's funnel. No tag row underneath — earlier draft
+    # had three feature callouts that were just paraphrasing the step labels.
+    _draw_step_row(draw, y, steps, step_font)
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     canvas_img.convert("RGB").save(OUTPUT_PATH, format="PNG", optimize=True)
