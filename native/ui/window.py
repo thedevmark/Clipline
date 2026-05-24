@@ -25,14 +25,20 @@ from PySide6.QtWidgets import (
     QStatusBar,
 )
 
+from native.services.export_presets import (
+    build_clip_export_args,
+    format_preset_by_key,
+    style_preset_by_key,
+)
 from native.services.settings import get_output_dir
 from native.ui import theme
 from native.ui.project_state import Clip, ProjectState
-from native.ui.stages.ingest import IngestStage
 from native.ui.stages.inbox import InboxStage
-from native.ui.stages.placeholder import PlaceholderStage
+from native.ui.stages.ingest import IngestStage
+from native.ui.stages.output import OutputStage
 from native.ui.stages.project import ProjectStage
-from native.workers import JobRunner, ffmpeg_export
+from native.ui.stages.shorts import ShortsStage
+from native.workers import JobRunner, ffmpeg_export, longform_export
 
 
 STAGE_PROJECT, STAGE_INGEST, STAGE_INBOX, STAGE_SHORTS, STAGE_OUTPUT = range(5)
@@ -77,25 +83,16 @@ class MainWindow(QMainWindow):
         self._inbox_stage.request_export_clip.connect(self._export_clip)
         self._inbox_stage.request_remove_clip.connect(self._state.remove_clip)
 
+        self._shorts_stage = ShortsStage()
+        self._output_stage = OutputStage(self._state)
+        self._output_stage.request_render_all.connect(self._render_all_clips)
+        self._output_stage.request_build_longform.connect(self._build_longform)
+
         self._stack.addWidget(self._project_stage)
         self._stack.addWidget(self._ingest_stage)
         self._stack.addWidget(self._inbox_stage)
-        self._stack.addWidget(
-            PlaceholderStage(
-                "Shorts",
-                "Caption + preset polish lands in Phase 4 of native/MIGRATION_PLAN.md. "
-                "Run a caption pass over the inbox, pick a Gameplay Focus / Facecam Top / "
-                "Baked Text Punch preset, then move on to Output.",
-            )
-        )
-        self._stack.addWidget(
-            PlaceholderStage(
-                "Output",
-                "Shorts render + the longform-from-shorts hero pivot lands in Phase 5. "
-                "Until then, render single clips from the Inbox stage to confirm the worker "
-                "pipeline.",
-            )
-        )
+        self._stack.addWidget(self._shorts_stage)
+        self._stack.addWidget(self._output_stage)
 
         self.setCentralWidget(self._stack)
 
@@ -210,6 +207,11 @@ class MainWindow(QMainWindow):
         clip = Clip(title="Marked range", start_ms=start_ms, end_ms=end_ms)
         self._export_clip(clip)
 
+    def _clip_export_args(self, clip: Clip) -> list[str]:
+        style = style_preset_by_key(self._state.style_preset_key)
+        fmt = format_preset_by_key(self._state.format_preset_key)
+        return build_clip_export_args(clip.start_ms, clip.end_ms, style, fmt)
+
     def _export_clip(self, clip: Clip) -> None:
         source = self._state.source
         if source is None:
@@ -219,21 +221,48 @@ class MainWindow(QMainWindow):
         self._progress.setVisible(True)
         self._progress.setValue(0)
         self._jobs_label.setText(f"Rendering {clip.title}…")
-        extra = [
-            "-ss", f"{clip.start_ms / 1000:.3f}",
-            "-to", f"{clip.end_ms / 1000:.3f}",
-            "-c:v", "libx264",
-            "-c:a", "aac",
-            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
-            "-pix_fmt", "yuv420p",
-        ]
         self._runner.run(
             ffmpeg_export,
             self._ffmpeg,
             self._ffprobe,
             source,
             output,
-            extra,
+            self._clip_export_args(clip),
+            on_progress=lambda msg: self._jobs_label.setText(msg),
+            on_progress_pct=lambda pct: self._progress.setValue(int(pct * 100)),
+            on_finished=self._on_render_finished,
+            on_error=self._on_render_error,
+        )
+
+    def _render_all_clips(self) -> None:
+        source = self._state.source
+        clips = self._state.clips
+        if source is None or not clips:
+            return
+        for clip in clips:
+            self._export_clip(clip)
+
+    def _build_longform(self) -> None:
+        source = self._state.source
+        clips = self._state.clips
+        if source is None or not clips:
+            return
+        fmt = format_preset_by_key(self._state.format_preset_key)
+        out_name = f"{source.stem}-longform-{fmt.key}.mp4"
+        output = self._output_dir / out_name
+        clip_args_list = [
+            (clip.title, self._clip_export_args(clip)) for clip in clips
+        ]
+        self._progress.setVisible(True)
+        self._progress.setValue(0)
+        self._jobs_label.setText(f"Building longform from {len(clips)} clips…")
+        self._runner.run(
+            longform_export,
+            self._ffmpeg,
+            self._ffprobe,
+            source,
+            clip_args_list,
+            output,
             on_progress=lambda msg: self._jobs_label.setText(msg),
             on_progress_pct=lambda pct: self._progress.setValue(int(pct * 100)),
             on_finished=self._on_render_finished,

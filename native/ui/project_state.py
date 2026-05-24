@@ -43,6 +43,8 @@ class ProjectState(QObject):
     source_metadata_changed = Signal(dict) # {"title": ..., "duration_ms": ...}
     clips_changed = Signal(list)           # list[Clip]
     active_clip_changed = Signal(object)   # int | None (index)
+    style_preset_changed = Signal(str)     # StylePreset.key
+    format_preset_changed = Signal(str)    # FormatPreset.key
 
     def __init__(self) -> None:
         super().__init__()
@@ -50,6 +52,8 @@ class ProjectState(QObject):
         self._metadata: dict = {}
         self._clips: list[Clip] = []
         self._active: Optional[int] = None
+        self._style_key: str = "gameplay_focus"
+        self._format_key: str = "shorts"
 
     @property
     def source(self) -> Optional[Path]:
@@ -114,3 +118,19 @@ class ProjectState(QObject):
         if index is None or 0 <= index < len(self._clips):
             self._active = index
             self.active_clip_changed.emit(index)
+
+    @property
+    def style_preset_key(self) -> str:
+        return self._style_key
+
+    def set_style_preset(self, key: str) -> None:
+        self._style_key = key
+        self.style_preset_changed.emit(key)
+
+    @property
+    def format_preset_key(self) -> str:
+        return self._format_key
+
+    def set_format_preset(self, key: str) -> None:
+        self._format_key = key
+        self.format_preset_changed.emit(key)

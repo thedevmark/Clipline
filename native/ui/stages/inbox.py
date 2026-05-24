@@ -11,6 +11,7 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from native.services.export_presets import STYLE_PRESETS, style_preset_by_key
 from native.ui import theme
 from native.ui.project_state import Clip, ProjectState
 
@@ -76,6 +78,24 @@ class InboxStage(QWidget):
         hint.setProperty("hint", True)
         outer.addWidget(hint)
 
+        # Style preset picker — applies to every clip render dispatched
+        # from this stage and to the bulk render on the Output stage.
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(10)
+        preset_label = QLabel("Style preset:")
+        preset_label.setProperty("hint", True)
+        preset_row.addWidget(preset_label)
+        self._preset_picker = QComboBox()
+        for preset in STYLE_PRESETS:
+            self._preset_picker.addItem(preset.label, preset.key)
+        self._preset_picker.currentIndexChanged.connect(self._on_preset_picked)
+        preset_row.addWidget(self._preset_picker)
+        self._preset_desc = QLabel(STYLE_PRESETS[0].description)
+        self._preset_desc.setProperty("hint", True)
+        self._preset_desc.setWordWrap(True)
+        preset_row.addWidget(self._preset_desc, 1)
+        outer.addLayout(preset_row)
+
         self._list = QListWidget()
         self._list.itemDoubleClicked.connect(self._on_item_activated)
         outer.addWidget(self._list, 1)
@@ -96,6 +116,12 @@ class InboxStage(QWidget):
 
         state.clips_changed.connect(self._render_clips)
         self._list.currentRowChanged.connect(self._on_row_changed)
+
+    def _on_preset_picked(self, index: int) -> None:
+        key = self._preset_picker.itemData(index)
+        preset = style_preset_by_key(key)
+        self._state.set_style_preset(preset.key)
+        self._preset_desc.setText(preset.description)
 
     def _render_clips(self, clips: list[Clip]) -> None:
         self._list.clear()

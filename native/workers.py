@@ -8,9 +8,10 @@ they aren't garbage-collected mid-run — ``ALERT_REBUILD_LESSONS.md`` §6.
 from __future__ import annotations
 
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Sequence
 
 from PySide6.QtCore import QObject, QThread, Signal
 
@@ -157,6 +158,65 @@ def ffmpeg_export(
     if ret != 0:
         err = proc.stderr.read() if proc.stderr else ""
         raise RuntimeError(f"ffmpeg exit {ret}: {err.strip()[:400]}")
+    job.progress_pct.emit(1.0)
+    job.progress.emit("Done")
+    return output_path
+
+
+def longform_export(
+    job: WorkerJob,
+    ffmpeg: str,
+    ffprobe: str,
+    source: Path,
+    clip_args_list: Sequence[tuple[str, list[str]]],  # [(label, extra_args), ...]
+    output_path: Path,
+) -> Path:
+    """Render each clip, then concat into one MP4.
+
+    Each entry in ``clip_args_list`` is ``(label, extra_args)`` — the same
+    shape ``ffmpeg_export`` accepts for a single clip. We:
+
+    1. Render each clip to a temp directory with consistent encoding.
+    2. Write a concat-demuxer file list pointing at the temp clips.
+    3. Run ``ffmpeg -f concat -safe 0 -i list.txt -c copy output``.
+
+    Stream-copy concat is fast and avoids generation loss; it works because
+    every temp clip was re-encoded with the same codec/pix_fmt/sample rate.
+    """
+    if not clip_args_list:
+        raise RuntimeError("No clips to render.")
+
+    total = len(clip_args_list)
+    with tempfile.TemporaryDirectory(prefix="clipline-longform-") as tmpdir:
+        tmp = Path(tmpdir)
+        rendered: list[Path] = []
+        for index, (label, extra_args) in enumerate(clip_args_list, start=1):
+            job.progress.emit(f"[{index}/{total}] rendering {label}")
+            piece = tmp / f"piece-{index:03d}.mp4"
+            ffmpeg_export(job, ffmpeg, ffprobe, source, piece, extra_args)
+            rendered.append(piece)
+            job.progress_pct.emit(index / (total + 1))
+
+        list_path = tmp / "concat.txt"
+        with open(list_path, "w", encoding="utf-8") as f:
+            for piece in rendered:
+                # ffmpeg's concat demuxer wants forward slashes and single-quoted paths.
+                escaped = str(piece).replace("\\", "/").replace("'", "'\\''")
+                f.write(f"file '{escaped}'\n")
+
+        job.progress.emit(f"stitching {total} clip{'s' if total != 1 else ''} -> {output_path.name}")
+        args = [
+            ffmpeg, "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", str(list_path),
+            "-c", "copy",
+            str(output_path),
+        ]
+        proc = subprocess.run(args, capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg concat exit {proc.returncode}: {(proc.stderr or '').strip()[:400]}"
+            )
     job.progress_pct.emit(1.0)
     job.progress.emit("Done")
     return output_path

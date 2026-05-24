@@ -48,7 +48,7 @@ hiddenimports = [
 
 
 a = Analysis(
-    ["clipline_native.py"],
+    ["desktop.py"],
     pathex=[],
     binaries=binaries,
     datas=datas,

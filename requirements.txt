@@ -1,13 +1,10 @@
-flask>=2.0.0
-yt-dlp>=2023.0.0
+PySide6>=6.7
 Pillow>=12.0
 typing_extensions
-waitress
-PySide6>=6.7
+yt-dlp>=2023.0.0
 
-# Optional: captioning pipeline (installed lazily into a managed venv
-# at first run via the in-app Dependency Setup panel — not bundled
-# into the EXE).
+# Optional — captioning runtime. Install manually into the same Python
+# environment if you need the caption pass (Shorts stage prompts for it).
 # faster-whisper>=1.0.0
-# pyannote.audio>=3.1
 # torch>=2.0
+# pyannote.audio>=3.1
