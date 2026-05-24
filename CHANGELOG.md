@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-05-24
+
+### Fixed
+- **Stale webview cache after upgrade**: v0.1.2 upgraders still saw the old "Start With The Right Tool" picker because QtWebEngine's disk cache served the previous install's `app.js`. The desktop shell now calls `clearHttpCache()` on the default profile at startup, so a new EXE never inherits cached HTML/JS/CSS.
+- **Blurry taskbar icon**: `static/favicon.ico` was a single 16x16 frame (605 bytes) because Pillow's ICO encoder ignored `append_images` when the `sizes=` kwarg was also passed. `scripts/generate_app_icon.py` now renders each frame from the SVG at native size and writes a true multi-resolution `.ico` (16 / 24 / 32 / 48 / 64 / 128 / 256, ~22 KB).
+
 ## [0.1.2] - 2026-05-24
 
 ### Removed
