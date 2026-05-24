@@ -1,11 +1,12 @@
-<p align="center"><img src="static/img/app-icon.svg" alt="Clipline" width="128"></p>
+<p align="center">
+  <img src="docs/hero.png" alt="Clipline — turn livestream VOD moments into shortform clips" width="100%">
+</p>
 
-<h1 align="center">Clipline</h1>
-
-<p align="center"><strong>Turn livestream VOD moments into shortform clips — batch crop, faster-whisper auto-captions, ASS/SRT export. A six-hour stream becomes a tray of ready-to-post shorts.</strong></p>
+**Turn livestream VOD moments into shortform clips — batch crop, faster-whisper auto-captions, ASS/SRT export. A six-hour stream becomes a tray of ready-to-post shorts.**
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white">
+  <img src="https://img.shields.io/badge/PySide6-Native-41cd52?logo=qt&logoColor=white">
   <img src="https://img.shields.io/badge/FFmpeg-Powered-orange?logo=ffmpeg&logoColor=white">
   <img src="https://img.shields.io/badge/faster--whisper-captions-5fb0c8">
   <img src="https://img.shields.io/badge/License-AGPL_v3-blue">

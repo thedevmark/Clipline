@@ -61,12 +61,28 @@ jobs:
       - name: Verify build artifact
         shell: bash
         run: |
-          if [ ! -f dist/clipline.exe ]; then
-            echo "Expected dist/clipline.exe was not produced." >&2
+          set -euo pipefail
+          EXE=dist/clipline.exe
+          if [ ! -f "$EXE" ]; then
+            echo "::error::Expected $EXE was not produced." >&2
             ls -la dist/ || true
             exit 1
           fi
-          ls -lh dist/clipline.exe
+          # Must be a real PE executable (MZ magic), not a stub or error page.
+          if [ "$(head -c 2 "$EXE")" != "MZ" ]; then
+            echo "::error::$EXE is not a PE executable (bad magic) — build is broken." >&2
+            exit 1
+          fi
+          # Size sanity. Band is intentionally wide so it holds for BOTH the
+          # WebEngine build (~415 MB) and a future native build (~70 MB); it only
+          # flags a truncated/empty/grossly-misconfigured artifact before it ships.
+          bytes=$(stat -c%s "$EXE")
+          mb=$((bytes / 1048576))
+          echo "Built $EXE: ${mb} MB"
+          if [ "$bytes" -lt 20971520 ] || [ "$bytes" -gt 1073741824 ]; then
+            echo "::error::$EXE is ${mb} MB, outside the sane 20 MB–1 GB band — build is likely broken." >&2
+            exit 1
+          fi
 
       - name: Upload to release
         env:
@@ -85,3 +101,8 @@ jobs:
           gh release upload "$TAG" dist/clipline.exe \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
+          # NOTE: --generate-notes yields only a bare "Full Changelog" line, and
+          # this step --clobbers any manually-uploaded asset. Apply real notes
+          # after CI:  gh release edit "$TAG" --notes "..."  — and if you ever add
+          # a second spec, confirm CI builds the intended one BEFORE tagging.
+          # See native/ALERT_REBUILD_LESSONS.md §2.

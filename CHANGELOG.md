@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-05-24
+
+Native shell rewrite. The Flask + QtWebEngine architecture is gone; Clipline is now a pure PySide6 desktop app. EXE drops from ~415 MB to ~65 MB.
+
+### Added
+- **Native PySide6 shell** (`desktop.py`) — `QMainWindow` with a single five-stage spine (Project / Ingest / Inbox / Shorts / Output) and a real menubar (File / Stage / Help) with `Ctrl+N`, `Ctrl+O`, `Ctrl+Q`, `Ctrl+1..5`.
+- **`QMediaPlayer` + `QVideoWidget` preview** on Ingest. No Chromium runtime — the same H.264/AAC media that played in the WebEngine `<video>` now decodes through PySide6's bundled FFmpeg.
+- **Hotkeys**: `Space` play/pause, `I` mark in, `O` mark out, `[ / ]` nudge ±1 s, `Shift+[ / ]` nudge ±100 ms.
+- **Drag-and-drop** video files onto the Ingest stage.
+- **Clip inbox** (Inbox stage): list of marked ranges, double-click renders a single clip.
+- **Style preset picker** — Gameplay Focus / Facecam Top / Baked Text Punch — drives ffmpeg `-vf` filter per render.
+- **Output stage with funnel hero**: format preset picker (Shorts/Reels, 4:5 Feed, Square, 16:9 Landscape) and a **"Build Longform Project"** CTA that renders every clip and stitches via ffmpeg concat-demuxer into one longform deliverable.
+- **`--selftest <in> <out>` and `--selftest-deps`** CLI hooks for verifying the *downloaded* release artifact (ALERT §0/§2 — never trust local `dist/`).
+- **`native/workers.py`**: QThread/QObject JobRunner with continuous progress via `ffmpeg -progress pipe:1`; holds thread references for the lifetime of the job (ALERT §6 GC trap).
+- **`native/services/`**: pure-Python paths, settings, tool discovery, and export presets — Flask-free; this is what keeps the frozen EXE small.
+- **Brand QSS** pulled from the app icon palette (navy + teal); WA_StyledBackground=True everywhere it matters (ALERT §4 banding fix).
+- **Dependency checklist on the Project stage**, shown every launch (no QSettings gate — ALERT §7 trap).
+- **README hero banner** at `docs/hero.png` (2560×1200, regen via `scripts/generate_hero.py`).
+
+### Removed
+- **`app.py` (Flask routes + helpers)** — replaced by `native/services/` for what was reusable, deleted otherwise.
+- **`static/`** — no more `index.html`, `app.js` (47 KB), `reel.js` (242 KB), `auth.js` (19 KB), `caption-editor.js` (28 KB), `style.css` (84 KB). Just `favicon.ico` + `img/app-icon.svg` remain for the EXE icon and window icon.
+- **Old `desktop.py`** — the QtWebEngine shell. `clipline_native.py` was renamed to `desktop.py` so the entrypoint name stays stable.
+- **`reel.py` and `captions.py`** — both were Flask-coupled (`register_reel_routes(app)`). Native-side reimplementation lands in v0.2.x.
+- **`flask` and `waitress`** dropped from `requirements.txt`.
+- **QtWebEngine + Chromium runtime** (~210 MB shipped) — gone.
+
+### Deferred to v0.2.x
+- **URL ingest via yt-dlp** — the field is visible-but-disabled on Ingest. `ytdlp.py` is still vendored; just needs wiring.
+- **Caption pass UI + editable caption dialog** — Shorts stage shows the runtime status and the pip install pointer. The full editor returns once `captions.py` is reimplemented natively.
+- **Twitch shared-auth integration** — the `auth.deutschmark.online` callback needs the loopback-server pattern alert-alert uses.
+- **Saved facecam guide / per-channel framing presets** — UI affordances on the Ingest stage; data model lands next.
+- **Project autosave to disk** — `ProjectState` is in-memory only this release.
+
 ## [0.1.3] - 2026-05-24
 
 ### Fixed
