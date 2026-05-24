@@ -35,16 +35,19 @@ if "--selftest" in sys.argv or "--selftest-deps" in sys.argv:
 
 from PySide6.QtWidgets import QApplication
 
-# app.py defines all the path constants, tool discovery, and runtime helpers we
-# need. Importing the module does not start Flask — only @app.route() handlers
-# register on the in-process Flask object, which is never run. See
-# native/MIGRATION_PLAN.md for the Phase 7 plan to delete the Flask layer.
-import app as _legacy_app
+# Tiny pure-Python services. Importing ``app`` would drag Flask + werkzeug +
+# torch + faster-whisper + pyannote into the static import graph (they're
+# behind try/except at runtime, but PyInstaller bundles them anyway), which is
+# how Phase 0's first build came in at 274 MB instead of ~70 MB. The native
+# shell touches none of that.
+from native.services.paths import INTERNAL_DIR, ensure_dirs
+from native.services.settings import get_output_dir
+from native.services.tools import TOOLS
 from native.workers import JobRunner, ffmpeg_export
 
 
 def _resolve_icon() -> Path:
-    return _legacy_app.INTERNAL_DIR / "static" / "favicon.ico"
+    return INTERNAL_DIR / "static" / "favicon.ico"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -65,15 +68,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def run_gui() -> int:
     """Launch the Qt main window. Returns the QApplication exit code."""
+    ensure_dirs()
     app = QApplication.instance() or QApplication(sys.argv)
     runner = JobRunner()
     from native.ui.window import MainWindow
 
     window = MainWindow(
         runner=runner,
-        ffmpeg=_legacy_app.FFMPEG or "ffmpeg",
-        ffprobe=_legacy_app.FFPROBE or "ffprobe",
-        output_dir=_legacy_app.get_output_dir(),
+        ffmpeg=TOOLS.ffmpeg,
+        ffprobe=TOOLS.ffprobe,
+        output_dir=get_output_dir(),
         icon_path=_resolve_icon(),
     )
     window.show()
@@ -114,8 +118,8 @@ def run_selftest(input_path: Path, output_path: Path) -> int:
 
     runner.run(
         ffmpeg_export,
-        _legacy_app.FFMPEG or "ffmpeg",
-        _legacy_app.FFPROBE or "ffprobe",
+        TOOLS.ffmpeg,
+        TOOLS.ffprobe,
         input_path,
         output_path,
         on_progress=on_progress,
@@ -138,14 +142,17 @@ def run_selftest(input_path: Path, output_path: Path) -> int:
 
 def run_selftest_deps() -> int:
     """Print discovered tool paths. Used to verify a frozen build can find them."""
+    from native.services.tools import _is_explicit_tool_path
+
     rows = [
-        ("ffmpeg", _legacy_app.FFMPEG),
-        ("ffprobe", _legacy_app.FFPROBE),
-        ("yt-dlp", _legacy_app.YTDLP),
+        ("ffmpeg", TOOLS.ffmpeg),
+        ("ffprobe", TOOLS.ffprobe),
+        ("yt-dlp", TOOLS.ytdlp),
     ]
-    missing = [name for name, path in rows if not path]
+    missing = [name for name, path in rows if not _is_explicit_tool_path(path, name)]
     for name, path in rows:
-        print(f"{name:<8} {path or '(not found)'}")
+        marker = "" if _is_explicit_tool_path(path, name) else "  (not found)"
+        print(f"{name:<8} {path}{marker}")
     return 1 if missing else 0
 
 

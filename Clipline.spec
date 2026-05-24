@@ -28,12 +28,12 @@ binaries = [
     if dll.suffix.lower() == ".dll" and dll.name.lower().startswith(_FFMPEG_PREFIXES)
 ]
 
-# ``static/`` is kept in datas during the migration window so any Flask routes
-# left on this branch keep working from a dev checkout. Phase 7 drops it.
-# (``native/`` is a Python package — PyInstaller's Analysis picks it up via the
-# entry script's imports, so we do not list it in datas.)
+# Just the icon assets are needed at runtime by the native shell. Bundling the
+# rest of ``static/`` would pull in ~600 KB of JS/HTML/CSS the native EXE
+# never reads, and it gets deleted in Phase 7 anyway.
 datas = [
-    ("static", "static"),
+    ("static/favicon.ico", "static"),
+    ("static/img/app-icon.svg", "static/img"),
 ]
 
 hiddenimports = [
@@ -63,6 +63,23 @@ a = Analysis(
         "PySide6.QtWebEngineCore",
         "PySide6.QtWebEngineWidgets",
         "PySide6.QtWebChannel",
+        # Hard-exclude the captioning / Flask stack so a stray ``import app``
+        # can't silently drag torch (~300 MB), faster-whisper, pyannote,
+        # werkzeug, Flask, etc. into the EXE. The native shell uses
+        # ``native/services/`` for everything it needs from app.py.
+        "torch",
+        "numpy",
+        "scipy",
+        "faster_whisper",
+        "pyannote",
+        "pyannote.audio",
+        "ctranslate2",
+        "flask",
+        "werkzeug",
+        "jinja2",
+        "markupsafe",
+        "click",
+        "itsdangerous",
     ],
     noarchive=False,
     optimize=0,
