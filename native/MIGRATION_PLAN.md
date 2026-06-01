@@ -15,6 +15,48 @@ swap.
 
 ---
 
+## Status — shipped in v0.2.0 (on `main`)
+
+The native rewrite landed: Flask + `static/*` + QtWebEngine are gone, the EXE
+dropped from ~415 MB to ~65 MB, and the webview auth-deflect plumbing is
+removed. Every phase below shipped at least its minimum viable slice; the
+deeper UI (drag-trim, inspector, captions, Twitch live auth) was deliberately
+deferred to the v0.2.x line so v0.2.0 could ship a working funnel.
+
+| Phase | What it covers | Status |
+|---|---|---|
+| 0 | Skeleton + backend decoupling (`native/services/`, `workers.py`, self-tests) | ✅ Done |
+| 1 | Window chrome + nav spine (menubar, `QStackedWidget`, status bar, SVG icon) | ✅ Done |
+| 2 | Ingest (local file + preview + mark in/out + export) | 🟡 Partial — URL ingest stubbed, Twitch auth not started |
+| 3 | Inbox (cut list, double-click render) | 🟡 Partial — inspector, drag-trim, waveform, marker import deferred |
+| 4 | Shorts (caption-runtime status + pip pointer, preset picker) | 🟡 Partial — caption *pass* + editor deferred (`captions.py` not extracted) |
+| 5 | Output (longform build, format presets) | ✅ Done |
+| 6 | Onboarding + dependency setup (ungated welcome + deps check + Install/Re-check) | ✅ Done — guided tour (6.4) deferred |
+| 7 | Kill the web stack | ✅ Done — `static/` trimmed to icon assets only (see note) |
+| 8 | Release verification (`v0.2.0` tag, downloaded-EXE self-tests) | ✅ Done |
+
+**Deferred to v0.2.x** (tracked here, not lost):
+
+- **URL ingest** — the Ingest URL field + "Load URL" button ship disabled
+  (`native/ui/stages/ingest.py`). Wire `ytdlp.py` behind them.
+- **Twitch live auth** — system-browser + loopback `QTcpServer` callback
+  (Phase 2 plan). Still the open bug from the web build; no webview now, so
+  the deflect is gone but the flow itself is unbuilt.
+- **Inbox depth** — inspector dock, draggable trim handles, `showwavespic`
+  waveform track, thumbnails, Twitch marker/clip import (Phase 3 full scope).
+- **Captions** — extract `captions.py` into `native/services/`, run the pass
+  on a `QThread`, and port the caption-editor dialog (Phase 4 full scope).
+  Today the Shorts stage only reports runtime status and shows the pip command.
+- **Guided tour** — first-clip spotlight overlay (Phase 6.4). QSettings-gating
+  is allowed here because it's mid-session, not a launch screen.
+
+**Deviation from the written plan:** Phase 7 said "delete `static/` entirely,
+`datas = []`." We kept `static/favicon.ico` + `static/img/app-icon.svg` — the
+native shell renders the window icon and the welcome-screen icon from them
+(`Clipline.spec` datas). Everything else under `static/` (JS/HTML/CSS) is gone.
+
+---
+
 ## Pre-flight (do once, before any phase)
 
 1. **Sync the spike branch with main.** `spike/native-eval` predates `main`'s
@@ -38,6 +80,9 @@ swap.
 ---
 
 ## Phase 0 — Project skeleton + backend decoupling
+
+> **Status: ✅ Done (v0.2.0).** `native/services/` + `native/workers.py`
+> exist; `desktop.py` carries `--selftest` / `--selftest-deps`; no Flask import.
 
 Goal: prove the Python backend works without Flask, on a QThread, behind a
 trivial Qt window. Two days, mostly subtractive.
@@ -74,6 +119,9 @@ trivial Qt window. Two days, mostly subtractive.
 
 ## Phase 1 — Window chrome + nav spine
 
+> **Status: ✅ Done (v0.2.0).** `MainWindow` has the menubar, a 5-stage
+> `QStackedWidget`, the status bar, and the SVG-rendered app icon.
+
 Goal: the one place the nav lives. Currently the Project/Ingest/Inbox/
 Shorts/Output flow is duplicated three times (menubar `desktop.py:159-555`,
 workspace tabs `index.html:332-362`, step sections). Collapse to one.
@@ -105,6 +153,12 @@ workspace tabs `index.html:332-362`, step sections). Collapse to one.
 
 ## Phase 2 — Ingest stage (source intake + Twitch session)
 
+> **Status: 🟡 Partial (v0.2.0).** Local-file intake, drag-drop, preview, and
+> mark in/out → export all work. The URL field + "Load URL" button ship
+> **disabled**; `ytdlp.py` is not wired yet. Twitch live auth is **not built**
+> — the webview deflect is gone with the web stack, but the system-browser +
+> loopback callback flow below is still TODO. → v0.2.x.
+
 Goal: load a VOD by URL or local file; the preview plays.
 
 **Scope**
@@ -133,6 +187,12 @@ Goal: load a VOD by URL or local file; the preview plays.
 ---
 
 ## Phase 3 — Inbox stage (clip cut list + inspector)
+
+> **Status: 🟡 Partial (v0.2.0).** Minimum viable cut list: a `QListWidget` of
+> marked clips (title + range), double-click to render one via the worker.
+> The inspector dock, custom delegate w/ thumbnails, `QGraphicsScene` timeline
+> with draggable trim handles, `showwavespic` waveform, and Twitch
+> marker/clip import are all **deferred**. → v0.2.x.
 
 Goal: the cut list. This is the largest single piece — `reel.js` has the
 inbox + inspector + drag-trim + bulk ops + import-from-Twitch glue.
@@ -168,6 +228,13 @@ inbox + inspector + drag-trim + bulk ops + import-from-Twitch glue.
 
 ## Phase 4 — Shorts polish stage (presets + captions)
 
+> **Status: 🟡 Partial (v0.2.0).** Style/format preset picker landed (driving
+> `export_presets.py`). The Shorts stage reports caption-runtime status
+> (faster-whisper / torch / pyannote) and shows the pip command, but does
+> **not** run the pass — `captions.py` is not yet extracted into
+> `native/services/`. Caption editor dialog and facecam guide overlay
+> **deferred**. → v0.2.x.
+
 Goal: prep one clip or the whole inbox into shorts; run captions.
 
 **Scope**
@@ -198,6 +265,10 @@ Goal: prep one clip or the whole inbox into shorts; run captions.
 
 ## Phase 5 — Output stage (the funnel hero)
 
+> **Status: ✅ Done (v0.2.0).** `OutputStage` surfaces "Build Longform" and
+> "Render all" as primary actions and drives `reel.py`'s longform pipeline +
+> format presets. Per-stage render progress is coarse (single bar) — fine.
+
 Goal: the long-form-from-shorts pivot. This is the funnel goal — `reel.py`
 already has the longform clone pipeline (`reel.py:1653-1705`).
 
@@ -220,6 +291,12 @@ already has the longform clone pipeline (`reel.py:1653-1705`).
 ---
 
 ## Phase 6 — Onboarding + dependency setup
+
+> **Status: ✅ Done (v0.2.0).** Welcome + dependency check are shown every
+> launch, ungated (no QSettings flag). Missing required tools now show an
+> **Install** button (winget) + a **Re-check** that re-scans without relaunch.
+> The first-clip guided tour (6.4) is **deferred** — QSettings-gating is fine
+> there since it's mid-session, not a launch screen. → v0.2.x.
 
 **Read ALERT §7 carefully before starting this phase.** This is where the
 sibling repo lost the most time.
@@ -251,6 +328,12 @@ sibling repo lost the most time.
 
 ## Phase 7 — Kill the web stack
 
+> **Status: ✅ Done (v0.2.0).** No `import flask` / `QtWebEngine` in shipped
+> code (remaining hits are comments). `static/` is trimmed to the two icon
+> assets the native shell renders; all legacy JS/HTML/CSS deleted.
+> `clipline_native.py` was renamed to `desktop.py`. **Deviation:** `datas`
+> keeps the icons rather than being empty (see Status table note).
+
 Goal: delete the old shell. No "Flask as a fallback".
 
 **Scope**
@@ -277,6 +360,9 @@ Goal: delete the old shell. No "Flask as a fallback".
 ---
 
 ## Phase 8 — Release verification
+
+> **Status: ✅ Done.** `v0.2.0` is tagged on `main`; the downloaded EXE came in
+> at ~65 MB with no `Qt6WebEngine*.dll` and passed the self-tests.
 
 The expensive lesson from ALERT §0 + §2: **verify the downloaded
 artifact, not your local `dist/`.**
