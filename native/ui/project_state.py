@@ -25,6 +25,7 @@ class Clip:
     title: str
     start_ms: int
     end_ms: int
+    notes: str = ""
 
     @property
     def duration_ms(self) -> int:
@@ -102,7 +103,14 @@ class ProjectState(QObject):
             self.clips_changed.emit(self.clips)
             self.active_clip_changed.emit(self._active)
 
-    def update_active_clip(self, *, start_ms: Optional[int] = None, end_ms: Optional[int] = None, title: Optional[str] = None) -> None:
+    def update_active_clip(
+        self,
+        *,
+        start_ms: Optional[int] = None,
+        end_ms: Optional[int] = None,
+        title: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> None:
         if self._active is None or self._active >= len(self._clips):
             return
         clip = self._clips[self._active]
@@ -112,6 +120,8 @@ class ProjectState(QObject):
             clip.end_ms = max(clip.start_ms, end_ms)
         if title is not None:
             clip.title = title
+        if notes is not None:
+            clip.notes = notes
         self.clips_changed.emit(self.clips)
 
     def set_active_clip(self, index: Optional[int]) -> None:

@@ -82,7 +82,7 @@ class MainWindow(QMainWindow):
         self._ingest_stage = IngestStage(self._state, runner)
         self._ingest_stage.request_export.connect(self._export_marked_range)
         self._ingest_stage.request_download.connect(self._download_url)
-        self._inbox_stage = InboxStage(self._state)
+        self._inbox_stage = InboxStage(self._state, runner, ffmpeg)
         self._inbox_stage.request_export_clip.connect(self._export_clip)
         self._inbox_stage.request_remove_clip.connect(self._state.remove_clip)
 

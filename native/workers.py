@@ -223,6 +223,35 @@ def longform_export(
     return output_path
 
 
+def generate_waveform(
+    job: WorkerJob,
+    ffmpeg: str,
+    source: Path,
+    out_png: Path,
+    width: int = 1600,
+    height: int = 120,
+) -> Path:
+    """Render a single waveform image for the whole source via showwavespic.
+
+    Drawn once per source and used as the timeline background (ALERT §5).
+    Best-effort: a source with no audio track will fail here, and the caller
+    treats a missing waveform as "draw a flat track".
+    """
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    args = [
+        ffmpeg, "-y",
+        "-i", str(source),
+        "-filter_complex",
+        f"showwavespic=s={width}x{height}:colors=#3FA9BD|#7BD5E5",
+        "-frames:v", "1",
+        str(out_png),
+    ]
+    proc = subprocess.run(args, capture_output=True, text=True)
+    if proc.returncode != 0 or not out_png.exists():
+        raise RuntimeError((proc.stderr or "waveform render failed").strip()[:300])
+    return out_png
+
+
 _YTDLP_PCT = re.compile(r"\[download\]\s+([\d.]+)%")
 
 
