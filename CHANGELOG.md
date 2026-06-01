@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-06-01
+
+The auth-first ingest batch: connect Twitch, pull your clips, caption them — all
+with zero terminal/pip, because the audience is streamers, not developers.
+
+### Added
+- **Twitch login** via OAuth **Device Code Flow** — no redirect, no local server,
+  no browser-deflect bug. A bundled public client ID means you connect out of the
+  box: click Connect, approve the pre-filled code at twitch.tv/activate, done.
+- **Twitch VOD/clip browser** in Ingest — list your past broadcasts and clips;
+  double-click downloads one straight into the editor.
+- **URL ingest** — paste any Twitch/YouTube/TikTok URL; yt-dlp fetches it with a
+  progress bar and loads the preview.
+- **Inbox inspector + waveform timeline** — edit a clip's title/notes and **drag
+  in/out handles** on a `showwavespic` waveform to retrim.
+- **One-click captions (whisper.cpp)** — first use downloads a ~75 MB speech
+  engine into the runtime dir (no Python, no pip, no terminal); then transcribe
+  with word-level karaoke timing. **Caption editor**: edit text, toggle words,
+  pick a speaker colour, burn-in flag, export ASS/SRT.
+- **First-run guided tour** — a one-time spotlight over the timeline, inspector,
+  and render button when your first clip lands.
+
+### Changed
+- **App / taskbar icon** rendered full-bleed (was a small favicon frame upscaled
+  and blurry); welcome-screen icon now renders the vector, HiDPI-aware. Sets the
+  Windows AppUserModelID so run-from-source uses the Clipline icon.
+- **Welcome runtime-status card** scrolls (no more clipping) and offers per-tool
+  **Install** (winget) + **Re-check** buttons.
+
+### Fixed
+- Desktop **Twitch auth** — the device-code flow replaces the dead
+  webview/`auth.deutschmark.online` loopback path that rejected `localhost:3000`.
+- Welcome **"Open Local Video…"** no longer force-navigates to Ingest when you
+  cancel the file picker, so it's distinct from "Go to Ingest".
+
 ## [0.2.0] - 2026-05-24
 
 Native shell rewrite. The Flask + QtWebEngine architecture is gone; Clipline is now a pure PySide6 desktop app. EXE drops from ~415 MB to ~65 MB.
