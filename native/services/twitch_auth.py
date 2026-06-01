@@ -42,15 +42,22 @@ DEFAULT_SCOPES = ""
 
 _SESSION_KEY = "twitch_session"
 
+# Clipline's registered Twitch app (public client, Device Code Flow — no secret,
+# so it's safe to ship embedded; this is how desktop OAuth clients work). Lets
+# every user connect Twitch out of the box without registering their own app.
+# Override via CLIPLINE_TWITCH_CLIENT_ID or the in-app "Set Client ID" prompt.
+_DEFAULT_CLIENT_ID = "uclg74tt07ucpqfuo3302gyaj45uft"
+
 
 # ── Client ID resolution ───────────────────────────────────────────
 
 def client_id() -> str:
-    """The Twitch app client ID, or '' if the user hasn't configured one."""
+    """The Twitch app client ID. Env > user override > the bundled default."""
     env = os.environ.get("CLIPLINE_TWITCH_CLIENT_ID", "").strip()
     if env:
         return env
-    return str(load_settings().get("twitch_client_id", "")).strip()
+    configured = str(load_settings().get("twitch_client_id", "")).strip()
+    return configured or _DEFAULT_CLIENT_ID
 
 
 def set_client_id(value: str) -> None:
