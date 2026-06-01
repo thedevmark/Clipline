@@ -20,12 +20,15 @@ and waiting.
 """
 from __future__ import annotations
 
+import http.server
 import json
 import os
+import secrets
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -34,7 +37,14 @@ from native.services.settings import load_settings, save_settings
 DEVICE_URL = "https://id.twitch.tv/oauth2/device"
 TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 VALIDATE_URL = "https://id.twitch.tv/oauth2/validate"
+AUTHORIZE_URL = "https://id.twitch.tv/oauth2/authorize"
 DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
+
+# Loopback "Sign in with Twitch" (implicit grant). The redirect URI must match
+# exactly what's registered on the Twitch app — http://localhost:3000.
+LOOPBACK_PORT = 3000
+REDIRECT_URI = f"http://localhost:{LOOPBACK_PORT}"
+PORT_BUSY_SENTINEL = "LOOPBACK_PORT_BUSY"
 
 # No scopes needed: listing your own VODs/clips uses public Helix reads, and a
 # bare user token still identifies the caller via /helix/users.
@@ -87,7 +97,109 @@ def _read_json(raw: bytes) -> dict:
         return {}
 
 
-# ── Device Code Flow ───────────────────────────────────────────────
+# ── Loopback "Sign in with Twitch" (implicit grant) ────────────────
+
+_CAPTURE_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Clipline</title></head>
+<body style="background:#0D1521;color:#CBD6E1;font-family:system-ui,sans-serif;text-align:center;padding-top:80px">
+<h2 style="color:#7BD5E5">Finishing sign-in…</h2>
+<script>
+// Twitch returns the token in the URL fragment, which the browser never sends
+// to the server. Re-deliver it as a query so the loopback listener can read it.
+var h = window.location.hash.substring(1);
+window.location.replace("/capture?" + (h || "error=no_fragment"));
+</script></body></html>"""
+
+_DONE_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Clipline</title></head>
+<body style="background:#0D1521;color:#CBD6E1;font-family:system-ui,sans-serif;text-align:center;padding-top:80px">
+<h2 style="color:#7BD5E5">&#10003; Connected to Twitch</h2>
+<p>You can close this tab and return to Clipline.</p></body></html>"""
+
+
+def authorize_url(state: str, scopes: str = DEFAULT_SCOPES) -> str:
+    return AUTHORIZE_URL + "?" + urllib.parse.urlencode({
+        "client_id": client_id(),
+        "redirect_uri": REDIRECT_URI,
+        "response_type": "token",
+        "scope": scopes,
+        "state": state,
+    })
+
+
+def loopback_login(job, cancel: Optional["object"] = None, scopes: str = DEFAULT_SCOPES) -> dict:
+    """Worker: open Twitch in the browser, catch the redirect on a local port.
+
+    Implicit grant (no secret). The user just clicks Authorize and Twitch
+    bounces back to ``http://localhost:3000`` — no code, no activate page. If
+    the port can't bind, raises ``PORT_BUSY_SENTINEL`` so the caller can fall
+    back to the device-code flow.
+    """
+    if not client_id():
+        raise RuntimeError("No Twitch client ID configured.")
+
+    state = secrets.token_urlsafe(16)
+    holder: dict = {}
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_args):  # silence stderr access logs
+            pass
+
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path == "/capture":
+                holder["params"] = {
+                    k: v[0] for k, v in urllib.parse.parse_qs(parsed.query).items()
+                }
+                self._send(_DONE_PAGE)
+            elif parsed.path in ("/", "/favicon.ico"):
+                self._send(_CAPTURE_PAGE if parsed.path == "/" else "")
+            else:
+                self._send(_CAPTURE_PAGE)
+
+        def _send(self, body: str):
+            data = body.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    try:
+        server = http.server.HTTPServer(("127.0.0.1", LOOPBACK_PORT), _Handler)
+    except OSError as exc:
+        raise RuntimeError(PORT_BUSY_SENTINEL) from exc
+    server.timeout = 1.0
+
+    job.progress.emit("Opening Twitch in your browser…")
+    webbrowser.open(authorize_url(state, scopes))
+
+    deadline = time.monotonic() + 300
+    try:
+        while "params" not in holder and time.monotonic() < deadline:
+            if cancel is not None and cancel.is_set():
+                raise RuntimeError("Twitch login cancelled.")
+            server.handle_request()  # blocks up to server.timeout
+    finally:
+        server.server_close()
+
+    got = holder.get("params")
+    if not got:
+        raise RuntimeError("Twitch login timed out — try again.")
+    if got.get("error"):
+        raise RuntimeError(got.get("error_description") or got["error"])
+    if got.get("state") != state:
+        raise RuntimeError("Twitch login state mismatch — try again.")
+    token = got.get("access_token")
+    if not token:
+        raise RuntimeError("No access token returned by Twitch.")
+    return _finalize_session({
+        "access_token": token,
+        "refresh_token": "",  # implicit grant returns none
+        "expires_in": int(got.get("expires_in", 0) or 0),
+        "scope": (got.get("scope", "") or "").split(),
+    })
+
+
+# ── Device Code Flow (fallback when the loopback port is busy) ──────
 
 @dataclass
 class DeviceCode:

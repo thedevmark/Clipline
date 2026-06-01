@@ -116,6 +116,23 @@ class TwitchPanel(QFrame):
         row.addStretch(1)
         self._layout.addLayout(row)
 
+    def _render_connecting_browser(self) -> None:
+        self._clear()
+        self._kicker("TWITCH")
+        info = QLabel(
+            "A Twitch tab opened in your browser — click <b>Authorize</b> to "
+            "connect. This window will update automatically."
+        )
+        info.setWordWrap(True)
+        info.setProperty("hint", True)
+        self._layout.addWidget(info)
+        row = QHBoxLayout()
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self._cancel_connect)
+        row.addWidget(cancel)
+        row.addStretch(1)
+        self._layout.addLayout(row)
+
     def _render_connecting(self, code: str, uri: str) -> None:
         self._clear()
         self._kicker("TWITCH")
@@ -196,14 +213,26 @@ class TwitchPanel(QFrame):
     # ── connect flow ──────────────────────────────────────────────────
 
     def _start_connect(self) -> None:
+        # Primary: loopback "Sign in with Twitch" — click Authorize, bounce back.
+        self._render_connecting_browser()
+        self._cancel = threading.Event()
+        self._runner.run(
+            twitch_auth.loopback_login,
+            self._cancel,
+            on_finished=self._on_connected,
+            on_error=self._on_connect_error,
+        )
+
+    def _start_device_connect(self) -> None:
+        # Fallback when the loopback port is busy: device-code flow.
         try:
             device = twitch_auth.request_device_code()
         except Exception as exc:
             QMessageBox.warning(self, "Twitch", f"Could not start login:\n{exc}")
+            self._render()
             return
         webbrowser.open(device.verification_uri)
         self._render_connecting(device.user_code, device.verification_uri)
-
         self._cancel = threading.Event()
         self._runner.run(
             twitch_auth.poll_token,
@@ -225,6 +254,10 @@ class TwitchPanel(QFrame):
 
     def _on_connect_error(self, message: str) -> None:
         self._cancel = None
+        if message == twitch_auth.PORT_BUSY_SENTINEL:
+            # Loopback port busy — fall back to device-code flow automatically.
+            self._start_device_connect()
+            return
         if "cancelled" not in message.lower():
             QMessageBox.warning(self, "Twitch login", message)
         self._render()
