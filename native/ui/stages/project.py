@@ -6,16 +6,21 @@ real first-run pinch point is the dependency check, not the welcome.
 """
 from __future__ import annotations
 
+import platform
+import subprocess
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -23,6 +28,56 @@ from PySide6.QtWidgets import (
 
 from native.services.tools import TOOLS, _is_explicit_tool_path
 from native.ui import theme
+
+# winget package IDs for the required CLI tools. ffmpeg + ffprobe ship from a
+# single package, so installing either covers both. yt-dlp is its own package.
+WINGET_IDS = {
+    "ffmpeg": "Gyan.FFmpeg",
+    "ffprobe": "Gyan.FFmpeg",
+    "yt-dlp": "yt-dlp.yt-dlp",
+}
+CREATE_NEW_CONSOLE = 0x00000010  # so the user sees winget's progress + prompts
+
+
+def _render_app_icon(icon_path: Path, size: int) -> Optional[QPixmap]:
+    """Crisp app icon at ``size`` logical px, HiDPI-aware.
+
+    Prefers the vector ``app-icon.svg`` (rendered at device-pixel resolution so
+    it stays sharp on any display); falls back to the .ico. The old code scaled
+    a small .ico frame up to 88px, which is what made it blurry.
+    """
+    icon_path = Path(icon_path)
+    screen = QApplication.primaryScreen()
+    ratio = screen.devicePixelRatio() if screen is not None else 1.0
+    px = max(1, round(size * ratio))
+
+    svg = icon_path.parent / "img" / "app-icon.svg"
+    if svg.exists():
+        try:
+            from PySide6.QtSvg import QSvgRenderer
+
+            renderer = QSvgRenderer(str(svg))
+            if renderer.isValid():
+                img = QImage(px, px, QImage.Format.Format_ARGB32_Premultiplied)
+                img.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(img)
+                renderer.render(painter)
+                painter.end()
+                pm = QPixmap.fromImage(img)
+                pm.setDevicePixelRatio(ratio)
+                return pm
+        except Exception:
+            pass  # fall through to the .ico
+
+    pm = QPixmap(str(icon_path))
+    if pm.isNull():
+        return None
+    pm = pm.scaled(
+        px, px, Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    pm.setDevicePixelRatio(ratio)
+    return pm
 
 
 class ProjectStage(QWidget):
@@ -35,22 +90,39 @@ class ProjectStage(QWidget):
         super().__init__()
         self.setObjectName("stage")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)  # ALERT §4
+        self._icon_path = icon_path
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(80, 60, 80, 60)
-        outer.setSpacing(28)
-        outer.addStretch(1)
+        # The content can be taller than the 800px-min window (header + two
+        # cards + dep list). Host it in a scroll area so it never clips top &
+        # bottom — the old layout centered everything with stretches, so tall
+        # content got cut off at both ends.
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        root.addWidget(scroll)
+
+        content = QWidget()
+        content.setObjectName("stage")
+        content.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        scroll.setWidget(content)
+
+        outer = QVBoxLayout(content)
+        outer.setContentsMargins(80, 48, 80, 48)
+        outer.setSpacing(24)
 
         # Header row: icon + welcome text
         header = QHBoxLayout()
-        header.setSpacing(28)
+        header.setSpacing(24)
         if icon_path is not None and Path(icon_path).exists():
-            icon_label = QLabel()
-            icon_label.setPixmap(QPixmap(str(icon_path)).scaled(
-                88, 88, Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            ))
-            header.addWidget(icon_label, 0, Qt.AlignmentFlag.AlignTop)
+            pm = _render_app_icon(icon_path, 72)
+            if pm is not None:
+                icon_label = QLabel()
+                icon_label.setPixmap(pm)
+                icon_label.setFixedSize(72, 72)
+                header.addWidget(icon_label, 0, Qt.AlignmentFlag.AlignTop)
 
         copy = QVBoxLayout()
         copy.setSpacing(6)
@@ -72,7 +144,7 @@ class ProjectStage(QWidget):
         header.addLayout(copy, 1)
         outer.addLayout(header)
 
-        outer.addSpacing(20)
+        outer.addSpacing(8)
 
         # Actions card
         card = QFrame()
@@ -92,7 +164,10 @@ class ProjectStage(QWidget):
         open_btn = QPushButton("Open Local Video…")
         open_btn.setProperty("primary", True)
         open_btn.setMinimumHeight(40)
-        open_btn.clicked.connect(lambda: (on_open_local(), on_start_session()))
+        # on_open_local pops the file picker and advances to Ingest only when a
+        # file is actually chosen — cancelling leaves you on the welcome screen.
+        # "Go to Ingest" (below) is the distinct path to the empty Ingest stage.
+        open_btn.clicked.connect(on_open_local)
         actions_row.addWidget(open_btn)
 
         ingest_btn = QPushButton("Go to Ingest")
@@ -121,35 +196,27 @@ class ProjectStage(QWidget):
         deps_layout.setContentsMargins(28, 22, 28, 22)
         deps_layout.setSpacing(8)
 
+        dheader = QHBoxLayout()
         dkicker = QLabel("RUNTIME STATUS")
         dkicker.setProperty("kicker", True)
-        deps_layout.addWidget(dkicker)
+        dheader.addWidget(dkicker)
+        dheader.addStretch(1)
+        recheck = QPushButton("Re-check")
+        recheck.setMinimumHeight(28)
+        recheck.clicked.connect(self._refresh_deps)
+        dheader.addWidget(recheck)
+        deps_layout.addLayout(dheader)
 
-        # Required tools (block stuff from running if missing).
-        for name, path in (
-            ("ffmpeg", TOOLS.ffmpeg),
-            ("ffprobe", TOOLS.ffprobe),
-            ("yt-dlp", TOOLS.ytdlp),
-        ):
-            present = _is_explicit_tool_path(path, name)
-            deps_layout.addLayout(self._dep_row(name, present, path if present else "not found — install via choco / winget / scoop"))
-
-        # Optional: captioning ML deps.
-        try:
-            import importlib.util
-            has_faster_whisper = importlib.util.find_spec("faster_whisper") is not None
-        except Exception:
-            has_faster_whisper = False
-        deps_layout.addLayout(self._dep_row(
-            "faster-whisper",
-            has_faster_whisper,
-            "optional — install with pip for the caption pass",
-            optional=True,
-        ))
+        # Rebuildable rows live in their own container so "Re-check" can
+        # repopulate them after the user installs a missing tool.
+        self._deps_body = QVBoxLayout()
+        self._deps_body.setSpacing(8)
+        deps_layout.addLayout(self._deps_body)
 
         deps_hint = QLabel(
             "Required tools must be on PATH or in the Clipline runtime folder. "
-            "If anything is red, install it and relaunch — Clipline picks it up automatically."
+            "Click Install to fetch a missing one via winget, then Re-check — "
+            "no relaunch needed."
         )
         deps_hint.setWordWrap(True)
         deps_hint.setFixedWidth(720)
@@ -158,10 +225,62 @@ class ProjectStage(QWidget):
         deps_layout.addWidget(deps_hint)
 
         outer.addWidget(deps_card)
-        outer.addStretch(2)
+        outer.addStretch(1)
 
-    def _dep_row(self, name: str, present: bool, detail: str, optional: bool = False) -> QHBoxLayout:
-        row = QHBoxLayout()
+        self._refresh_deps()
+
+    # ────────────────────────────────────────────────────────────────────
+    # Dependency rows
+    # ────────────────────────────────────────────────────────────────────
+
+    def _refresh_deps(self) -> None:
+        """Re-scan tool discovery and rebuild the status rows in place."""
+        TOOLS.refresh()
+        while self._deps_body.count():
+            item = self._deps_body.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        for name, path in (
+            ("ffmpeg", TOOLS.ffmpeg),
+            ("ffprobe", TOOLS.ffprobe),
+            ("yt-dlp", TOOLS.ytdlp),
+        ):
+            present = _is_explicit_tool_path(path, name)
+            detail = path if present else "not found — install below"
+            self._deps_body.addWidget(
+                self._dep_row(name, present, detail, install_id=WINGET_IDS.get(name))
+            )
+
+        # Optional: captioning ML deps. Excluded from the frozen build, so this
+        # reads as "optional / missing" in the EXE — that's expected.
+        try:
+            import importlib.util
+
+            has_faster_whisper = importlib.util.find_spec("faster_whisper") is not None
+        except Exception:
+            has_faster_whisper = False
+        self._deps_body.addWidget(self._dep_row(
+            "faster-whisper",
+            has_faster_whisper,
+            "optional — install with pip for the caption pass",
+            optional=True,
+        ))
+
+    def _dep_row(
+        self,
+        name: str,
+        present: bool,
+        detail: str,
+        install_id: str | None = None,
+        optional: bool = False,
+    ) -> QWidget:
+        row_w = QWidget()
+        row = QHBoxLayout(row_w)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+
         marker = QLabel("✓" if present else ("○" if optional else "✗"))
         if present:
             color = theme.ACCENT
@@ -171,10 +290,56 @@ class ProjectStage(QWidget):
             color = theme.ERROR
         marker.setStyleSheet(f"color: {color}; font-size: 18px; font-weight: 700; min-width: 22px;")
         row.addWidget(marker)
+
         label = QLabel(name)
         label.setStyleSheet(f"color: {theme.INK_BRIGHT}; font-weight: 600; min-width: 140px;")
         row.addWidget(label)
+
         detail_label = QLabel(detail)
         detail_label.setProperty("hint", True)
+        detail_label.setToolTip(detail)
+        # Long resolved paths must not force the row wider than the viewport
+        # (horizontal scroll is off) — let the label clip and lean on the tooltip.
+        detail_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         row.addWidget(detail_label, 1)
-        return row
+
+        if not present and not optional and install_id:
+            install_btn = QPushButton("Install")
+            install_btn.setMinimumHeight(28)
+            install_btn.clicked.connect(
+                lambda _checked=False, wid=install_id, nm=name: self._install_tool(wid, nm)
+            )
+            row.addWidget(install_btn)
+
+        return row_w
+
+    def _install_tool(self, winget_id: str, name: str) -> None:
+        """Launch winget in a visible console to fetch a missing tool."""
+        if platform.system() != "Windows":
+            QMessageBox.information(
+                self, "Install",
+                f"Install {name} manually, then click Re-check. (winget id: {winget_id})",
+            )
+            return
+        try:
+            subprocess.Popen(
+                ["winget", "install", "--id", winget_id, "-e", "--source", "winget"],
+                creationflags=CREATE_NEW_CONSOLE,
+            )
+        except FileNotFoundError:
+            QMessageBox.warning(
+                self, "winget not found",
+                "winget isn't available on this system. Install "
+                f"{name} manually ({winget_id}) and click Re-check.",
+            )
+            return
+        except Exception as exc:
+            QMessageBox.warning(self, "Install failed", str(exc))
+            return
+        QMessageBox.information(
+            self, "Installing",
+            f"A console window is installing {name} via winget.\n\n"
+            "When it finishes, click “Re-check” to pick it up — no relaunch needed.",
+        )

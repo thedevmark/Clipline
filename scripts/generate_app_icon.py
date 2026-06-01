@@ -12,7 +12,7 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray
+from PySide6.QtCore import QByteArray, QRectF
 from PySide6.QtGui import QGuiApplication, QImage, QPainter
 from PySide6.QtSvg import QSvgRenderer
 from PIL import Image
@@ -24,6 +24,13 @@ IMG_DIR = STATIC_DIR / "img"
 SVG_PATH = IMG_DIR / "app-icon.svg"
 
 ICO_SIZES = [16, 24, 32, 48, 64, 128, 256]
+
+# The mark's rounded-square sits at x/y 82..942 inside the 1024 canvas, so the
+# raw SVG carries ~8% transparent margin on every side. That's fine for the
+# README hero (logo.png keeps it) but makes the *taskbar* icon look shrunken —
+# Windows adds its own padding around whatever we hand it. Crop the .ico frames
+# to the artwork bounds so the tile is full-bleed and reads at taskbar size.
+ARTWORK_BOX = QRectF(82, 82, 860, 860)
 
 
 def render_png(renderer: QSvgRenderer, size: int) -> bytes:
@@ -61,7 +68,11 @@ def main() -> None:
 
     IMG_DIR.mkdir(parents=True, exist_ok=True)
 
+    # logo.png keeps the full canvas (with margin) for the README hero.
     (IMG_DIR / "logo.png").write_bytes(render_png(renderer, 1024))
+
+    # Crop to the artwork for the OS icon frames — full-bleed reads better small.
+    renderer.setViewBox(ARTWORK_BOX)
 
     # Render each ICO frame from the SVG at its native size so Windows has a
     # crisp image at every taskbar / Alt-Tab / file-explorer DPI bucket.

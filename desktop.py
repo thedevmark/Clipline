@@ -66,9 +66,24 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _set_windows_app_id() -> None:
+    """Tell Windows this process is its own app, so the taskbar shows the
+    window icon (not python.exe's) and groups buttons under Clipline. No-op off
+    Windows. Must run before the first window is shown."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Clipline.App")
+    except Exception:
+        pass
+
+
 def run_gui() -> int:
     """Launch the Qt main window. Returns the QApplication exit code."""
     ensure_dirs()
+    _set_windows_app_id()
     app = QApplication.instance() or QApplication(sys.argv)
     runner = JobRunner()
     from native.ui.window import MainWindow
