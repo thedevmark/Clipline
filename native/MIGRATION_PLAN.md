@@ -29,7 +29,7 @@ deferred to the v0.2.x line so v0.2.0 could ship a working funnel.
 | 1 | Window chrome + nav spine (menubar, `QStackedWidget`, status bar, SVG icon) | ✅ Done |
 | 2 | Ingest (local + URL via yt-dlp + Twitch device-code login + VOD/clip browser) | ✅ Done — see Twitch note |
 | 3 | Inbox (cut list + inspector + waveform timeline w/ drag-trim) | ✅ Done — Twitch marker/clip *import* still deferred |
-| 4 | Shorts (preset picker + faster-whisper caption pass + caption editor) | ✅ Done — facecam guide overlay deferred |
+| 4 | Shorts (preset picker + whisper.cpp caption pass + caption editor) | ✅ Done — facecam guide overlay deferred |
 | 5 | Output (longform build, format presets) | ✅ Done |
 | 6 | Onboarding + deps + first-run guided tour | ✅ Done |
 | 7 | Kill the web stack | ✅ Done — `static/` trimmed to icon assets only (see note) |
@@ -232,12 +232,15 @@ inbox + inspector + drag-trim + bulk ops + import-from-Twitch glue.
 
 ## Phase 4 — Shorts polish stage (presets + captions)
 
-> **Status: ✅ Done (v0.2.x).** Preset picker + a real **caption pass**:
-> `captions.py` is extracted into `native/services/` (transcription + ASS/SRT,
-> single-speaker), runs on a `QThread`, and opens a **caption editor** dialog
-> (edit text, toggle words, speaker colour, burn-in flag, ASS/SRT export).
-> faster-whisper stays unbundled — the stage gates on its availability. Facecam
-> guide overlay and render-time burn-in still **deferred**.
+> **Status: ✅ Done (v0.2.x).** Preset picker + a real **caption pass**. The
+> engine is **whisper.cpp**, not faster-whisper: the audience can't `pip install`
+> (and the legacy managed-venv still needed a system Python + multi-GB torch),
+> so the speech engine is a native binary + 60 MB model **downloaded with one
+> click** into the runtime dir — like ffmpeg/yt-dlp. `captions.py` keeps the
+> ASS/SRT generation; `whisper_cpp.py` does provisioning + transcription. The
+> **caption editor** dialog (edit text, toggle words, speaker colour, burn-in
+> flag, ASS/SRT export) is backend-agnostic. Facecam guide overlay and
+> render-time burn-in still **deferred**.
 
 Goal: prep one clip or the whole inbox into shorts; run captions.
 
@@ -409,8 +412,11 @@ artifact, not your local `dist/`.**
   good theme and ship. Themes can come back after parity.
 - **In-app updates.** Out of scope for v0.2.0. Users upgrade by
   downloading a new release.
-- **The captioning virtualenv UX rework.** The 1-click installer flow is
-  already solid in `app.py`; port the wiring, don't redesign it.
+- ~~**The captioning virtualenv UX rework.**~~ **Superseded.** The legacy
+  "1-click" venv installer still required a system Python (it just searched PATH
+  for `python`/`py`) and pulled multi-GB torch — unusable for a non-technical
+  streamer audience. v0.2.x replaced the whole approach with whisper.cpp
+  (native binary + small model, downloaded on demand). No venv, no Python, no pip.
 
 ---
 
