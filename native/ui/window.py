@@ -31,7 +31,7 @@ from native.services.export_presets import (
     style_preset_by_key,
 )
 from native.services.paths import DOWNLOADS_DIR
-from native.services.settings import get_output_dir
+from native.services.settings import get_output_dir, load_settings, save_settings
 from native.services.tools import TOOLS
 from native.ui import theme
 from native.ui.project_state import Clip, ProjectState
@@ -116,6 +116,12 @@ class MainWindow(QMainWindow):
 
         self._state.source_changed.connect(self._on_source_changed)
 
+        # First-run guided tour fires when the first clip lands (ALERT §7: this
+        # is mid-session, so QSettings-gating is allowed here — unlike launch).
+        self._tour = None
+        self._tour_seen = bool(load_settings().get("tour_seen", False))
+        self._state.clips_changed.connect(self._maybe_start_tour)
+
         self._build_menubar()
         self._set_stage(STAGE_PROJECT)
 
@@ -167,6 +173,29 @@ class MainWindow(QMainWindow):
     def _set_stage(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
         self._stage_label.setText(STAGE_NAMES[index])
+
+    # ────────────────────────────────────────────────────────────────────
+    # First-run guided tour
+    # ────────────────────────────────────────────────────────────────────
+
+    def _maybe_start_tour(self, clips: list) -> None:
+        if self._tour_seen or not clips:
+            return
+        self._tour_seen = True
+        settings = load_settings()
+        settings["tour_seen"] = True
+        save_settings(settings)
+        self._set_stage(STAGE_INBOX)
+        # Let the inbox lay out at full size before measuring spotlight rects.
+        from PySide6.QtCore import QTimer
+
+        QTimer.singleShot(60, self._start_tour)
+
+    def _start_tour(self) -> None:
+        from native.ui.guided_tour import GuidedTour
+
+        self._tour = GuidedTour(self._stack, on_done=lambda: setattr(self, "_tour", None))
+        self._tour.start(self._inbox_stage.tour_targets())
 
     # ────────────────────────────────────────────────────────────────────
     # File / source actions

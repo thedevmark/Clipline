@@ -99,7 +99,8 @@ class InboxStage(QWidget):
         split = QHBoxLayout()
         split.setSpacing(20)
         split.addLayout(self._build_list_column(), 1)
-        split.addWidget(self._build_inspector(), 0)
+        self._inspector_card = self._build_inspector()
+        split.addWidget(self._inspector_card, 0)
         outer.addLayout(split, 1)
 
         # Waveform + drag-trim timeline for the active clip.
@@ -329,3 +330,21 @@ class InboxStage(QWidget):
         idx = self._state.active_clip_index
         if idx is not None:
             self.request_remove_clip.emit(idx)
+
+    # ── guided tour ──────────────────────────────────────────────────
+
+    def tour_targets(self) -> list:
+        """Spotlight targets for the first-run tour (timeline → inspector → render)."""
+        from native.ui.guided_tour import TourStep
+
+        return [
+            TourStep(self._timeline, "Trim on the timeline",
+                     "Drag the in/out handles to retrim your clip against the waveform. "
+                     "Drag the middle to slide the whole window."),
+            TourStep(self._inspector_card, "Name it and add notes",
+                     "Give the clip a title and jot notes — these ride along to the "
+                     "Shorts and Output stages."),
+            TourStep(self._render_btn, "Render it",
+                     "Render this clip on its own, or head to the Output stage to "
+                     "stitch everything into one longform cut."),
+        ]
