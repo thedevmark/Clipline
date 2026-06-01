@@ -27,28 +27,33 @@ deferred to the v0.2.x line so v0.2.0 could ship a working funnel.
 |---|---|---|
 | 0 | Skeleton + backend decoupling (`native/services/`, `workers.py`, self-tests) | ✅ Done |
 | 1 | Window chrome + nav spine (menubar, `QStackedWidget`, status bar, SVG icon) | ✅ Done |
-| 2 | Ingest (local file + preview + mark in/out + export) | 🟡 Partial — URL ingest stubbed, Twitch auth not started |
-| 3 | Inbox (cut list, double-click render) | 🟡 Partial — inspector, drag-trim, waveform, marker import deferred |
-| 4 | Shorts (caption-runtime status + pip pointer, preset picker) | 🟡 Partial — caption *pass* + editor deferred (`captions.py` not extracted) |
+| 2 | Ingest (local + URL via yt-dlp + Twitch device-code login + VOD/clip browser) | ✅ Done — see Twitch note |
+| 3 | Inbox (cut list + inspector + waveform timeline w/ drag-trim) | ✅ Done — Twitch marker/clip *import* still deferred |
+| 4 | Shorts (preset picker + faster-whisper caption pass + caption editor) | ✅ Done — facecam guide overlay deferred |
 | 5 | Output (longform build, format presets) | ✅ Done |
-| 6 | Onboarding + dependency setup (ungated welcome + deps check + Install/Re-check) | ✅ Done — guided tour (6.4) deferred |
+| 6 | Onboarding + deps + first-run guided tour | ✅ Done |
 | 7 | Kill the web stack | ✅ Done — `static/` trimmed to icon assets only (see note) |
-| 8 | Release verification (`v0.2.0` tag, downloaded-EXE self-tests) | ✅ Done |
+| 8 | Release verification (`v0.2.0` tag, downloaded-EXE self-tests) | ✅ Done (v0.2.0); a v0.2.x re-verify is due after this batch |
 
-**Deferred to v0.2.x** (tracked here, not lost):
+**Twitch auth — resolved differently than the original plan.** The plan called
+for a system-browser + loopback `QTcpServer` callback against
+`auth.deutschmark.online`. We found the broker only allowlists web origins, so
+a desktop loopback redirect is rejected (the original open bug). Instead the
+native app uses the **OAuth Device Code Flow** directly against Twitch
+(`native/services/twitch_auth.py`): no redirect URI, no local server, no broker
+dependency. Needs a Twitch application Client ID (public client) via
+`CLIPLINE_TWITCH_CLIENT_ID` or the in-app prompt.
 
-- **URL ingest** — the Ingest URL field + "Load URL" button ship disabled
-  (`native/ui/stages/ingest.py`). Wire `ytdlp.py` behind them.
-- **Twitch live auth** — system-browser + loopback `QTcpServer` callback
-  (Phase 2 plan). Still the open bug from the web build; no webview now, so
-  the deflect is gone but the flow itself is unbuilt.
-- **Inbox depth** — inspector dock, draggable trim handles, `showwavespic`
-  waveform track, thumbnails, Twitch marker/clip import (Phase 3 full scope).
-- **Captions** — extract `captions.py` into `native/services/`, run the pass
-  on a `QThread`, and port the caption-editor dialog (Phase 4 full scope).
-  Today the Shorts stage only reports runtime status and shows the pip command.
-- **Guided tour** — first-clip spotlight overlay (Phase 6.4). QSettings-gating
-  is allowed here because it's mid-session, not a launch screen.
+**Still deferred to a later v0.2.x:**
+
+- **Twitch marker/clip → multi-clip import** — auto-populate the inbox from a
+  VOD's markers / a channel's clips (Phase 3 bulk scope). Single-item download
+  works today.
+- **Facecam guide overlay** — draggable rect on the preview (Phase 4).
+- **Caption burn-in at render** — the editor sets a burn-in flag, but the render
+  pipeline doesn't consume it yet.
+- **Token refresh** — device-flow tokens expire (~4h); on 401 the app prompts a
+  reconnect rather than silently refreshing (public client has no secret).
 
 **Deviation from the written plan:** Phase 7 said "delete `static/` entirely,
 `datas = []`." We kept `static/favicon.ico` + `static/img/app-icon.svg` — the
@@ -153,11 +158,11 @@ workspace tabs `index.html:332-362`, step sections). Collapse to one.
 
 ## Phase 2 — Ingest stage (source intake + Twitch session)
 
-> **Status: 🟡 Partial (v0.2.0).** Local-file intake, drag-drop, preview, and
-> mark in/out → export all work. The URL field + "Load URL" button ship
-> **disabled**; `ytdlp.py` is not wired yet. Twitch live auth is **not built**
-> — the webview deflect is gone with the web stack, but the system-browser +
-> loopback callback flow below is still TODO. → v0.2.x.
+> **Status: ✅ Done (v0.2.x).** Local-file intake, drag-drop, preview, mark
+> in/out → export, **URL ingest** via yt-dlp, and **Twitch login** all work.
+> Auth uses the OAuth **Device Code Flow** (not the planned loopback/broker —
+> see the Twitch note in the Status section); once connected, the Ingest stage
+> browses your VODs/clips and a pick downloads straight into the preview.
 
 Goal: load a VOD by URL or local file; the preview plays.
 
@@ -188,11 +193,10 @@ Goal: load a VOD by URL or local file; the preview plays.
 
 ## Phase 3 — Inbox stage (clip cut list + inspector)
 
-> **Status: 🟡 Partial (v0.2.0).** Minimum viable cut list: a `QListWidget` of
-> marked clips (title + range), double-click to render one via the worker.
-> The inspector dock, custom delegate w/ thumbnails, `QGraphicsScene` timeline
-> with draggable trim handles, `showwavespic` waveform, and Twitch
-> marker/clip import are all **deferred**. → v0.2.x.
+> **Status: ✅ Done (v0.2.x).** Cut list + inspector (title/notes/range/
+> duration, writes back to `ProjectState`) + a waveform timeline (`showwavespic`)
+> with **draggable in/out trim handles** and body-drag. Still deferred:
+> thumbnails in the rows, and bulk Twitch **marker/clip import**.
 
 Goal: the cut list. This is the largest single piece — `reel.js` has the
 inbox + inspector + drag-trim + bulk ops + import-from-Twitch glue.
@@ -228,12 +232,12 @@ inbox + inspector + drag-trim + bulk ops + import-from-Twitch glue.
 
 ## Phase 4 — Shorts polish stage (presets + captions)
 
-> **Status: 🟡 Partial (v0.2.0).** Style/format preset picker landed (driving
-> `export_presets.py`). The Shorts stage reports caption-runtime status
-> (faster-whisper / torch / pyannote) and shows the pip command, but does
-> **not** run the pass — `captions.py` is not yet extracted into
-> `native/services/`. Caption editor dialog and facecam guide overlay
-> **deferred**. → v0.2.x.
+> **Status: ✅ Done (v0.2.x).** Preset picker + a real **caption pass**:
+> `captions.py` is extracted into `native/services/` (transcription + ASS/SRT,
+> single-speaker), runs on a `QThread`, and opens a **caption editor** dialog
+> (edit text, toggle words, speaker colour, burn-in flag, ASS/SRT export).
+> faster-whisper stays unbundled — the stage gates on its availability. Facecam
+> guide overlay and render-time burn-in still **deferred**.
 
 Goal: prep one clip or the whole inbox into shorts; run captions.
 
@@ -292,11 +296,11 @@ already has the longform clone pipeline (`reel.py:1653-1705`).
 
 ## Phase 6 — Onboarding + dependency setup
 
-> **Status: ✅ Done (v0.2.0).** Welcome + dependency check are shown every
-> launch, ungated (no QSettings flag). Missing required tools now show an
-> **Install** button (winget) + a **Re-check** that re-scans without relaunch.
-> The first-clip guided tour (6.4) is **deferred** — QSettings-gating is fine
-> there since it's mid-session, not a launch screen. → v0.2.x.
+> **Status: ✅ Done (v0.2.x).** Welcome + dependency check shown every launch,
+> ungated. Missing required tools show an **Install** button (winget) + a
+> **Re-check** that re-scans without relaunch. The first-clip **guided tour**
+> (6.4) now fires once (spotlight over timeline → inspector → render),
+> QSettings-gated since it's mid-session.
 
 **Read ALERT §7 carefully before starting this phase.** This is where the
 sibling repo lost the most time.
