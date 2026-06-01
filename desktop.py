@@ -178,7 +178,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.selftest:
         input_path = Path(args.selftest[0]).resolve()
         output_path = Path(args.selftest[1]).resolve()
-        return run_selftest(input_path, output_path)
+        code = run_selftest(input_path, output_path)
+        # The work is done and the result is printed. Qt worker threads crash on
+        # interpreter teardown ("QThread: Destroyed while thread is still
+        # running" -> 0xC0000409), which would mask a real PASS with a bogus
+        # nonzero exit. Hard-exit with the true code, skipping the crashy
+        # teardown — this is a headless one-shot whose only output is the code.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(code)
     return run_gui()
 
 
