@@ -318,21 +318,28 @@ def ytdlp_download(
     return media[0]
 
 
+def download_captioner(job: WorkerJob) -> bool:
+    """Provision the whisper.cpp engine (binary + model). One-click, no pip."""
+    from native.services import whisper_cpp
+
+    whisper_cpp.download(on_progress=job.progress.emit, on_pct=job.progress_pct.emit)
+    return True
+
+
 def caption_pass(
     job: WorkerJob,
+    ffmpeg: str,
     media_path: Path,
     out_dir: Path,
-    model_size: str = "base",
 ) -> dict:
-    """Transcribe ``media_path`` and write .ass + .srt next to it.
+    """Transcribe ``media_path`` (whisper.cpp) and write .ass + .srt next to it.
 
-    Returns ``{"words", "ass", "srt"}``. faster-whisper is imported lazily
-    inside the service, so a missing runtime surfaces as a normal job error.
+    Returns ``{"words", "ass", "srt"}``.
     """
     from native.services import captions
 
     words = captions.transcribe_words(
-        Path(media_path), model_size=model_size, on_progress=job.progress.emit,
+        Path(media_path), ffmpeg, on_progress=job.progress.emit,
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = Path(media_path).stem

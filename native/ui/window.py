@@ -86,7 +86,7 @@ class MainWindow(QMainWindow):
         self._inbox_stage.request_export_clip.connect(self._export_clip)
         self._inbox_stage.request_remove_clip.connect(self._state.remove_clip)
 
-        self._shorts_stage = ShortsStage(self._state, runner)
+        self._shorts_stage = ShortsStage(self._state, runner, ffmpeg)
         self._output_stage = OutputStage(self._state)
         self._output_stage.request_render_all.connect(self._render_all_clips)
         self._output_stage.request_build_longform.connect(self._build_longform)

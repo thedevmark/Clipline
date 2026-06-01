@@ -1,22 +1,21 @@
 """Caption pipeline for the native shell — transcription + ASS/SRT generation.
 
-Ported from the legacy Flask ``captions.py``: the style presets, word→line
-grouping, and ASS builder are carried over verbatim (they produce the same
-subtitle output the web build shipped). What's dropped: the Flask routes, the
-``import app`` import-path shim, and pyannote diarization — the native MVP runs
-single-speaker, which covers the streamer-clip case.
+The style presets, word→line grouping, and ASS builder are carried over verbatim
+from the legacy Flask ``captions.py`` (same subtitle output the web build
+shipped); the Flask routes, ``import app`` shim, and pyannote diarization are
+dropped (MVP is single-speaker).
 
-faster-whisper is NOT bundled in the EXE (~300 MB of ML deps), so everything
-here lazy-imports it and ``available()`` lets the UI gate the feature.
+The transcription backend is **whisper.cpp**, not faster-whisper: the audience
+can't ``pip install``, so the engine is a downloaded native binary + model
+(see ``whisper_cpp.py``). This module just delegates and keeps the subtitle
+formatting. ``available()`` reflects whether that engine is provisioned.
 """
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Callable, Optional
 
-from native.services.paths import APP_STATE_DIR
-
-WHISPER_CACHE_DIR = APP_STATE_DIR / "whisper-cache"
+from native.services import whisper_cpp
 
 DEFAULT_SPEAKER_COLORS = ["#FFD700", "#00BFFF", "#FF6B6B", "#7CFC00", "#FF69B4"]
 DEFAULT_CAPTION_STYLE = {
@@ -48,13 +47,8 @@ CAPTION_STYLE_PRESETS = {
 
 
 def available() -> bool:
-    """True if faster-whisper can be imported in this environment."""
-    try:
-        import importlib.util
-
-        return importlib.util.find_spec("faster_whisper") is not None
-    except Exception:
-        return False
+    """True if the whisper.cpp engine (binary + model) is provisioned."""
+    return whisper_cpp.is_ready()
 
 
 def normalize_caption_style(style: Optional[dict] = None) -> dict:
@@ -78,55 +72,16 @@ def normalize_caption_style(style: Optional[dict] = None) -> dict:
     return resolved
 
 
-def _whisper_model(model_size: str = "base"):
-    """Lazy-load faster-whisper. Defaults to 'base' for a fast native pass."""
-    from faster_whisper import WhisperModel
-
-    try:
-        import torch
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        compute_type = "float16" if device == "cuda" else "int8"
-    except ImportError:
-        device, compute_type = "cpu", "int8"
-    WHISPER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return WhisperModel(model_size, device=device, compute_type=compute_type,
-                        download_root=str(WHISPER_CACHE_DIR))
-
-
 def transcribe_words(
     media_path: Path,
-    model_size: str = "base",
-    language: Optional[str] = None,
+    ffmpeg: str,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> list[dict]:
-    """Transcribe to word-level dicts: {text, start, end, confidence, speaker, enabled}."""
-    if on_progress:
-        on_progress(f"Loading speech model ({model_size})…")
-    model = _whisper_model(model_size)
-    if on_progress:
-        on_progress("Transcribing…")
-    segments, info = model.transcribe(
-        str(media_path),
-        language=language,
-        word_timestamps=True,
-        vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 500},
-    )
-    words: list[dict] = []
-    for segment in segments:
-        for word in (segment.words or []):
-            words.append({
-                "text": word.word.strip(),
-                "start": round(word.start, 3),
-                "end": round(word.end, 3),
-                "confidence": round(word.probability, 3),
-                "speaker": "SPEAKER_0",
-                "enabled": True,
-            })
-        if on_progress and getattr(info, "duration", 0):
-            on_progress(f"Transcribing… ({len(words)} words)")
-    return words
+    """Transcribe to word-level dicts via whisper.cpp.
+
+    Returns ``[{text, start, end, speaker, enabled}, ...]``.
+    """
+    return whisper_cpp.transcribe(Path(media_path), ffmpeg, on_progress=on_progress)
 
 
 def group_words_into_lines(words: list[dict], max_words: int = 6) -> list[dict]:
