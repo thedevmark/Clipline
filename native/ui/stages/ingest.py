@@ -40,6 +40,8 @@ from PySide6.QtWidgets import (
 
 from native.ui import theme
 from native.ui.project_state import Clip, ProjectState
+from native.ui.twitch_panel import TwitchPanel
+from native.workers import JobRunner
 
 
 def _format_ms(ms: int) -> str:
@@ -105,13 +107,15 @@ class _DropZone(QFrame):
 class IngestStage(QWidget):
     """Load a source, preview it, mark in/out, hand off to the worker."""
 
-    request_export = Signal(int, int)  # start_ms, end_ms — wired by the window
+    request_export = Signal(int, int)   # start_ms, end_ms — wired by the window
+    request_download = Signal(str)      # a URL to fetch via yt-dlp — wired by the window
 
-    def __init__(self, state: ProjectState) -> None:
+    def __init__(self, state: ProjectState, runner: JobRunner) -> None:
         super().__init__()
         self.setObjectName("stage")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._state = state
+        self._runner = runner
         self._duration_ms = 0
         self._in_ms = 0
         self._out_ms = 0
@@ -193,12 +197,11 @@ class IngestStage(QWidget):
         url_row = QHBoxLayout()
         url_row.setSpacing(8)
         self._url_input = QLineEdit()
-        self._url_input.setPlaceholderText("Twitch / YouTube / TikTok URL — (yt-dlp ingest lands next phase)")
-        self._url_input.setEnabled(False)
+        self._url_input.setPlaceholderText("Paste a Twitch / YouTube / TikTok URL…")
+        self._url_input.returnPressed.connect(self._submit_url)
         url_row.addWidget(self._url_input, 1)
         self._url_btn = QPushButton("Load URL")
-        self._url_btn.setEnabled(False)
-        self._url_btn.setToolTip("URL ingest is wired in the next phase.")
+        self._url_btn.clicked.connect(self._submit_url)
         url_row.addWidget(self._url_btn)
         card_layout.addLayout(url_row)
 
@@ -216,6 +219,10 @@ class IngestStage(QWidget):
         card_layout.addWidget(self._drop)
 
         column.addWidget(card)
+
+        # Twitch connect + VOD/clip browser — the auth-first ingest base.
+        self._twitch = TwitchPanel(self._runner, on_ingest=self.request_download.emit)
+        column.addWidget(self._twitch)
 
         # Preview card.
         preview_card = QFrame()
@@ -327,6 +334,11 @@ class IngestStage(QWidget):
     # ────────────────────────────────────────────────────────────────────
     # Player wiring
     # ────────────────────────────────────────────────────────────────────
+
+    def _submit_url(self) -> None:
+        url = self._url_input.text().strip()
+        if url:
+            self.request_download.emit(url)
 
     def _load_path(self, path: Path) -> None:
         self._state.set_source(path)

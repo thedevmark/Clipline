@@ -30,7 +30,9 @@ from native.services.export_presets import (
     format_preset_by_key,
     style_preset_by_key,
 )
+from native.services.paths import DOWNLOADS_DIR
 from native.services.settings import get_output_dir
+from native.services.tools import TOOLS
 from native.ui import theme
 from native.ui.project_state import Clip, ProjectState
 from native.ui.stages.inbox import InboxStage
@@ -38,7 +40,7 @@ from native.ui.stages.ingest import IngestStage
 from native.ui.stages.output import OutputStage
 from native.ui.stages.project import ProjectStage
 from native.ui.stages.shorts import ShortsStage
-from native.workers import JobRunner, ffmpeg_export, longform_export
+from native.workers import JobRunner, ffmpeg_export, longform_export, ytdlp_download
 
 
 STAGE_PROJECT, STAGE_INGEST, STAGE_INBOX, STAGE_SHORTS, STAGE_OUTPUT = range(5)
@@ -77,8 +79,9 @@ class MainWindow(QMainWindow):
             on_start_session=lambda: self._set_stage(STAGE_INGEST),
             icon_path=icon_path,
         )
-        self._ingest_stage = IngestStage(self._state)
+        self._ingest_stage = IngestStage(self._state, runner)
         self._ingest_stage.request_export.connect(self._export_marked_range)
+        self._ingest_stage.request_download.connect(self._download_url)
         self._inbox_stage = InboxStage(self._state)
         self._inbox_stage.request_export_clip.connect(self._export_clip)
         self._inbox_stage.request_remove_clip.connect(self._state.remove_clip)
@@ -200,6 +203,34 @@ class MainWindow(QMainWindow):
     # ────────────────────────────────────────────────────────────────────
     # Worker dispatch
     # ────────────────────────────────────────────────────────────────────
+
+    def _download_url(self, url: str) -> None:
+        """Fetch a URL (Twitch VOD/clip, etc.) via yt-dlp, then load it."""
+        if not url:
+            return
+        self._set_stage(STAGE_INGEST)
+        self._progress.setVisible(True)
+        self._progress.setValue(0)
+        self._jobs_label.setText("Downloading…")
+        self._runner.run(
+            ytdlp_download,
+            TOOLS.ytdlp,
+            TOOLS.ffmpeg_dir,
+            url,
+            DOWNLOADS_DIR,
+            on_progress=lambda msg: self._jobs_label.setText(msg),
+            on_progress_pct=lambda pct: self._progress.setValue(int(pct * 100)),
+            on_finished=self._on_download_finished,
+            on_error=self._on_render_error,
+        )
+
+    def _on_download_finished(self, result: object) -> None:
+        self._progress.setValue(100)
+        self._progress.setVisible(False)
+        path = Path(str(result))
+        self._jobs_label.setText(f"Loaded {path.name}")
+        self._state.set_source(path)
+        self._set_stage(STAGE_INGEST)
 
     def _export_marked_range(self, start_ms: int, end_ms: int) -> None:
         if self._state.source is None:

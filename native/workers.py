@@ -7,6 +7,7 @@ they aren't garbage-collected mid-run — ``ALERT_REBUILD_LESSONS.md`` §6.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import tempfile
 import threading
@@ -220,6 +221,72 @@ def longform_export(
     job.progress_pct.emit(1.0)
     job.progress.emit("Done")
     return output_path
+
+
+_YTDLP_PCT = re.compile(r"\[download\]\s+([\d.]+)%")
+
+
+def ytdlp_download(
+    job: WorkerJob,
+    ytdlp: str,
+    ffmpeg_dir: Optional[str],
+    url: str,
+    dest_dir: Path,
+) -> Path:
+    """Download a single URL (Twitch VOD/clip, etc.) to ``dest_dir``.
+
+    Downloads into a fresh unique subdir so the resulting media file is
+    unambiguous to locate (no --print parsing to disentangle from progress).
+    Streams ``--newline`` so the ``[download] NN%`` lines drive the progress
+    bar. Returns the path to the downloaded media file.
+    """
+    from ytdlp import summarize_ytdlp_error  # local import: keep import graph flat
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    args = [
+        ytdlp,
+        "--no-playlist",
+        "--newline",
+        "--no-part",
+        "-f", "bv*+ba/b",
+        "--merge-output-format", "mp4",
+        "-o", str(dest_dir / "%(title).80s-%(id)s.%(ext)s"),
+    ]
+    if ffmpeg_dir:
+        args += ["--ffmpeg-location", ffmpeg_dir]
+    args.append(url)
+
+    job.progress.emit("Starting download…")
+    proc = subprocess.Popen(
+        args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    assert proc.stdout is not None
+    stderr_tail: list[str] = []
+    try:
+        for line in proc.stdout:
+            line = line.rstrip()
+            match = _YTDLP_PCT.search(line)
+            if match:
+                job.progress_pct.emit(min(max(float(match.group(1)) / 100.0, 0.0), 1.0))
+            if line.startswith("[download]") or line.startswith("[Merger]"):
+                job.progress.emit(line[:120])
+    finally:
+        ret = proc.wait()
+        if proc.stderr is not None:
+            stderr_tail = proc.stderr.read().splitlines()[-20:]
+
+    if ret != 0:
+        raise RuntimeError(summarize_ytdlp_error("\n".join(stderr_tail)))
+
+    media = [
+        p for p in sorted(dest_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+        if p.is_file() and p.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov", ".m4v"}
+    ]
+    if not media:
+        raise RuntimeError("Download finished but no media file was produced.")
+    job.progress_pct.emit(1.0)
+    job.progress.emit(f"Downloaded {media[0].name}")
+    return media[0]
 
 
 def _probe_duration_us(ffprobe: str, input_path: Path) -> Optional[int]:
