@@ -318,6 +318,33 @@ def ytdlp_download(
     return media[0]
 
 
+def caption_pass(
+    job: WorkerJob,
+    media_path: Path,
+    out_dir: Path,
+    model_size: str = "base",
+) -> dict:
+    """Transcribe ``media_path`` and write .ass + .srt next to it.
+
+    Returns ``{"words", "ass", "srt"}``. faster-whisper is imported lazily
+    inside the service, so a missing runtime surfaces as a normal job error.
+    """
+    from native.services import captions
+
+    words = captions.transcribe_words(
+        Path(media_path), model_size=model_size, on_progress=job.progress.emit,
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = Path(media_path).stem
+    ass_path = out_dir / f"{stem}.ass"
+    srt_path = out_dir / f"{stem}.srt"
+    speakers = {"SPEAKER_0": {"color": captions.DEFAULT_SPEAKER_COLORS[0]}}
+    ass_path.write_text(captions.generate_ass_subtitles(words, speakers), encoding="utf-8")
+    srt_path.write_text(captions.generate_srt(words), encoding="utf-8")
+    job.progress.emit(f"{len(words)} words transcribed")
+    return {"words": words, "ass": str(ass_path), "srt": str(srt_path)}
+
+
 def _probe_duration_us(ffprobe: str, input_path: Path) -> Optional[int]:
     try:
         result = subprocess.run(

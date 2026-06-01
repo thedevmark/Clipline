@@ -21,12 +21,18 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
+from native.services import captions
+from native.services.paths import PROCESSING_DIR
 from native.ui import theme
+from native.ui.caption_editor import CaptionEditor
+from native.ui.project_state import ProjectState
+from native.workers import JobRunner, caption_pass
 
 
 _CAPTION_RUNTIME_PACKAGES = (
@@ -45,10 +51,12 @@ def _check_package(import_name: str) -> bool:
 
 
 class ShortsStage(QWidget):
-    def __init__(self) -> None:
+    def __init__(self, state: ProjectState, runner: JobRunner) -> None:
         super().__init__()
         self.setObjectName("stage")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._state = state
+        self._runner = runner
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(48, 40, 48, 40)
@@ -103,11 +111,16 @@ class ShortsStage(QWidget):
             card_layout.addLayout(row)
 
         install_row = QHBoxLayout()
+        self._run_btn = QPushButton("Run caption pass")
+        self._run_btn.setProperty("primary", True)
+        self._run_btn.clicked.connect(self._run_caption_pass)
+        install_row.addWidget(self._run_btn)
         install_btn = QPushButton("Show pip command")
-        install_btn.setProperty("primary", True)
         install_btn.clicked.connect(self._show_pip_command)
         install_row.addWidget(install_btn)
-        install_row.addStretch(1)
+        self._caption_status = QLabel("")
+        self._caption_status.setProperty("hint", True)
+        install_row.addWidget(self._caption_status, 1)
         card_layout.addLayout(install_row)
 
         self._pip_label = QLabel("")
@@ -154,3 +167,42 @@ class ShortsStage(QWidget):
             "pip install faster-whisper torch pyannote.audio"
         )
         self._pip_label.setVisible(True)
+
+    def _run_caption_pass(self) -> None:
+        if not captions.available():
+            QMessageBox.information(
+                self, "Captioning runtime missing",
+                "faster-whisper isn't installed in this Python environment.\n\n"
+                "Install it (see the pip command), then run the pass again.",
+            )
+            self._show_pip_command()
+            return
+        source = self._state.source
+        if source is None:
+            QMessageBox.information(
+                self, "No source", "Load a video in the Ingest stage first."
+            )
+            return
+        self._run_btn.setEnabled(False)
+        self._caption_status.setText("Transcribing…")
+        self._runner.run(
+            caption_pass,
+            source,
+            PROCESSING_DIR,
+            on_progress=lambda msg: self._caption_status.setText(msg),
+            on_finished=self._on_captions_ready,
+            on_error=self._on_captions_error,
+        )
+
+    def _on_captions_ready(self, result: object) -> None:
+        self._run_btn.setEnabled(True)
+        data = result if isinstance(result, dict) else {}
+        words = data.get("words", [])
+        self._caption_status.setText(f"{len(words)} words — opening editor")
+        editor = CaptionEditor(words, data.get("ass"), data.get("srt"), parent=self)
+        editor.exec()
+
+    def _on_captions_error(self, message: str) -> None:
+        self._run_btn.setEnabled(True)
+        self._caption_status.setText("Caption pass failed")
+        QMessageBox.warning(self, "Caption pass failed", message)
