@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -204,7 +204,8 @@ class ProjectStage(QWidget):
         dheader.addStretch(1)
         recheck = QPushButton("Re-check")
         recheck.setMinimumHeight(28)
-        recheck.clicked.connect(self._refresh_deps)
+        recheck.clicked.connect(self._on_recheck)
+        self._recheck_btn = recheck
         dheader.addWidget(recheck)
         deps_layout.addLayout(dheader)
 
@@ -240,6 +241,25 @@ class ProjectStage(QWidget):
     # ────────────────────────────────────────────────────────────────────
     # Dependency rows
     # ────────────────────────────────────────────────────────────────────
+
+    def _on_recheck(self) -> None:
+        """Show a visible 'Re-checking…' state, then run the scan one tick later.
+
+        The scan itself is fast and synchronous, so without deferring it the
+        in-progress frame never paints — the button would look like it did
+        nothing. Disabling + relabelling, then scanning via a single-shot timer,
+        guarantees the user sees the re-check happen.
+        """
+        self._recheck_btn.setEnabled(False)
+        self._recheck_btn.setText("Re-checking…")
+        self._deps_status.setText("Re-checking…")
+        self._deps_status.setStyleSheet(f"color: {theme.INK_DIM};")
+        QTimer.singleShot(250, self._do_recheck)
+
+    def _do_recheck(self) -> None:
+        self._refresh_deps()
+        self._recheck_btn.setText("Re-check")
+        self._recheck_btn.setEnabled(True)
 
     def _refresh_deps(self) -> None:
         """Re-scan tool discovery and rebuild the status rows in place."""
