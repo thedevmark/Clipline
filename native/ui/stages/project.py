@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import platform
 import subprocess
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -213,6 +214,13 @@ class ProjectStage(QWidget):
         self._deps_body.setSpacing(8)
         deps_layout.addLayout(self._deps_body)
 
+        # Re-check feedback: without this, clicking "Re-check" silently rebuilds
+        # identical rows and reads as a dead button when nothing's missing.
+        self._deps_status = QLabel("")
+        self._deps_status.setWordWrap(True)
+        deps_layout.addSpacing(4)
+        deps_layout.addWidget(self._deps_status)
+
         deps_hint = QLabel(
             "Required tools must be on PATH or in the Clipline runtime folder. "
             "Click Install to fetch a missing one via winget, then Re-check — "
@@ -242,12 +250,15 @@ class ProjectStage(QWidget):
             if widget is not None:
                 widget.deleteLater()
 
+        missing: list[str] = []
         for name, path in (
             ("ffmpeg", TOOLS.ffmpeg),
             ("ffprobe", TOOLS.ffprobe),
             ("yt-dlp", TOOLS.ytdlp),
         ):
             present = _is_explicit_tool_path(path, name)
+            if not present:
+                missing.append(name)
             detail = path if present else "not found — install below"
             self._deps_body.addWidget(
                 self._dep_row(name, present, detail, install_id=WINGET_IDS.get(name))
@@ -267,6 +278,21 @@ class ProjectStage(QWidget):
             "optional — install with pip for the caption pass",
             optional=True,
         ))
+
+        # Confirm the re-check actually ran. The timestamp changes every click,
+        # so the button never reads as inert even when nothing's missing.
+        stamp = time.strftime("%H:%M:%S")
+        if missing:
+            self._deps_status.setText(
+                f"Checked {stamp} — missing: {', '.join(missing)}. "
+                "Use Install above, then Re-check."
+            )
+            self._deps_status.setStyleSheet(f"color: {theme.ERROR};")
+        else:
+            self._deps_status.setText(
+                f"Checked {stamp} — all required tools found. Nothing to install."
+            )
+            self._deps_status.setStyleSheet(f"color: {theme.ACCENT};")
 
     def _dep_row(
         self,

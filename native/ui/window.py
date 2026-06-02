@@ -345,9 +345,13 @@ class MainWindow(QMainWindow):
     # ────────────────────────────────────────────────────────────────────
 
     def _show_about(self) -> None:
+        from native import __version__
+
         QMessageBox.information(
             self,
             "About Clipline",
-            "Clipline — native PySide6 video editor for streamers.\n\n"
-            "Phase 2 native build. See native/MIGRATION_PLAN.md for the phased plan.",
+            f"Clipline v{__version__}\n\n"
+            "Native PySide6 video editor for streamers — Twitch & URL ingest, "
+            "waveform trim, one-click captions, and shorts/longform export.\n\n"
+            "No browser engine, no web shell.",
         )
