@@ -46,6 +46,7 @@ class ProjectState(QObject):
     active_clip_changed = Signal(object)   # int | None (index)
     style_preset_changed = Signal(str)     # StylePreset.key
     format_preset_changed = Signal(str)    # FormatPreset.key
+    captions_changed = Signal()            # caption words/speakers/positions changed
 
     def __init__(self) -> None:
         super().__init__()
@@ -55,6 +56,10 @@ class ProjectState(QObject):
         self._active: Optional[int] = None
         self._style_key: str = "gameplay_focus"
         self._format_key: str = "shorts"
+        self._caption_words: list[dict] = []
+        self._speakers: dict[str, dict] = {}
+        self._line_overrides: dict[float, tuple[float, float]] = {}
+        self._burn_captions: bool = False
 
     @property
     def source(self) -> Optional[Path]:
@@ -144,3 +149,26 @@ class ProjectState(QObject):
     def set_format_preset(self, key: str) -> None:
         self._format_key = key
         self.format_preset_changed.emit(key)
+
+    @property
+    def caption_words(self) -> list[dict]:
+        return [dict(w) for w in self._caption_words]
+
+    @property
+    def speakers(self) -> dict:
+        return {k: dict(v) for k, v in self._speakers.items()}
+
+    @property
+    def line_overrides(self) -> dict:
+        return dict(self._line_overrides)
+
+    @property
+    def burn_captions(self) -> bool:
+        return self._burn_captions
+
+    def set_captions(self, words, speakers, line_overrides, burn_in) -> None:
+        self._caption_words = [dict(w) for w in words]
+        self._speakers = {k: dict(v) for k, v in speakers.items()}
+        self._line_overrides = dict(line_overrides)
+        self._burn_captions = bool(burn_in)
+        self.captions_changed.emit()
