@@ -190,6 +190,18 @@ def _ass_color(hex_color: str) -> str:
     return f"&H00{b:02X}{g:02X}{r:02X}&"
 
 
+def _dim_ass_color(hex_color: str, factor: float = 0.45) -> str:
+    """A darkened ASS colour — used for karaoke 'unsung' words so they read as a
+    dim version of the speaker's own colour rather than a jarring fixed red."""
+    h = hex_color.lstrip("#")
+    if len(h) == 6:
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    else:
+        r, g, b = 255, 255, 255
+    r, g, b = int(r * factor), int(g * factor), int(b * factor)
+    return f"&H00{b:02X}{g:02X}{r:02X}&"
+
+
 def build_clip_ass(
     words: list[dict],
     speakers: dict,
@@ -228,9 +240,11 @@ def build_clip_ass(
     bold = -1 if cfg["bold"] else 0
     used = {w.get("speaker", "SPEAKER_0") for w in kept} or {"SPEAKER_0"}
     for sp in sorted(used):
-        color = _ass_color(speakers.get(sp, {}).get("color", "#FFFFFF"))
+        sp_hex = speakers.get(sp, {}).get("color", "#FFFFFF")
+        color = _ass_color(sp_hex)
+        unsung = _dim_ass_color(sp_hex)
         header += (
-            f"Style: {sp},{cfg['font_family']},{font_size},{color},&H000000FF,"
+            f"Style: {sp},{cfg['font_family']},{font_size},{color},{unsung},"
             f"&H00000000&,&H64000000&,{bold},0,0,0,100,100,0,0,1,"
             f"{cfg['outline']},{cfg['shadow']},5,30,30,30,1\n"
         )

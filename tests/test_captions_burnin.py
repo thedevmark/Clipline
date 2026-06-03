@@ -43,6 +43,14 @@ class TestBuildClipAss(unittest.TestCase):
         self.assertIn(r"\pos(108,192)", ass)       # 0.1*1080, 0.1*1920
         self.assertNotIn(r"\pos(540,1632)", ass)
 
+    def test_unsung_secondary_is_dimmed_speaker_colour_not_red(self):
+        from native.services.captions import _dim_ass_color
+        speakers = {"SPEAKER_0": {"color": "#FFD700", "pos": (0.5, 0.85)}}
+        ass = build_clip_ass(self._words(), speakers, {}, 1000, 3000, 1080, 1920)
+        style_line = next(l for l in ass.splitlines() if l.startswith("Style: SPEAKER_0,"))
+        self.assertNotIn("&H000000FF", style_line)               # no longer the fixed red
+        self.assertIn(_dim_ass_color("#FFD700"), style_line)     # dimmed speaker colour
+
 
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

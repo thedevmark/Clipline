@@ -8,4 +8,4 @@ five stages (Project / Ingest / Inbox / Shorts / Output).
 
 # Single source of truth for the app version, surfaced in Help → About.
 # Keep in step with the git release tag (CI builds on a pushed ``v*`` tag).
-__version__ = "0.2.3"
+__version__ = "0.2.4"
