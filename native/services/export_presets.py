@@ -113,21 +113,25 @@ def build_clip_export_args(
     style: StylePreset,
     fmt: FormatPreset | None = None,
     normalize_audio: bool = True,
+    subtitle_ass: str | None = None,
 ) -> list[str]:
     """Compose ffmpeg args for a single-clip export.
 
     Returns the args between input and output paths so the worker can
     prepend ``-i <input>`` and append ``<output>`` itself.
     """
+    vf = style.video_filter + (
+        f",scale={fmt.width}:{fmt.height}:force_original_aspect_ratio=increase,"
+        f"crop={fmt.width}:{fmt.height}"
+        if fmt is not None
+        else ""
+    )
+    if subtitle_ass:
+        vf += f",ass='{subtitle_ass}'"
     args: list[str] = [
         "-ss", f"{start_ms / 1000:.3f}",
         "-to", f"{end_ms / 1000:.3f}",
-        "-vf", style.video_filter + (
-            f",scale={fmt.width}:{fmt.height}:force_original_aspect_ratio=increase,"
-            f"crop={fmt.width}:{fmt.height}"
-            if fmt is not None
-            else ""
-        ),
+        "-vf", vf,
         "-c:v", "libx264",
         "-c:a", "aac",
         "-pix_fmt", "yuv420p",
