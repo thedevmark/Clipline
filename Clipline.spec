@@ -34,6 +34,7 @@ binaries = [
 datas = [
     ("static/favicon.ico", "static"),
     ("static/img/app-icon.svg", "static/img"),
+    ("THIRD_PARTY_NOTICES.txt", "."),
 ]
 
 hiddenimports = [
