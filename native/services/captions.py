@@ -181,6 +181,84 @@ def generate_ass_subtitles(words, speakers, play_res_x=1080, play_res_y=1920, st
     return ass
 
 
+def _ass_color(hex_color: str) -> str:
+    h = hex_color.lstrip("#")
+    if len(h) == 6:
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    else:
+        r, g, b = 255, 255, 255
+    return f"&H00{b:02X}{g:02X}{r:02X}&"
+
+
+def build_clip_ass(
+    words: list[dict],
+    speakers: dict,
+    line_overrides: dict,
+    clip_start_ms: int,
+    clip_end_ms: int,
+    out_w: int,
+    out_h: int,
+    style: dict | None = None,
+) -> str:
+    """Build an ASS subtitle string local to one clip.
+
+    Words are filtered to ``[clip_start_ms, clip_end_ms]`` and shifted so the
+    clip starts at 0. Each line is positioned with ``\\an5\\pos(x,y)`` where x/y
+    come from the speaker's normalized ``pos`` scaled to ``out_w``/``out_h`` (or
+    a per-line override keyed by the line's first-word source start time), and
+    coloured per speaker. Designed to sit at the END of the -vf chain so coords
+    are in output pixel space.
+    """
+    cfg = normalize_caption_style(style)
+    cs, ce = clip_start_ms / 1000.0, clip_end_ms / 1000.0
+    kept = [w for w in words if cs <= (float(w["start"]) + float(w["end"])) / 2.0 <= ce]
+
+    header = (
+        "[Script Info]\nScriptType: v4.00+\n"
+        f"PlayResX: {out_w}\nPlayResY: {out_h}\nWrapStyle: 0\n\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
+        "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
+        "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+    )
+    font_size = int(72 * cfg["font_scale"] * out_w / 1080)
+    bold = -1 if cfg["bold"] else 0
+    used = {w.get("speaker", "SPEAKER_0") for w in kept} or {"SPEAKER_0"}
+    for sp in sorted(used):
+        color = _ass_color(speakers.get(sp, {}).get("color", "#FFFFFF"))
+        header += (
+            f"Style: {sp},{cfg['font_family']},{font_size},{color},&H000000FF,"
+            f"&H00000000&,&H64000000&,{bold},0,0,0,100,100,0,0,1,"
+            f"{cfg['outline']},{cfg['shadow']},5,30,30,30,1\n"
+        )
+
+    body = "\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    for line in group_words_into_lines(kept, max_words=cfg["max_words"]):
+        if not line.get("enabled", True):
+            continue
+        sp = line["speaker"]
+        src_start = line["start"]  # source-timeline seconds = override key
+        if src_start in line_overrides:
+            nx, ny = line_overrides[src_start]
+        else:
+            nx, ny = speakers.get(sp, {}).get("pos", (0.5, 0.85))
+        px, py = int(round(nx * out_w)), int(round(ny * out_h))
+        start = format_ass_time(max(0.0, line["start"] - cs))
+        end = format_ass_time(max(0.0, line["end"] - cs))
+        if cfg["karaoke"]:
+            text = " ".join(
+                f"{{\\kf{max(1, int((w['end'] - w['start']) * 100))}}}"
+                f"{(w['text'].upper() if cfg['all_caps'] else w['text'])}"
+                for w in line["words"]
+            )
+        else:
+            text = " ".join(
+                (w["text"].upper() if cfg["all_caps"] else w["text"]) for w in line["words"]
+            )
+        body += f"Dialogue: 0,{start},{end},{sp},,0,0,0,,{{\\an5\\pos({px},{py})}}{text}\n"
+    return header + body
+
+
 def _srt_time(seconds: float) -> str:
     ms = int(round(seconds * 1000))
     h, ms = divmod(ms, 3_600_000)
