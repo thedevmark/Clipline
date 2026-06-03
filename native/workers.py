@@ -326,6 +326,44 @@ def download_captioner(job: WorkerJob) -> bool:
     return True
 
 
+def download_diarizer(job: WorkerJob) -> bool:
+    """Provision the speaker-diarization engine (sherpa-onnx binary + models)."""
+    from native.services import diarize
+
+    diarize.download(on_progress=job.progress.emit)
+    return True
+
+
+def diarize_pass(
+    job: WorkerJob,
+    ffmpeg: str,
+    media_path: Path,
+    num_speakers: Optional[int] = None,
+) -> list:
+    """Extract a 16 kHz mono WAV from ``media_path`` and diarize it.
+
+    whisper.cpp deletes its own extraction WAV, so diarization extracts a fresh
+    one here (same ffmpeg args). The TemporaryDirectory must outlive the
+    diarize call, so we run it inside the ``with`` block and return the result.
+    """
+    from native.services import diarize
+
+    with tempfile.TemporaryDirectory(prefix="clipline-diar-") as td:
+        wav = Path(td) / "audio.wav"
+        job.progress.emit("Extracting audio…")
+        extract = subprocess.run(
+            [ffmpeg, "-y", "-i", str(media_path), "-ar", "16000", "-ac", "1",
+             "-c:a", "pcm_s16le", str(wav)],
+            capture_output=True, text=True,
+        )
+        if extract.returncode != 0 or not wav.exists():
+            raise RuntimeError(
+                "Audio extraction for diarization failed: "
+                + (extract.stderr or "").strip()[:400]
+            )
+        return diarize.diarize(wav, num_speakers=num_speakers, on_progress=job.progress.emit)
+
+
 def caption_pass(
     job: WorkerJob,
     ffmpeg: str,

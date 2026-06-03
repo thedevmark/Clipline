@@ -274,19 +274,7 @@ class CaptionEditor(QDialog):
         header.setSectionResizeMode(_COL_END, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(_COL_TEXT, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(_COL_SPEAKER, QHeaderView.ResizeMode.ResizeToContents)
-        for row, w in enumerate(self._words):
-            on = QTableWidgetItem()
-            on.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-            on.setCheckState(Qt.CheckState.Checked if w.get("enabled", True) else Qt.CheckState.Unchecked)
-            self._table.setItem(row, _COL_ON, on)
-            for col, val in ((_COL_START, _fmt(w["start"])), (_COL_END, _fmt(w["end"]))):
-                item = QTableWidgetItem(val)
-                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-                self._table.setItem(row, col, item)
-            self._table.setItem(row, _COL_TEXT, QTableWidgetItem(w["text"]))
-            sp_item = QTableWidgetItem(w.get("speaker", "SPEAKER_0"))
-            sp_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-            self._table.setItem(row, _COL_SPEAKER, sp_item)
+        self._populate_table()
         self._table.itemSelectionChanged.connect(self._on_table_selection_changed)
         left_col.addWidget(self._table, 1)
 
@@ -411,7 +399,39 @@ class CaptionEditor(QDialog):
     def burn_in(self) -> bool:
         return self._burn_in.isChecked()
 
+    # ── Public reload (Task 10 re-diarize) ────────────────────────────
+
+    def reload_words(self, words: list[dict]) -> None:
+        """Replace the transcript with re-diarized *words*, keeping colours/positions.
+
+        Used after a speaker-count re-run: the word text/timing is unchanged but
+        the ``speaker`` labels are refreshed. Per-speaker colours and positions
+        are intentionally preserved so the user's manual tweaks survive a recount.
+        """
+        self._words = [dict(w) for w in words]
+        self._table.setRowCount(len(self._words))
+        self._populate_table()
+        self._refresh_speaker_combo()
+        self._preview.refresh_chips()
+        self._update_override_label()
+
     # ── Helpers ───────────────────────────────────────────────────────
+
+    def _populate_table(self) -> None:
+        """(Re)fill every table row from ``self._words``."""
+        for row, w in enumerate(self._words):
+            on = QTableWidgetItem()
+            on.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            on.setCheckState(Qt.CheckState.Checked if w.get("enabled", True) else Qt.CheckState.Unchecked)
+            self._table.setItem(row, _COL_ON, on)
+            for col, val in ((_COL_START, _fmt(w["start"])), (_COL_END, _fmt(w["end"]))):
+                item = QTableWidgetItem(val)
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                self._table.setItem(row, col, item)
+            self._table.setItem(row, _COL_TEXT, QTableWidgetItem(w["text"]))
+            sp_item = QTableWidgetItem(w.get("speaker", "SPEAKER_0"))
+            sp_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            self._table.setItem(row, _COL_SPEAKER, sp_item)
 
     def _sorted_speakers(self) -> list[str]:
         return sorted({w.get("speaker", "SPEAKER_0") for w in self._words})
