@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-06-02
+
+Captions you can actually ship: burned into the video, split by speaker, and
+placed where you want them.
+
+### Added
+- **Caption burn-in** — captions are now rendered into the video on export. The
+  editor's burn-in toggle finally does what it says, and it applies to **every
+  clip and the longform build** (per-clip, time-shifted so timing stays right).
+- **Automatic speaker separation** — a one-time **~50 MB** download (sherpa-onnx,
+  fully offline, no Python/pip — same one-click model as captions) splits the
+  transcript into speakers. Pick **Auto / 2 / 3 / 4** speakers; pinning the count
+  is more accurate when you know your cast.
+- **Per-speaker colour + on-screen position** — give each speaker their own
+  caption colour and drag their captions to a spot on a clip preview; any single
+  caption line can be nudged to its own position. Positions are resolution-independent.
+
+### Notes
+- Speaker separation and captions run locally; nothing is uploaded. The diarization
+  models are commercial-use-safe (Apache-2.0 / MIT) — see `THIRD_PARTY_NOTICES.txt`.
+
 ## [0.2.2] - 2026-06-02
 
 Ships the loopback Twitch sign-in to a release and closes two welcome-screen
