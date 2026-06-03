@@ -240,6 +240,10 @@ class ShortsStage(QWidget):
                 )
         finally:
             self._editor = None
+            # A recount job still in flight would otherwise leave this stuck
+            # True (its callback no-ops on the now-None editor) — clear it so
+            # the next editor can recount.
+            self._recount_busy = False
 
     # ── speaker-count re-run (Part C) ─────────────────────────────────
 
