@@ -87,5 +87,20 @@ class TestEditorResults(unittest.TestCase):
         self.assertNotEqual(sp["SPEAKER_0"]["color"], sp["SPEAKER_1"]["color"])
 
 
+from native.ui.caption_editor import norm_to_px, px_to_norm
+
+
+class TestPreviewCoords(unittest.TestCase):
+    def test_round_trip(self):
+        self.assertEqual(norm_to_px((0.5, 0.85), 200, 100), (100, 85))
+        self.assertEqual(px_to_norm((100, 85), 200, 100), (0.5, 0.85))
+
+    def test_clamp_below_zero(self):
+        self.assertEqual(px_to_norm((-10, -5), 200, 100), (0.0, 0.0))
+
+    def test_clamp_above_one(self):
+        self.assertEqual(px_to_norm((250, 120), 200, 100), (1.0, 1.0))
+
+
 if __name__ == "__main__":
     unittest.main()
