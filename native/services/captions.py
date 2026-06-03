@@ -211,6 +211,9 @@ def build_clip_ass(
     """
     cfg = normalize_caption_style(style)
     cs, ce = clip_start_ms / 1000.0, clip_end_ms / 1000.0
+    # Normalize override keys to float — they key on a line's source start time,
+    # and a serialized (e.g. JSON) round-trip can turn them into strings.
+    line_overrides = {float(k): v for k, v in line_overrides.items()}
     kept = [w for w in words if cs <= (float(w["start"]) + float(w["end"])) / 2.0 <= ce]
 
     header = (
