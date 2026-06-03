@@ -1,10 +1,27 @@
-# THIRD_PARTY_NOTICES
+# Clipline — Third-Party Notices
 
-Clipline bundles / downloads the following third-party components:
+Clipline downloads and/or bundles the following third-party components. Some are
+fetched on demand at runtime into a per-user runtime directory
+(LOCALAPPDATA\clipline\runtime on Windows).
 
+## Media tools (downloaded on demand)
+
+FFmpeg
+  Project: https://ffmpeg.org/
+  License: https://ffmpeg.org/legal.html
+  Windows build source used by this app: https://www.gyan.dev/ffmpeg/builds/
+
+yt-dlp
+  Project: https://github.com/yt-dlp/yt-dlp
+  License: https://github.com/yt-dlp/yt-dlp#license
+  Download source: https://github.com/yt-dlp/yt-dlp/releases/latest
+
+## Captioning & speaker separation (downloaded on demand)
+
+whisper.cpp (https://github.com/ggml-org/whisper.cpp) — MIT License.
 sherpa-onnx (https://github.com/k2-fsa/sherpa-onnx) — Apache License 2.0.
 pyannote/segmentation-3.0 (ONNX, via sherpa-onnx releases) — MIT License.
 3D-Speaker eres2net speaker embedding (English, via sherpa-onnx releases) — Apache License 2.0.
-whisper.cpp (https://github.com/ggml-org/whisper.cpp) — MIT License.
 
-Full license texts are available at the upstream project pages above.
+Full license texts are available at the upstream project pages above. Please
+review the upstream licenses and terms before redistribution.
