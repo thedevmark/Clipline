@@ -44,5 +44,48 @@ class TestBuildClipAss(unittest.TestCase):
         self.assertNotIn(r"\pos(540,1632)", ass)
 
 
+import os
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from PySide6.QtWidgets import QApplication
+from native.ui.caption_editor import CaptionEditor
+
+
+class TestEditorResults(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_result_speakers_seeds_colour_and_default_pos(self):
+        words = [{"text": "hi", "start": 0.0, "end": 0.4, "speaker": "SPEAKER_0", "enabled": True}]
+        ed = CaptionEditor(words)
+        sp = ed.result_speakers()
+        self.assertIn("SPEAKER_0", sp)
+        self.assertEqual(sp["SPEAKER_0"]["pos"], (0.5, 0.85))
+        self.assertTrue(sp["SPEAKER_0"]["color"].startswith("#"))
+        self.assertEqual(ed.result_words()[0]["text"], "hi")
+
+    def test_selected_speaker_count_auto_returns_none(self):
+        words = [{"text": "x", "start": 0.0, "end": 0.1, "speaker": "SPEAKER_0", "enabled": True}]
+        ed = CaptionEditor(words)
+        self.assertIsNone(ed.selected_speaker_count())
+
+    def test_result_overrides_empty_initially(self):
+        words = [{"text": "x", "start": 0.0, "end": 0.1, "speaker": "SPEAKER_0", "enabled": True}]
+        ed = CaptionEditor(words)
+        self.assertEqual(ed.result_overrides(), {})
+
+    def test_result_speakers_multi_speaker(self):
+        words = [
+            {"text": "hi", "start": 0.0, "end": 0.4, "speaker": "SPEAKER_0", "enabled": True},
+            {"text": "there", "start": 0.5, "end": 0.9, "speaker": "SPEAKER_1", "enabled": True},
+        ]
+        ed = CaptionEditor(words)
+        sp = ed.result_speakers()
+        self.assertIn("SPEAKER_0", sp)
+        self.assertIn("SPEAKER_1", sp)
+        # Second speaker should get second palette colour.
+        self.assertNotEqual(sp["SPEAKER_0"]["color"], sp["SPEAKER_1"]["color"])
+
+
 if __name__ == "__main__":
     unittest.main()
