@@ -25,12 +25,13 @@ from PySide6.QtWidgets import (
     QStatusBar,
 )
 
+from native.services.captions import build_clip_ass, escape_ass_path
 from native.services.export_presets import (
     build_clip_export_args,
     format_preset_by_key,
     style_preset_by_key,
 )
-from native.services.paths import DOWNLOADS_DIR
+from native.services.paths import DOWNLOADS_DIR, PROCESSING_DIR
 from native.services.settings import get_output_dir, load_settings, save_settings
 from native.services.tools import TOOLS
 from native.ui import theme
@@ -267,10 +268,26 @@ class MainWindow(QMainWindow):
         clip = Clip(title="Marked range", start_ms=start_ms, end_ms=end_ms)
         self._export_clip(clip)
 
+    def _clip_subtitle(self, clip: Clip, out_w: int, out_h: int) -> str | None:
+        """Write a clip-local .ass if burn-in is on; return the escaped path."""
+        if not self._state.burn_captions or not self._state.caption_words:
+            return None
+        ass = build_clip_ass(
+            self._state.caption_words, self._state.speakers, self._state.line_overrides,
+            clip.start_ms, clip.end_ms, out_w, out_h,
+        )
+        path = PROCESSING_DIR / f"caption_{clip.start_ms}_{clip.end_ms}.ass"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(ass, encoding="utf-8")
+        return escape_ass_path(str(path))
+
     def _clip_export_args(self, clip: Clip) -> list[str]:
         style = style_preset_by_key(self._state.style_preset_key)
         fmt = format_preset_by_key(self._state.format_preset_key)
-        return build_clip_export_args(clip.start_ms, clip.end_ms, style, fmt)
+        subtitle = self._clip_subtitle(clip, fmt.width, fmt.height)
+        return build_clip_export_args(
+            clip.start_ms, clip.end_ms, style, fmt, subtitle_ass=subtitle,
+        )
 
     def _export_clip(self, clip: Clip) -> None:
         source = self._state.source
