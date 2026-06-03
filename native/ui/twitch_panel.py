@@ -183,9 +183,11 @@ class TwitchPanel(QFrame):
         self._layout.addLayout(tabs)
 
         self._list = QListWidget()
-        self._list.setMinimumHeight(160)
+        self._list.setMinimumHeight(360)
         self._list.itemActivated.connect(self._on_item_activated)
-        self._layout.addWidget(self._list)
+        # Stretch factor 1 so the library fills the panel's spare vertical space
+        # instead of staying a cramped fixed-height strip.
+        self._layout.addWidget(self._list, 1)
 
         self._status = QLabel("Pick VODs or Clips to load your library.")
         self._status.setProperty("hint", True)

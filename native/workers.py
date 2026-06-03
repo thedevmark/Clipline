@@ -255,6 +255,34 @@ def generate_waveform(
 _YTDLP_PCT = re.compile(r"\[download\]\s+([\d.]+)%")
 
 
+def _build_ytdlp_args(
+    ytdlp: str, ffmpeg_dir: Optional[str], url: str, out_dir: Path
+) -> list:
+    """Compose yt-dlp args for a single download into ``out_dir``.
+
+    Split out so the invocation is unit-testable without a subprocess.
+    Deliberately NO ``--no-part``: it breaks Twitch's fragmented-HLS writes
+    (the source of the "[Errno 2] No such file or directory" download failures).
+    ``--restrict-filenames`` keeps odd VOD titles from producing illegal or
+    path-like output names. ``-P`` routes BOTH temp fragments and the final file
+    into ``out_dir``.
+    """
+    args = [
+        ytdlp,
+        "--no-playlist",
+        "--newline",
+        "--restrict-filenames",
+        "-f", "bv*+ba/b",
+        "--merge-output-format", "mp4",
+        "-P", str(out_dir),
+        "-o", "%(title).80s-%(id)s.%(ext)s",
+    ]
+    if ffmpeg_dir:
+        args += ["--ffmpeg-location", ffmpeg_dir]
+    args.append(url)
+    return args
+
+
 def ytdlp_download(
     job: WorkerJob,
     ytdlp: str,
@@ -262,28 +290,18 @@ def ytdlp_download(
     url: str,
     dest_dir: Path,
 ) -> Path:
-    """Download a single URL (Twitch VOD/clip, etc.) to ``dest_dir``.
+    """Download a single URL (Twitch VOD/clip, etc.) into a fresh subdir.
 
-    Downloads into a fresh unique subdir so the resulting media file is
-    unambiguous to locate (no --print parsing to disentangle from progress).
-    Streams ``--newline`` so the ``[download] NN%`` lines drive the progress
-    bar. Returns the path to the downloaded media file.
+    Each download gets its OWN unique subdirectory of ``dest_dir`` so concurrent
+    downloads can't collide on files (and the "newest media file" scan can't pick
+    another download's output). Streams ``--newline`` so ``[download] NN%`` drives
+    the progress bar. Returns the path to the downloaded media file.
     """
     from ytdlp import summarize_ytdlp_error  # local import: keep import graph flat
 
     dest_dir.mkdir(parents=True, exist_ok=True)
-    args = [
-        ytdlp,
-        "--no-playlist",
-        "--newline",
-        "--no-part",
-        "-f", "bv*+ba/b",
-        "--merge-output-format", "mp4",
-        "-o", str(dest_dir / "%(title).80s-%(id)s.%(ext)s"),
-    ]
-    if ffmpeg_dir:
-        args += ["--ffmpeg-location", ffmpeg_dir]
-    args.append(url)
+    out_dir = Path(tempfile.mkdtemp(prefix="dl-", dir=str(dest_dir)))
+    args = _build_ytdlp_args(ytdlp, ffmpeg_dir, url, out_dir)
 
     job.progress.emit("Starting download…")
     proc = subprocess.Popen(
@@ -308,7 +326,7 @@ def ytdlp_download(
         raise RuntimeError(summarize_ytdlp_error("\n".join(stderr_tail)))
 
     media = [
-        p for p in sorted(dest_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+        p for p in sorted(out_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
         if p.is_file() and p.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov", ".m4v"}
     ]
     if not media:

@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] - 2026-06-03
+
+### Fixed
+- **Twitch VOD/clip download** — double-clicking a VOD failed with "[Errno 2] No
+  such file or directory" and downloading two at once could crash. Each download
+  now goes into its own isolated folder, drops the `--no-part` flag that broke
+  Twitch's fragmented downloads, and only one download runs at a time.
+- **VOD/clip library was too small** — the list now fills the panel's available
+  height instead of a cramped fixed strip.
+- **Welcome runtime status** no longer lists a stale "faster-whisper (pip)" row.
+  It shows the real optional engines — **captions (whisper.cpp)** and **speaker
+  separation (sherpa-onnx)** — with their actual status; both are 1-click,
+  download-on-demand setups in the Shorts stage (no pip, no terminal).
+
 ## [0.2.4] - 2026-06-02
 
 ### Changed

@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from native.services import diarize, whisper_cpp
 from native.services.tools import TOOLS, _is_explicit_tool_path
 from native.ui import theme
 
@@ -284,20 +285,19 @@ class ProjectStage(QWidget):
                 self._dep_row(name, present, detail, install_id=WINGET_IDS.get(name))
             )
 
-        # Optional: captioning ML deps. Excluded from the frozen build, so this
-        # reads as "optional / missing" in the EXE — that's expected.
-        try:
-            import importlib.util
-
-            has_faster_whisper = importlib.util.find_spec("faster_whisper") is not None
-        except Exception:
-            has_faster_whisper = False
-        self._deps_body.addWidget(self._dep_row(
-            "faster-whisper",
-            has_faster_whisper,
-            "optional — install with pip for the caption pass",
-            optional=True,
-        ))
+        # Optional local ML engines — NOT pip/Python. Each is a 1-click,
+        # download-on-demand native engine set up in the Shorts stage (whisper.cpp
+        # for captions, sherpa-onnx for speaker separation). Show real readiness.
+        for name, ready in (
+            ("captions (whisper.cpp)", whisper_cpp.is_ready()),
+            ("speaker separation (sherpa-onnx)", diarize.is_ready()),
+        ):
+            detail = (
+                "ready — runs locally"
+                if ready
+                else "optional — 1-click setup in the Shorts stage (no pip, no terminal)"
+            )
+            self._deps_body.addWidget(self._dep_row(name, ready, detail, optional=True))
 
         # Confirm the re-check actually ran. The timestamp changes every click,
         # so the button never reads as inert even when nothing's missing.

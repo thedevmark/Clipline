@@ -238,6 +238,12 @@ class MainWindow(QMainWindow):
         """Fetch a URL (Twitch VOD/clip, etc.) via yt-dlp, then load it."""
         if not url:
             return
+        if getattr(self, "_downloading", False):
+            # One download at a time — a second concurrent fetch (e.g. double-
+            # clicking two VODs) raced on shared state and could crash.
+            self._jobs_label.setText("A download is already in progress…")
+            return
+        self._downloading = True
         self._set_stage(STAGE_INGEST)
         self._progress.setVisible(True)
         self._progress.setValue(0)
@@ -251,16 +257,23 @@ class MainWindow(QMainWindow):
             on_progress=lambda msg: self._jobs_label.setText(msg),
             on_progress_pct=lambda pct: self._progress.setValue(int(pct * 100)),
             on_finished=self._on_download_finished,
-            on_error=self._on_render_error,
+            on_error=self._on_download_error,
         )
 
     def _on_download_finished(self, result: object) -> None:
+        self._downloading = False
         self._progress.setValue(100)
         self._progress.setVisible(False)
         path = Path(str(result))
         self._jobs_label.setText(f"Loaded {path.name}")
         self._state.set_source(path)
         self._set_stage(STAGE_INGEST)
+
+    def _on_download_error(self, message: str) -> None:
+        self._downloading = False
+        self._progress.setVisible(False)
+        self._jobs_label.setText("Download failed")
+        QMessageBox.warning(self, "Download failed", message)
 
     def _export_marked_range(self, start_ms: int, end_ms: int) -> None:
         if self._state.source is None:
