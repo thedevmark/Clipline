@@ -20,5 +20,35 @@ class TestParseSegments(unittest.TestCase):
         self.assertEqual(parse_segments(""), [])
 
 
+from native.services.diarize import assign_speakers
+
+
+class TestAssignSpeakers(unittest.TestCase):
+    def _w(self, text, start, end):
+        return {"text": text, "start": start, "end": end}
+
+    def test_assigns_by_word_midpoint(self):
+        words = [self._w("a", 0.0, 0.4), self._w("b", 2.0, 2.4)]
+        segs = [Segment(0.0, 1.0, 0), Segment(1.0, 3.0, 1)]
+        out = assign_speakers(words, segs)
+        self.assertEqual([w["speaker"] for w in out], ["SPEAKER_0", "SPEAKER_1"])
+
+    def test_word_outside_all_segments_inherits_previous(self):
+        words = [self._w("a", 0.0, 0.4), self._w("b", 9.0, 9.4)]
+        segs = [Segment(0.0, 1.0, 2)]
+        out = assign_speakers(words, segs)
+        self.assertEqual([w["speaker"] for w in out], ["SPEAKER_2", "SPEAKER_2"])
+
+    def test_no_segments_defaults_speaker_0(self):
+        words = [self._w("a", 0.0, 0.4)]
+        out = assign_speakers(words, [])
+        self.assertEqual(out[0]["speaker"], "SPEAKER_0")
+
+    def test_does_not_mutate_input(self):
+        words = [self._w("a", 0.0, 0.4)]
+        assign_speakers(words, [Segment(0.0, 1.0, 1)])
+        self.assertNotIn("speaker", words[0])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -34,3 +34,29 @@ def parse_segments(stdout: str) -> list[Segment]:
         if m:
             segments.append(Segment(float(m.group(1)), float(m.group(2)), int(m.group(3))))
     return segments
+
+
+def assign_speakers(words: list[dict], segments: list[Segment]) -> list[dict]:
+    """Return copies of ``words`` with a ``speaker`` label per word.
+
+    Each word takes the speaker of the segment containing its midpoint. Words
+    in no segment inherit the previous word's speaker; the first such word (or
+    any word when there are no segments) defaults to SPEAKER_0. Labels are
+    ``"SPEAKER_<n>"`` to match the existing whisper_cpp word schema.
+    """
+    out: list[dict] = []
+    last = "SPEAKER_0"
+    for w in words:
+        mid = (float(w["start"]) + float(w["end"])) / 2.0
+        label = None
+        for seg in segments:
+            if seg.start <= mid < seg.end:
+                label = f"SPEAKER_{seg.speaker}"
+                break
+        if label is None:
+            label = last
+        last = label
+        nw = dict(w)
+        nw["speaker"] = label
+        out.append(nw)
+    return out
