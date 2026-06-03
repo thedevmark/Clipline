@@ -72,6 +72,17 @@ def normalize_caption_style(style: Optional[dict] = None) -> dict:
     return resolved
 
 
+def escape_ass_path(path: str) -> str:
+    """Escape a filesystem path for use inside an ffmpeg ``ass=`` filter value.
+
+    ffmpeg parses the filter graph specially: backslashes and the Windows drive
+    colon must be escaped. Convention that works on Windows: forward slashes +
+    escape the drive ``:`` as ``\\:`` (so ``C:\\x`` -> ``C\\:/x``).
+    """
+    p = path.replace("\\", "/")
+    return p.replace(":", r"\:", 1) if len(p) > 1 and p[1] == ":" else p
+
+
 def transcribe_words(
     media_path: Path,
     ffmpeg: str,
