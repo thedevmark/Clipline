@@ -1,0 +1,1219 @@
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1935,6 +1935,7 @@
+  "serde",
+  "serde_json",
+  "thiserror 2.0.21",
++ "uuid",
+  "web-time",
+ ]
+ 
+diff --git a/crates/engine/Cargo.toml b/crates/engine/Cargo.toml
+--- a/crates/engine/Cargo.toml
++++ b/crates/engine/Cargo.toml
+@@ -44,6 +44,7 @@
+ log = { workspace = true }
+ craft-docpath = { workspace = true }
+ web-time = "1"
++uuid = { version = "=1.26.1", features = ["v4", "js"] }
+ 
+ [dev-dependencies]
+ filmcraft-testkit = { workspace = true }
+diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
+--- a/crates/engine/src/lib.rs
++++ b/crates/engine/src/lib.rs
+@@ -25,6 +25,7 @@
+ pub mod interchange;
+ pub mod keyboard;
+ mod keyframe_move;
++mod linked_edits;
+ mod marker_export;
+ pub mod masks;
+ pub mod media_browser;
+@@ -443,6 +444,8 @@
+     pub browser: media_browser::BrowserState,
+     /// Nesting depth of [`Session::execute`] (commands that run other commands).
+     exec_depth: u32,
++    /// Nested undoable groups stage snapshots until the outer group commits.
++    edit_group_depth: u32,
+     /// Each media file's size and modification time when last seen (Settings ▸ Media ▸
+     /// Automatically refresh growing files, [`media_watch`]).
+     pub media_stamps: std::collections::HashMap<String, media_watch::Stamp>,
+@@ -538,6 +541,7 @@
+             log: Default::default(),
+             browser: Default::default(),
+             exec_depth: 0,
++            edit_group_depth: 0,
+             media_stamps: Default::default(),
+             media_scan: None,
+         }
+@@ -605,6 +609,9 @@
+     /// Tell the worker about the current project state if it changed (cheap: an `Arc` clone and a
+     /// channel send; serialization happens on the worker). Called after every command.
+     pub fn sync_persistence(&mut self) {
++        if self.exec_depth != 0 || self.edit_group_depth != 0 {
++            return;
++        }
+         let dirty = self.is_dirty();
+         let Some(p) = self.persistence.as_mut() else { return };
+         let cur = autosave::Sent { revision: self.revision, saved_revision: self.saved_revision, path: self.path.clone() };
+@@ -692,6 +699,7 @@
+     /// Run a command by id.
+     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
+         let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
++        let linked_plan = linked_edits::prepare(self, id, &params)?;
+         if self.exec_depth == 0 && spec.journal && self.trim_play.active() {
+             self.settle_trim_playback(id);
+         }
+@@ -706,10 +714,15 @@
+         // Last-resort guard: a panic in a command (a bug that escaped the never-crash rules)
+         // becomes an error for the caller (UI, CLI, control channel, MCP) instead of taking the
+         // session and its unsaved project down. The panic hook has logged where it happened.
+-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (spec.run)(self, &params)))
++        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            match linked_plan {
++                Some(plan) => plan.apply(self),
++                None => (spec.run)(self, &params),
++            }
++        }))
+             .unwrap_or_else(|_| Err(EngineError::Other(format!("internal error in `{id}` (see the crash log); the command did not complete"))));
+         self.exec_depth -= 1;
+-        if self.exec_depth == 0 {
++        if self.exec_depth == 0 && self.edit_group_depth == 0 {
+             source_monitor::track_history(self);
+         }
+         // source graphics: an edited instance updates the shared layers and the other instances
+@@ -721,9 +734,7 @@
+         {
+             self.log.push(panels::Level::Error, id, e.to_string());
+         }
+-        self.sync_persistence();
+-        // playback reads the newest snapshot (mixer moves, mutes… are heard while playing)
+-        self.previews.live.publish_project(self.project.clone());
++        self.publish_committed_project();
+         if r.is_ok() && spec.journal {
+             self.journal.push((id.to_string(), params));
+             if self.journal.len() > 10_000 {
+@@ -731,6 +742,14 @@
+             }
+         }
+         r
++    }
++
++    /// Internal peer dispatch: preserve normal enablement without recursive interception,
++    /// intermediate publication, or separate journal entries. The outer edit owns the commit.
++    fn execute_linked_native(&mut self, id: &str, params: &Value) -> Result<Value> {
++        let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
++        self.enabled_for(spec, params).map_err(|why| EngineError::Disabled(id.to_string(), why))?;
++        (spec.run)(self, params)
+     }
+ 
+     /// Another command arrives while trim-mode playback runs: a dynamic trim is committed first
+@@ -871,43 +890,75 @@
+         Ok(r)
+     }
+ 
+-    /// Run several undoable edits as one undo step labelled `label`. If `f` fails, every edit it made
+-    /// is rolled back and the history is as before.
++    /// Publish only a completed outer command or edit group. The audio callback and autosave
++    /// worker own immutable snapshots, so publishing a staged edit cannot be undone afterwards.
++    fn publish_committed_project(&mut self) {
++        if self.exec_depth != 0 || self.edit_group_depth != 0 {
++            return;
++        }
++        self.sync_persistence();
++        self.previews.live.publish_project(self.project.clone());
++    }
++
++    /// Run several undoable project edits as one undo step labelled `label`. Failure (including
++    /// unwinding) restores the project, editor state, history, revision, journal and queued events.
++    /// Staged projects never reach playback or autosave. External I/O and jobs are not undoable:
++    /// saving files, changing preferences and starting jobs do not belong inside an edit group.
+     pub fn edit_group<R>(&mut self, label: &str, f: impl FnOnce(&mut Session) -> Result<R>) -> Result<R> {
+-        let (project, state, undo, redo, limit) =
+-            (self.project.clone(), self.state.clone(), self.history.undo.len(), self.history.redo.clone(), self.history.limit);
+-        // keep every step the group makes, however many, so the first one can be found afterwards
++        if self.edit_group_depth >= 128 {
++            return Err(EngineError::Other("edit groups are nested too deeply".to_string()));
++        }
++        let (project, state, history, revision, saved_revision, journal, events) = (
++            self.project.clone(), self.state.clone(), self.history.clone(), self.revision,
++            self.saved_revision, self.journal.clone(), self.events.clone(),
++        );
++        let undo = history.undo.len();
++        // Keep already queued frontend events outside the staged buffer, including nested groups.
++        self.events.clear();
+         self.history.limit = usize::MAX;
+-        // a panic inside the group must not leave the history unlimited: restore, then let it go on
++        // A new group must not merge its first gesture into the preceding undo step.
++        self.history.merge_key = None;
++        self.edit_group_depth += 1;
+         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
+-        self.history.limit = limit;
+-        let first = self.history.undo.get(undo).map(|e| e.1.clone());
+-        let rolled_back = |s: &mut Session| {
+-            s.history.undo.truncate(undo);
+-            s.history.redo = redo.clone();
+-            s.history.merge_key = None;
+-            s.project = project.clone();
+-            s.state = state.clone();
+-            s.bump();
+-        };
+-        match (r, first) {
+-            (Ok(Ok(v)), Some(first)) => {
+-                self.history.undo.truncate(undo);
+-                self.history.undo.push((label.to_string(), first));
+-                if self.history.undo.len() > limit {
+-                    self.history.undo.remove(0);
++        self.edit_group_depth -= 1;
++        self.history.limit = history.limit;
++        match r {
++            Ok(Ok(v)) => {
++                if let Some(first) = self.history.undo.get(undo).map(|e| e.1.clone()) {
++                    self.history.undo.truncate(undo);
++                    self.history.undo.push((label.to_string(), first));
++                    if self.history.undo.len() > history.limit {
++                        self.history.undo.remove(0);
++                    }
++                    self.history.merge_key = None;
++                } else if self.revision == revision {
++                    self.history.merge_key = history.merge_key.clone();
+                 }
+-                self.history.merge_key = None;
++                // Frontends receive the committed revision, never a list of staged revisions.
++                let staged = std::mem::replace(&mut self.events, events);
++                self.events.extend(staged.into_iter().filter(|e| !matches!(e, Event::ProjectChanged { .. })));
++                if self.revision != revision {
++                    self.events.push(Event::ProjectChanged { revision: self.revision });
++                }
++                if self.exec_depth == 0 && self.edit_group_depth == 0 {
++                    source_monitor::track_history(self);
++                }
++                self.publish_committed_project();
+                 Ok(v)
+             }
+-            (Ok(Ok(v)), None) => Ok(v),
+-            (Ok(Err(e)), _) => {
+-                rolled_back(self);
+-                Err(e)
+-            }
+-            (Err(panic), _) => {
+-                rolled_back(self);
+-                std::panic::resume_unwind(panic)
++            failed => {
++                self.project = project;
++                self.state = state;
++                self.history = history;
++                self.revision = revision;
++                self.saved_revision = saved_revision;
++                self.journal = journal;
++                self.events = events;
++                match failed {
++                    Ok(Err(e)) => Err(e),
++                    Err(panic) => std::panic::resume_unwind(panic),
++                    Ok(Ok(v)) => Ok(v),
++                }
+             }
+         }
+     }
+@@ -988,6 +1039,7 @@
+         self.history.redo.push((label.clone(), cur));
+         self.fix_state();
+         self.bump();
++        self.publish_committed_project();
+         Some(label)
+     }
+ 
+@@ -998,6 +1050,7 @@
+         self.history.undo.push((label.clone(), cur));
+         self.fix_state();
+         self.bump();
++        self.publish_committed_project();
+         Some(label)
+     }
+ 
+diff --git a/crates/engine/src/linked_edits.rs b/crates/engine/src/linked_edits.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/engine/src/linked_edits.rs
+@@ -0,0 +1,322 @@
++//! Clipline links bind native clips; all time calculations remain in the native edit engine.
++use std::collections::{BTreeMap, BTreeSet};
++use filmcraft_edit::{Edge, TrimMode};
++use filmcraft_project::{ClipId, ItemId, TrackItem, TrackKind};
++use filmcraft_time::Tick;
++use serde::{Deserialize, Serialize};
++use serde_json::{Value, json};
++use crate::{EngineError, Result, Session, commands};
++
++const KEY: &str = "clipline.links.v1";
++const MAX_UNITS: usize = 4096;
++const MAX_LINEAGE: usize = 8192;
++const MAX_METADATA: usize = 256 * 1024;
++const MAX_TICK: i64 = i64::MAX / 4;
++
++#[derive(Clone, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct Links {
++    schema: u32,
++    revision: u64,
++    shared_sequence: u64,
++    landscape_sequence: u64,
++    portrait_sequence: u64,
++    units: Vec<Unit>,
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    lineage: Vec<Ancestor>,
++    #[serde(flatten)]
++    extra: BTreeMap<String, Value>,
++}
++#[derive(Clone, Serialize, Deserialize)]
++struct Unit {
++    id: String,
++    parent: Option<String>,
++    shared: u64,
++    landscape: u64,
++    portrait: u64,
++    #[serde(flatten)]
++    extra: BTreeMap<String, Value>,
++}
++#[derive(Clone, Serialize, Deserialize)]
++struct Ancestor { id: String, parent: Option<String> }
++impl Links {
++    fn sequences(&self) -> [ItemId; 3] {
++        [ItemId(self.shared_sequence), ItemId(self.landscape_sequence), ItemId(self.portrait_sequence)]
++    }
++}
++impl Unit {
++    fn clips(&self) -> [ClipId; 3] { [ClipId(self.shared), ClipId(self.landscape), ClipId(self.portrait)] }
++    fn bind(&mut self, clips: [ClipId; 3]) {
++        [self.shared, self.landscape, self.portrait] = clips.map(|c| c.0);
++    }
++}
++fn bad(msg: impl Into<String>) -> EngineError {
++    EngineError::BadParams { cmd: "clipline.linkedEdit".into(), msg: msg.into() }
++}
++fn clip(s: &Session, seq: ItemId, id: ClipId) -> Result<&TrackItem> {
++    s.project.sequence(seq).and_then(|q| q.find_item(id)).map(|(_, c)| c)
++        .ok_or_else(|| bad("stale linked clip binding"))
++}
++fn safe_clip(c: &TrackItem) -> bool {
++    c.start.0 >= 0 && c.source_in.0 >= 0 && c.duration.0 > 0
++        && c.start.0.checked_add(c.duration.0).is_some_and(|v| v < MAX_TICK)
++        && c.source_in.0.checked_add(c.duration.0).is_some_and(|v| v < MAX_TICK)
++        && c.speed == 1.0 && !c.reverse && c.frame_hold.is_none()
++}
++fn validate(s: &Session, owner: ItemId, links: &Links) -> Result<()> {
++    let sequences = links.sequences();
++    if links.schema != 1 || owner != sequences[0] || sequences.iter().collect::<BTreeSet<_>>().len() != 3
++        || links.units.is_empty() || links.units.len() > MAX_UNITS || links.lineage.len() > MAX_LINEAGE {
++        return Err(bad("invalid linked manifest structure or unsupported schema"));
++    }
++    let rate = s.project.sequence(sequences[0]).ok_or_else(|| bad("missing shared sequence"))?.settings.frame_rate;
++    let mut names = BTreeSet::new();
++    for ancestor in &links.lineage {
++        if ancestor.id.is_empty() || ancestor.id.len() > 160 || !names.insert(ancestor.id.as_str()) {
++            return Err(bad("invalid or duplicate lineage identity"));
++        }
++    }
++    for unit in &links.units {
++        if unit.id.is_empty() || unit.id.len() > 160 || !names.insert(unit.id.as_str()) {
++            return Err(bad("invalid or duplicate unit identity"));
++        }
++    }
++    let live_names: BTreeSet<_> = links.units.iter().map(|u| u.id.as_str()).collect();
++    for ancestor in &links.lineage {
++        if ancestor.parent.as_ref().is_some_and(|p| p == &ancestor.id || p.is_empty() || p.len() > 160 || live_names.contains(p.as_str())) {
++            return Err(bad("invalid ancestor identity"));
++        }
++    }
++    // Walk only known ancestors, iteratively. Legacy v1 opaque roots have no stored parent.
++    let parents: BTreeMap<_, _> = links.lineage.iter().map(|a| (a.id.as_str(), a.parent.as_deref())).collect();
++    let mut complete = BTreeSet::new();
++    for start in parents.keys().copied() {
++        let mut path = BTreeSet::new();
++        let mut current = Some(start);
++        while let Some(id) = current {
++            if complete.contains(id) { break; }
++            if !path.insert(id) { return Err(bad("cycle in linked lineage")); }
++            current = parents.get(id).copied().flatten();
++        }
++        complete.extend(path);
++    }
++    let mut bindings = BTreeSet::new();
++    for unit in &links.units {
++        if unit.parent.as_ref().is_some_and(|p| p == &unit.id || p.is_empty() || p.len() > 160 || live_names.contains(p.as_str())) {
++            return Err(bad("invalid parent lineage"));
++        }
++        let root = clip(s, sequences[0], unit.clips()[0])?;
++        for (seq, id) in sequences.into_iter().zip(unit.clips()) {
++            let q = s.project.sequence(seq).ok_or_else(|| bad("missing linked sequence"))?;
++            if q.settings.frame_rate != rate { return Err(bad("linked sequence frame rates differ")); }
++            let (track, c) = q.find_item(id).ok_or_else(|| bad("stale linked clip binding"))?;
++            let tr = q.track(track).ok_or_else(|| bad("missing linked track"))?;
++            if tr.kind != TrackKind::Video || !bindings.insert(id) || !safe_clip(c)
++                || (c.item, c.start, c.duration, c.source_in) != (root.item, root.start, root.duration, root.source_in) {
++                return Err(bad("linked clip timing or source diverged, or speed/hold unsupported"));
++            }
++            // Locked peers cannot be silently skipped by native linked trim/razor.
++            let partners: Vec<_> = q.all_tracks().flat_map(|t| t.items.iter().map(move |c| (t, c)))
++                .filter(|(_, p)| p.id == id || (c.link.is_some() && p.link == c.link)).collect();
++            let streams = s.project.source_streams(c.item);
++            if !streams.0 { return Err(bad("linked video source is missing or unavailable")); }
++            if streams.1
++                && (c.link.is_none() || !partners.iter().any(|(t, _)| t.kind == TrackKind::Audio)) {
++                return Err(bad("audio-capable linked source is missing native audio ownership"));
++            }
++            for (t, partner) in &partners {
++                if t.locked || !safe_clip(partner)
++                    || (partner.item, partner.start, partner.duration, partner.source_in) != (c.item, c.start, c.duration, c.source_in) {
++                    return Err(bad("linked audio/video is locked or has divergent source/timing"));
++                }
++                if partner.id != id && t.kind != TrackKind::Audio {
++                    return Err(bad("linked unit contains unsupported extra video partners"));
++                }
++            }
++        }
++    }
++    Ok(())
++}
++
++pub(crate) struct Plan { owner: ItemId, links: Links, indices: Vec<usize>, operation: Operation, active: usize }
++#[derive(Clone, Copy)]
++enum Operation { Split(Tick), Trim(Edge, Tick) }
++
++/// Preflight precedes dynamic-trim settlement, so a stale/rejected linked request changes nothing.
++pub(crate) fn prepare(s: &Session, id: &str, p: &Value) -> Result<Option<Plan>> {
++    let supported = matches!(id, "timeline.razor" | "timeline.trim");
++    let unsupported = matches!(id,
++        "timeline.move" | "timeline.rateStretch" | "timeline.roll" | "timeline.slip" | "timeline.slide"
++        | "clip.speedDuration" | "clip.link" | "sequence.addEdit" | "sequence.addEditAllTracks"
++        | "sequence.lift" | "sequence.extract" | "edit.clear" | "edit.rippleDelete" | "edit.rippleDeleteHead"
++        | "trim.backward" | "trim.forward" | "trim.backwardMany" | "trim.forwardMany" | "trim.nudge"
++        | "trim.extendToPlayhead" | "trim.ripplePrevious" | "trim.rippleNext" | "trim.previous" | "trim.next"
++        | "trim.shuttle" | "trim.tick" | "trim.shuttleStop" | "trim.cancelDynamic" | "trim.playAround");
++    if !supported && !unsupported { return Ok(None); }
++    let Some(active) = s.state.active_sequence else { return Ok(None); };
++    let mut found = None;
++    for item in s.project.items.values().filter(|i| i.metadata.contains_key(KEY)) {
++        let text = &item.metadata[KEY];
++        if text.len() > MAX_METADATA { return Err(bad("linked metadata exceeds size limit")); }
++        let links: Links = serde_json::from_str(text).map_err(|e| bad(format!("invalid linked metadata: {e}")))?;
++        if let Some(index) = links.sequences().iter().position(|q| *q == active) {
++            if found.is_some() { return Err(bad("sequence belongs to multiple linked manifests")); }
++            validate(s, item.id, &links)?;
++            found = Some((item.id, links, index));
++        }
++    }
++    let Some((owner, links, active_index)) = found else { return Ok(None); };
++    if unsupported { return Err(bad(format!("{id} is not supported in a linked sequence yet"))); }
++    if s.trim_play.active() { return Err(bad("finish dynamic trim playback before a linked edit")); }
++    for (key, revision) in [("expectedRevision", s.revision), ("expectedLinksRevision", links.revision)] {
++        if p.get(key).is_some() && p.get(key).and_then(Value::as_u64) != Some(revision) {
++            return Err(bad(format!("stale or invalid {key}")));
++        }
++    }
++    let q = s.project.sequence(active).ok_or_else(|| bad("missing active sequence"))?;
++    let unit_for = |id: ClipId| -> Option<usize> {
++        let target = q.find_item(id)?.1;
++        links.units.iter().position(|u| {
++            let bound = u.clips()[active_index];
++            bound == id || q.find_item(bound).is_some_and(|(_, c)| c.link.is_some() && c.link == target.link)
++        })
++    };
++    let mut indices = BTreeSet::new();
++    let operation = if id == "timeline.razor" {
++        let time_keys = ["time", "frame", "seconds", "timecode"].into_iter().filter(|k| p.get(*k).is_some()).count();
++        if time_keys > 1 { return Err(bad("use one native time representation")); }
++        let t = commands::time_p(s, p, "").or_else(|| (time_keys == 0).then(|| s.playhead()))
++            .ok_or_else(|| bad("invalid native razor time"))?;
++        if t.0 < 0 || t.0 >= MAX_TICK { return Err(bad("razor time outside supported range")); }
++        if let Some(value) = p.get("clip") {
++            let c = value.as_u64().map(ClipId).ok_or_else(|| bad("invalid clip ID"))?;
++            let Some(index) = unit_for(c) else {
++                if q.find_item(c).is_none() { return Err(bad("stale native clip ID")); }
++                return Ok(None);
++            };
++            indices.insert(index);
++        } else {
++            let track = commands::track_p(s, p, "track", id)?;
++            let mut unlinked = false;
++            for tr in q.all_tracks().filter(|tr| !tr.locked && track.is_none_or(|id| tr.id == id)) {
++                for c in &tr.items {
++                    if c.start < t && t < c.start + c.duration {
++                        match unit_for(c.id) { Some(i) => { indices.insert(i); }, None => { unlinked = true; } }
++                    }
++                }
++            }
++            if indices.is_empty() { return Ok(None); }
++            if unlinked { return Err(bad("razor targets both linked and independent clips; select a linked clip")); }
++        }
++        for i in &indices {
++            let c = clip(s, active, links.units[*i].clips()[active_index])?;
++            if !(c.start < t && t < c.start + c.duration) { return Err(bad("razor must be inside the linked unit")); }
++        }
++        if links.units.len() + indices.len() > MAX_UNITS || links.lineage.len() + indices.len() > MAX_LINEAGE {
++            return Err(bad("linked unit or lineage capacity reached"));
++        }
++        Operation::Split(t)
++    } else {
++        let c = p.get("clip").and_then(Value::as_u64).map(ClipId).ok_or_else(|| bad("need a native clip ID"))?;
++        let Some(index) = unit_for(c) else {
++            if q.find_item(c).is_none() { return Err(bad("stale native clip ID")); }
++            return Ok(None);
++        };
++        indices.insert(index);
++        if p.get("mode").is_some_and(|v| v.as_str() != Some("regular")) { return Err(bad("only regular linked trim is supported")); }
++        let edge = match p.get("edge").and_then(Value::as_str) {
++            Some("in") => Edge::In, Some("out") => Edge::Out, _ => return Err(bad("trim edge must be in or out")),
++        };
++        let d = match (p.get("delta"), p.get("deltaFrames")) {
++            (Some(v), None) => Tick(v.as_i64().ok_or_else(|| bad("invalid delta ticks"))?),
++            (None, Some(v)) => s.sequence_rate().tick_of(v.as_i64().ok_or_else(|| bad("invalid delta frames"))?),
++            _ => return Err(bad("use exactly one trim delta")),
++        };
++        if d.0 == 0 || !(-MAX_TICK..MAX_TICK).contains(&d.0) { return Err(bad("trim delta outside supported range or zero")); }
++        Operation::Trim(edge, d)
++    };
++    if p.get("unit").is_some_and(|v| indices.len() != 1 || v.as_str() != indices.first().map(|i| links.units[*i].id.as_str())) {
++        return Err(bad("stale linked unit identity"));
++    }
++    links.revision.checked_add(1).ok_or_else(|| bad("linked revision exhausted"))?;
++    Ok(Some(Plan { owner, links, indices: indices.into_iter().collect(), operation, active: active_index }))
++}
++
++impl Plan {
++    pub(crate) fn apply(mut self, s: &mut Session) -> Result<Value> {
++        s.edit_group("Clipline shared edit", |s| {
++            let ui = s.state.clone();
++            s.state.linked_selection = true;
++            let sequences = self.links.sequences();
++            let mut cuts = 0_u64;
++            let mut applied = Tick::ZERO;
++            match self.operation {
++                Operation::Split(t) => {
++                    for index in self.indices.iter().copied().rev() {
++                        let parent = self.links.units[index].clone();
++                        let mut right_ids = [ClipId(0); 3];
++                        for (peer, (seq, id)) in sequences.into_iter().zip(parent.clips()).enumerate() {
++                            let before = clip(s, seq, id)?.clone();
++                            let q = s.project.sequence(seq).ok_or_else(|| bad("missing peer"))?;
++                            let track_id = q.find_item(id).ok_or_else(|| bad("missing peer clip"))?.0;
++                            let existing: BTreeSet<_> = q.all_tracks().flat_map(|tr| tr.items.iter().map(|c| c.id)).collect();
++                            s.state.active_sequence = Some(seq);
++                            let result = s.execute_linked_native("timeline.razor", &json!({"clip":id.0,"time":t.0}))?;
++                            let q = s.project.sequence(seq).ok_or_else(|| bad("missing peer after razor"))?;
++                            let right: Vec<_> = q.track(track_id).ok_or_else(|| bad("missing peer track"))?.items.iter()
++                                .filter(|c| !existing.contains(&c.id) && c.item == before.item && c.start == t).collect();
++                            if right.len() != 1 || right[0].effects != before.effects || clip(s, seq, id)?.effects != before.effects {
++                                return Err(bad("native razor did not preserve a unique right clip and source-local effects"));
++                            }
++                            right_ids[peer] = right[0].id;
++                            if peer == self.active { cuts += result.get("cuts").and_then(Value::as_u64).ok_or_else(|| bad("invalid native razor result"))?; }
++                        }
++                        self.links.lineage.push(Ancestor { id: parent.id.clone(), parent: parent.parent.clone() });
++                        let mut left = parent.clone();
++                        let mut right = parent.clone();
++                        // Fresh UUIDs survive undo followed by a different branch without identity reuse.
++                        left.id = format!("unit-{}", uuid::Uuid::new_v4());
++                        right.id = format!("unit-{}", uuid::Uuid::new_v4());
++                        left.parent = Some(parent.id.clone());
++                        right.parent = Some(parent.id);
++                        right.bind(right_ids);
++                        self.links.units.splice(index..=index, [left, right]);
++                    }
++                }
++                Operation::Trim(edge, delta) => {
++                    let index = self.indices[0];
++                    let unit = &self.links.units[index];
++                    applied = delta;
++                    for (seq, id) in sequences.into_iter().zip(unit.clips()) {
++                        s.state.active_sequence = Some(seq);
++                        let d = commands::trim_delta(s, id, edge, TrimMode::Regular, delta)?;
++                        if (delta.0 > 0 && d < applied) || (delta.0 < 0 && d > applied) { applied = d; }
++                    }
++                    if applied == Tick::ZERO { return Err(bad("native engine allows no common trim delta")); }
++                    for (seq, id) in sequences.into_iter().zip(unit.clips()) {
++                        let before = clip(s, seq, id)?.effects.clone();
++                        s.state.active_sequence = Some(seq);
++                        let result = s.execute_linked_native("timeline.trim", &json!({"clip":id.0,"edge":if edge == Edge::In {"in"} else {"out"},"mode":"regular","delta":applied.0}))?;
++                        if result.get("delta").and_then(Value::as_i64) != Some(applied.0) || clip(s, seq, id)?.effects != before {
++                            return Err(bad("native trim result differs between peers or changed source-local effects"));
++                        }
++                    }
++                }
++            }
++            self.links.revision = self.links.revision.checked_add(1).ok_or_else(|| bad("linked revision exhausted"))?;
++            validate(s, self.owner, &self.links)?;
++            let text = serde_json::to_string(&self.links).map_err(|e| bad(e.to_string()))?;
++            if text.len() > MAX_METADATA { return Err(bad("linked metadata exceeds size limit")); }
++            s.execute_linked_native("metadata.set", &json!({"item":self.owner.0,"field":KEY,"value":text}))?;
++            s.state = ui;
++            s.drop_stale_gap();
++            Ok(match self.operation {
++                Operation::Split(_) => json!({"cuts":cuts,"clipline":{"revision":self.links.revision,"units":self.links.units.len()}}),
++                Operation::Trim(_, _) => json!({"delta":applied.0,"clipline":{"revision":self.links.revision,"units":self.links.units.len()}}),
++            })
++        })
++    }
++}
++
++#[cfg(test)]
++mod tests;
+diff --git a/crates/engine/src/linked_edits/tests.rs b/crates/engine/src/linked_edits/tests.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/engine/src/linked_edits/tests.rs
+@@ -0,0 +1,308 @@
++use super::*;
++use std::sync::Arc;
++const TPS: i64 = filmcraft_time::TICKS_PER_SECOND;
++
++fn run(s: &mut Session, id: &str, p: Value) -> Value { s.execute(id, p).unwrap() }
++fn fixture() -> (Session, ItemId) {
++    let mut s = Session::default();
++    run(&mut s, "file.newProject", json!({"name":"Linked command regression"}));
++    run(&mut s, "file.newOfflineFile", json!({"name":"Footage", "seconds":20,"fps":60,"video":true,"audio":true,"width":1920,"height":1080}));
++    let media = s.project.items.values().find(|i| i.as_media().is_some()).unwrap().id;
++    let mut seqs = Vec::new();
++    let mut ids = Vec::new();
++    for (name,w,h) in [("Shared",1920,1080),("Landscape",1920,1080),("Portrait",1080,1920)] {
++        let seq = run(&mut s, "file.newSequence", json!({"name":name,"fps":60,"video":2,"audio":2,"width":w,"height":h}))["sequence"].as_u64().unwrap();
++        run(&mut s, "timeline.place", json!({"item":media.0,"track":"V1","audioTrack":"A1","time":TPS,"sourceIn":2*TPS,"duration":6*TPS}));
++        seqs.push(seq);
++        ids.push(s.active_sequence().unwrap().video_tracks[0].items[0].id.0);
++    }
++    run(&mut s, "effects.apply", json!({"clips":[ids[2]],"effect":"crop"}));
++    run(&mut s, "effects.setParam", json!({"clip":ids[2],"effect":"crop","param":"left","value":22.0}));
++    run(&mut s, "effects.setParam", json!({"clip":ids[2],"effect":"motion","param":"position","value":[540,960],"keyframe":true,"time":TPS/2}));
++    run(&mut s, "effects.setParam", json!({"clip":ids[2],"effect":"motion","param":"position","value":[580,920],"keyframe":true,"time":5*TPS}));
++    let links = json!({"schema":1,"revision":0,"sourceAsset":"sha256:fixture-only","kit":{"id":"test-kit","version":3},
++        "sharedSequence":seqs[0],"landscapeSequence":seqs[1],"portraitSequence":seqs[2],
++        "units":[{"id":"root","parent":null,"shared":ids[0],"landscape":ids[1],"portrait":ids[2],"authored":"keep me"}]});
++    run(&mut s,"metadata.set",json!({"item":seqs[0],"field":KEY,"value":links.to_string()}));
++    (s, ItemId(seqs[0]))
++}
++fn links(s: &Session, owner: ItemId) -> Links { serde_json::from_str(&s.project.item(owner).unwrap().metadata[KEY]).unwrap() }
++fn snapshot(s: &Session) -> Value { serde_json::to_value(&*s.project).unwrap() }
++fn assert_rejected(s: &mut Session, id: &str, params: Value) {
++    let before = snapshot(s);
++    let rev = s.revision;
++    let undo = s.history.undo.len();
++    let redo = s.history.redo.len();
++    let journal = s.journal.clone();
++    let state = serde_json::to_value(&s.state).unwrap();
++    assert!(s.execute(id,params).is_err());
++    assert_eq!(snapshot(s), before);
++    assert_eq!(s.revision, rev);
++    assert_eq!((s.history.undo.len(),s.history.redo.len()),(undo,redo));
++    assert_eq!(s.journal,journal);
++    assert_eq!(serde_json::to_value(&s.state).unwrap(),state);
++}
++fn assert_units(s: &Session, owner: ItemId, count: usize) {
++    let m = links(s,owner);
++    validate(s,owner,&m).unwrap();
++    assert_eq!(m.units.len(),count);
++    for unit in &m.units {
++        assert_eq!(unit.extra["authored"],json!("keep me"));
++        for (seq,id) in m.sequences().into_iter().zip(unit.clips()) {
++            let q=s.project.sequence(seq).unwrap();
++            let c=clip(s,seq,id).unwrap();
++            let audio: Vec<_>=q.audio_tracks.iter().flat_map(|t|&t.items).filter(|a|a.link.is_some() && a.link==c.link).collect();
++            assert_eq!(audio.len(),1);
++            assert_eq!((audio[0].start,audio[0].duration,audio[0].source_in),(c.start,c.duration,c.source_in));
++        }
++    }
++}
++#[test]
++fn repeated_native_razor_preserves_audio_source_local_effects_and_ui_with_one_undo() {
++    let (mut s,owner)=fixture();
++    let first=links(&s,owner);
++    let portrait=first.sequences()[2];
++    let effects=clip(&s,portrait,first.units[0].clips()[2]).unwrap().effects.clone();
++    let ev=serde_json::to_value(&effects).unwrap();
++    let motion=ev.as_array().unwrap().iter().find(|e|e["effect"]=="motion").unwrap();
++    let times: Vec<_>=motion["params"]["position"]["keyframes"].as_array().unwrap().iter().map(|k|k["time"].as_i64().unwrap()).collect();
++    assert_eq!(times,vec![3*TPS/2,6*TPS]);
++    s.state.linked_selection=false;
++    s.state.selection=vec![first.units[0].clips()[2]];
++    let state=serde_json::to_value(&s.state).unwrap();
++    let before=snapshot(&s);
++    let n=s.history.undo.len();
++    let j=s.journal.len();
++    let r=run(&mut s,"timeline.razor",json!({"clip":first.units[0].portrait,"time":3*TPS,"expectedLinksRevision":0}));
++    assert_eq!(r["cuts"],2);
++    assert_eq!(s.history.undo.len(),n+1);
++    assert_eq!(s.journal.len(),j+1);
++    assert_eq!(s.journal.last().unwrap().0,"timeline.razor");
++    assert_eq!(serde_json::to_value(&s.state).unwrap(),state);
++    assert_units(&s,owner,2);
++    let after=snapshot(&s);
++    run(&mut s,"edit.undo",json!({})); assert_eq!(snapshot(&s),before);
++    run(&mut s,"edit.redo",json!({})); assert_eq!(snapshot(&s),after);
++    let right=links(&s,owner).units[1].clone();
++    run(&mut s,"timeline.razor",json!({"clip":right.portrait,"time":5*TPS,"unit":right.id}));
++    assert_units(&s,owner,3);
++    let m=links(&s,owner);
++    let reopened=filmcraft_format::decode(&filmcraft_format::encode(&s.project,false)).unwrap();
++    assert_eq!(*s.project,reopened.project);
++    assert_eq!(m.revision,2);
++    assert_eq!(m.lineage.len(),2);
++    for unit in &m.units { assert_eq!(clip(&s,portrait,unit.clips()[2]).unwrap().effects,effects); }
++}
++#[test]
++fn undo_then_different_split_uses_fresh_child_identity() {
++    let (mut s,owner)=fixture();
++    let id=links(&s,owner).units[0].portrait;
++    run(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));
++    let branch: BTreeSet<_>=links(&s,owner).units.into_iter().map(|u|u.id).collect();
++    run(&mut s,"edit.undo",json!({}));
++    run(&mut s,"timeline.razor",json!({"clip":id,"time":4*TPS}));
++    let other: BTreeSet<_>=links(&s,owner).units.into_iter().map(|u|u.id).collect();
++    assert!(branch.is_disjoint(&other));
++    assert_units(&s,owner,2);
++}
++#[test]
++fn native_trim_in_and_out_share_engine_delta_and_keep_effects() {
++    let (mut s,owner)=fixture();
++    let id=links(&s,owner).units[0].portrait;
++    let original=clip(&s,s.state.active_sequence.unwrap(),ClipId(id)).unwrap().effects.clone();
++    for (edge,delta) in [("in",30),("out",-60)] {
++        let before=snapshot(&s); let n=s.history.undo.len();
++        let r=run(&mut s,"timeline.trim",json!({"clip":id,"edge":edge,"mode":"regular","deltaFrames":delta}));
++        assert_eq!(r["delta"],s.sequence_rate().tick_of(delta).0);
++        assert_eq!(s.history.undo.len(),n+1); assert_units(&s,owner,1);
++        assert_eq!(clip(&s,s.state.active_sequence.unwrap(),ClipId(id)).unwrap().effects,original);
++        let after=snapshot(&s);run(&mut s,"edit.undo",json!({}));assert_eq!(snapshot(&s),before);
++        run(&mut s,"edit.redo",json!({}));assert_eq!(snapshot(&s),after);
++    }
++    assert_eq!(links(&s,owner).revision,2);
++}
++#[test]
++fn no_clip_ui_razor_and_audio_target_reach_linked_dispatch() {
++    let (mut s,owner)=fixture();
++    run(&mut s,"timeline.razor",json!({"time":3*TPS}));assert_units(&s,owner,2);
++    let m=links(&s,owner);let c=clip(&s,m.sequences()[2],m.units[1].clips()[2]).unwrap();
++    let audio=s.active_sequence().unwrap().audio_tracks[0].items.iter().find(|a|a.link==c.link).unwrap().id;
++    run(&mut s,"timeline.trim",json!({"clip":audio.0,"edge":"out","deltaFrames":-20}));
++    assert_units(&s,owner,2);
++}
++#[test]
++fn stale_invalid_boundary_and_unsupported_requests_are_atomic() {
++    let (mut s,owner)=fixture();let id=links(&s,owner).units[0].portrait;
++    for p in [json!({"clip":id,"time":3*TPS,"expectedRevision":0}),json!({"clip":id,"time":3*TPS,"expectedLinksRevision":99}),
++        json!({"clip":id,"time":TPS}),json!({"clip":id,"time":7*TPS}),json!({"clip":id,"time":3*TPS,"unit":"stale"}),
++        json!({"clip":999999,"time":3*TPS}),json!({"clip":id,"time":"bad"}),json!({"clip":id,"time":3*TPS,"frame":180})] {
++        assert_rejected(&mut s,"timeline.razor",p);
++    }
++    for p in [json!({"clip":id,"edge":"out","mode":"ripple","deltaFrames":-1}),json!({"clip":id,"edge":"bad","deltaFrames":-1}),
++        json!({"clip":id,"edge":"in","delta":0}),json!({"clip":id,"edge":"out","deltaFrames":-1,"delta":-1})] {
++        assert_rejected(&mut s,"timeline.trim",p);
++    }
++    for id in ["timeline.move","timeline.rateStretch","timeline.roll","timeline.slip","timeline.slide","clip.speedDuration","sequence.addEdit","sequence.addEditAllTracks","sequence.lift","sequence.extract","edit.clear","edit.rippleDelete"] {
++        assert_rejected(&mut s,id,json!({}));
++    }
++}
++#[test]
++fn locked_audio_peer_and_diverged_manifest_refuse_before_any_native_edit() {
++    let (mut s,owner)=fixture();let m=links(&s,owner);let id=m.units[0].portrait;
++    let shared=m.sequences()[0];
++    Arc::make_mut(&mut s.project).sequence_mut(shared).unwrap().audio_tracks[0].locked=true;
++    assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));
++    Arc::make_mut(&mut s.project).sequence_mut(shared).unwrap().audio_tracks[0].locked=false;
++    Arc::make_mut(&mut s.project).sequence_mut(shared).unwrap().video_tracks[0].items[0].duration=Tick(TPS);
++    assert_rejected(&mut s,"timeline.trim",json!({"clip":id,"edge":"out","deltaFrames":-1}));
++}
++#[test]
++fn independent_native_sequence_still_uses_native_handler() {
++    let (mut s,_)=fixture();
++    run(&mut s,"file.newSequence",json!({"name":"Independent","fps":60,"video":1,"audio":1}));
++    let media=s.project.items.values().find(|i|i.as_media().is_some()).unwrap().id;
++    run(&mut s,"timeline.place",json!({"item":media.0,"time":0,"sourceIn":0,"duration":4*TPS}));
++    let id=s.active_sequence().unwrap().video_tracks[0].items[0].id;
++    run(&mut s,"timeline.razor",json!({"clip":id.0,"time":TPS}));
++    assert_eq!(s.active_sequence().unwrap().video_tracks[0].items.len(),2);
++}
++#[test]
++fn mixed_all_tracks_razor_is_rejected_instead_of_dropping_independent_intent() {
++    let (mut s,owner)=fixture();let m=links(&s,owner);
++    let media=clip(&s,m.sequences()[2],m.units[0].clips()[2]).unwrap().item;
++    run(&mut s,"timeline.place",json!({"item":media.0,"track":"V2","audioTrack":"A2","time":TPS,"sourceIn":2*TPS,"duration":6*TPS}));
++    assert_rejected(&mut s,"timeline.razor",json!({"time":3*TPS}));
++}
++
++#[test]
++fn trim_uses_the_most_restrictive_native_peer_handle() {
++    let (mut s,owner)=fixture(); let m=links(&s,owner);
++    let media=clip(&s,m.sequences()[1],m.units[0].clips()[1]).unwrap().item;
++    run(&mut s,"sequence.open",json!({"item":m.landscape_sequence}));
++    run(&mut s,"timeline.place",json!({"item":media.0,"track":"V1","audioTrack":"A1","time":15*TPS/2,"sourceIn":0,"duration":TPS}));
++    run(&mut s,"sequence.open",json!({"item":m.portrait_sequence}));
++    let r=run(&mut s,"timeline.trim",json!({"clip":m.units[0].portrait,"edge":"out","delta":2*TPS}));
++    assert_eq!(r["delta"],TPS/2);
++    assert_units(&s,owner,1);
++    for (seq,id) in m.sequences().into_iter().zip(m.units[0].clips()) {
++        assert_eq!(clip(&s,seq,id).unwrap().duration,Tick(13*TPS/2));
++    }
++}
++#[test]
++fn malformed_and_duplicate_bindings_are_rejected_without_rewriting_metadata() {
++    let (mut s,owner)=fixture();let id=links(&s,owner).units[0].portrait;
++    let text=s.project.item(owner).unwrap().metadata[KEY].clone();
++    Arc::make_mut(&mut s.project).item_mut(owner).unwrap().metadata.insert(KEY.into(),"{".into());
++    assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));
++    let mut m: Value=serde_json::from_str(&text).unwrap();
++    let mut dup=m["units"][0].clone();dup["id"]=json!("duplicate-binding");m["units"].as_array_mut().unwrap().push(dup);
++    Arc::make_mut(&mut s.project).item_mut(owner).unwrap().metadata.insert(KEY.into(),m.to_string());
++    assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));
++}
++
++#[test]
++fn post_edit_metadata_rejection_restores_all_peers_history_and_revision() {
++    let (mut s,owner)=fixture();let mut m=links(&s,owner);let id=m.units[0].portrait;
++    let size=serde_json::to_string(&m).unwrap().len();
++    m.extra.insert("large".into(),Value::String("x".repeat(MAX_METADATA-size-32)));
++    let text=serde_json::to_string(&m).unwrap();assert!(text.len()<MAX_METADATA);
++    Arc::make_mut(&mut s.project).item_mut(owner).unwrap().metadata.insert(KEY.into(),text);
++    let events=s.events.len();
++    assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));
++    assert_eq!(s.events.len(),events);
++    assert_units(&s,owner,1);
++}
++
++#[test]
++fn direct_trim_keyboard_and_dynamic_commands_cannot_bypass_shared_edit() {
++    let (mut s,owner)=fixture();let id=links(&s,owner).units[0].portrait;
++    run(&mut s,"trim.selectEditPoint",json!({"clip":id,"edge":"out","kind":"trim"}));
++    assert!(!s.state.edit_points.is_empty());
++    for command in ["trim.backward","trim.forward","trim.backwardMany","trim.forwardMany","trim.nudge",
++        "trim.extendToPlayhead","trim.ripplePrevious","trim.rippleNext","trim.previous","trim.next",
++        "trim.shuttle","trim.tick","trim.shuttleStop","trim.cancelDynamic","trim.playAround"] {
++        assert_rejected(&mut s,command,json!({"frames":-1,"clock":100.0,"direction":"forward"}));
++        assert!(!s.trim_play.active());
++        assert_units(&s,owner,1);
++    }
++    assert!(s.execute("trim.monitor",json!({})).is_ok());
++    run(&mut s,"trim.clear",json!({}));
++}
++
++#[test]
++fn native_unlink_is_rejected_and_preexisting_lost_audio_ownership_is_detected() {
++    let (mut s,owner)=fixture();let m=links(&s,owner);let id=m.units[0].portrait;
++    let seq=m.sequences()[2];let video=clip(&s,seq,ClipId(id)).unwrap();
++    let audio=s.project.sequence(seq).unwrap().audio_tracks[0].items.iter().find(|a|a.link==video.link).unwrap().id;
++    assert_rejected(&mut s,"clip.link",json!({"clips":[id,audio.0]}));
++    let q=Arc::make_mut(&mut s.project).sequence_mut(seq).unwrap();
++    q.find_item_mut(ClipId(id)).unwrap().1.link=None;
++    q.find_item_mut(audio).unwrap().1.link=None;
++    assert_rejected(&mut s,"timeline.trim",json!({"clip":id,"edge":"out","deltaFrames":-30}));
++    assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));
++}
++#[test]
++fn silent_source_remains_valid_without_native_audio_links() {
++    let (mut s,owner)=fixture();let m=links(&s,owner);
++    let item=clip(&s,m.sequences()[0],m.units[0].clips()[0]).unwrap().item;
++    let project=Arc::make_mut(&mut s.project);
++    let media=project.item_mut(item).unwrap().as_media_mut().unwrap();
++    media.info.audio_streams.clear();
++    for seq in m.sequences() {
++        let q=project.sequence_mut(seq).unwrap();
++        q.audio_tracks.iter_mut().for_each(|t|t.items.clear());
++        q.video_tracks[0].items[0].link=None;
++    }
++    run(&mut s,"timeline.razor",json!({"clip":m.units[0].portrait,"time":3*TPS}));
++    let now=links(&s,owner);assert_eq!(now.units.len(),2);
++    for seq in now.sequences() {assert!(s.project.sequence(seq).unwrap().audio_tracks.iter().all(|t|t.items.is_empty()));}
++}
++
++#[test]
++fn cyclic_known_ancestry_and_live_unit_parents_are_rejected() {
++    let (mut s,owner)=fixture();let mut m=links(&s,owner);let id=m.units[0].portrait;
++    m.lineage=vec![Ancestor{id:"A".into(),parent:Some("B".into())},Ancestor{id:"B".into(),parent:Some("A".into())}];
++    m.units[0].parent=Some("A".into());
++    Arc::make_mut(&mut s.project).item_mut(owner).unwrap().metadata.insert(KEY.into(),serde_json::to_string(&m).unwrap());
++    assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));
++    let (mut s,owner)=fixture();let m=links(&s,owner);
++    run(&mut s,"timeline.razor",json!({"clip":m.units[0].portrait,"time":3*TPS}));
++    let mut m=links(&s,owner);m.units[0].parent=Some(m.units[1].id.clone());let id=m.units[0].portrait;
++    Arc::make_mut(&mut s.project).item_mut(owner).unwrap().metadata.insert(KEY.into(),serde_json::to_string(&m).unwrap());
++    assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":2*TPS}));
++}
++#[test]
++fn legacy_opaque_parent_is_preserved_without_fabricating_ancestry() {
++    let (mut s,owner)=fixture();let mut m=links(&s,owner);let id=m.units[0].portrait;
++    m.units[0].parent=Some("opaque-legacy-root".into());
++    Arc::make_mut(&mut s.project).item_mut(owner).unwrap().metadata.insert(KEY.into(),serde_json::to_string(&m).unwrap());
++    run(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));
++    let now=links(&s,owner);assert_eq!(now.lineage[0].parent.as_deref(),Some("opaque-legacy-root"));
++    assert_units(&s,owner,2);
++}
++
++#[test]
++fn av_subclip_audio_ownership_uses_resolved_parent_streams() {
++    let (mut s,owner)=fixture();let m=links(&s,owner);
++    let media=clip(&s,m.sequences()[0],m.units[0].clips()[0]).unwrap().item;
++    let sub=run(&mut s,"clip.makeSubclip",json!({"item":media.0,"start":0,"end":20*TPS,"name":"AV subclip"}))["item"].as_u64().unwrap();
++    assert!(s.project.source_streams(ItemId(sub)).1);
++    let project=Arc::make_mut(&mut s.project);
++    for seq in m.sequences() {
++        for track in project.sequence_mut(seq).unwrap().all_tracks_mut() {
++            for c in &mut track.items {c.item=ItemId(sub);}
++        }
++    }
++    let q=project.sequence_mut(m.sequences()[2]).unwrap();
++    q.video_tracks[0].items[0].link=None;
++    q.audio_tracks[0].items[0].link=None;
++    assert_rejected(&mut s,"timeline.trim",json!({"clip":m.units[0].portrait,"edge":"out","deltaFrames":-30}));
++}
++#[test]
++fn missing_source_is_unavailable_instead_of_assumed_silent() {
++    let (mut s,owner)=fixture();let m=links(&s,owner);
++    let media=clip(&s,m.sequences()[0],m.units[0].clips()[0]).unwrap().item;
++    Arc::make_mut(&mut s.project).items.remove(&media);
++    assert_rejected(&mut s,"timeline.razor",json!({"clip":m.units[0].portrait,"time":3*TPS}));
++    assert_rejected(&mut s,"timeline.trim",json!({"clip":m.units[0].portrait,"edge":"out","deltaFrames":-30}));
++}
+diff --git a/crates/engine/tests/edit_group_publication.rs b/crates/engine/tests/edit_group_publication.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/engine/tests/edit_group_publication.rs
+@@ -0,0 +1,339 @@
++//! Regression coverage for external visibility, not only eventual project rollback.
++use filmcraft_engine::{EngineError, Event, Result, Session, autosave::AutosaveConfig};
++use serde_json::{Value, json};
++use std::{path::PathBuf, sync::{Arc, atomic::{AtomicUsize, Ordering}}, time::Duration};
++
++static NEXT: AtomicUsize = AtomicUsize::new(0);
++
++struct Fixture { s: Session, root: PathBuf }
++impl Fixture {
++    fn new() -> Self {
++        let root = PathBuf::from(std::env::var_os("CLIPLINE_TEST_ROOT").expect("set an owned test output root"))
++            .join(format!("{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
++        std::fs::create_dir_all(&root).unwrap();
++        let mut s = Session::default();
++        let mut cfg = AutosaveConfig::new(root.join("autosave"));
++        cfg.journal_debounce = Duration::ZERO;
++        s.start_autosave(cfg).unwrap();
++        bin(&mut s, "Committed baseline");
++        flush(&s);
++        s.drain_events();
++        Self { s, root }
++    }
++}
++impl Drop for Fixture { fn drop(&mut self) { self.s.shutdown(); } }
++fn bin(s: &mut Session, name: &str) { s.execute("file.newBin", json!({"name":name})).unwrap(); }
++fn reject<T>() -> Result<T> { Err(EngineError::Other("injected failure".into())) }
++fn flush(s: &Session) { s.persistence.as_ref().unwrap().flush(); }
++fn recovered(s: &Session) -> String {
++    flush(s);
++    let path = s.persistence.as_ref().unwrap().session_dir.join("snapshot.fcproj");
++    let mut recovery = Session::default();
++    recovery.execute("file.open", json!({"path":path})).unwrap();
++    recovery.project.to_json()
++}
++fn same_external(s: &Session, before: &Arc<filmcraft_project::Project>) {
++    assert!(Arc::ptr_eq(&s.previews.live.project().unwrap(), before), "playback received a staged Arc");
++    assert_eq!(recovered(s), before.to_json(), "worker persisted a staged project");
++}
++
++#[test]
++fn successful_group_publishes_only_final_snapshot_and_one_revision_event() {
++    let mut f = Fixture::new();
++    let before = f.s.previews.live.project().unwrap();
++    let undo = f.s.history.undo.len();
++    let journal = f.s.journal.len();
++    f.s.edit_group("Linked change", |s| {
++        bin(s, "Landscape");
++        same_external(s, &before);
++        s.sync_persistence(); // Even an explicit sync cannot publish an open group.
++        same_external(s, &before);
++        bin(s, "Portrait");
++        same_external(s, &before);
++        Ok(())
++    }).unwrap();
++    assert!(Arc::ptr_eq(&f.s.previews.live.project().unwrap(), &f.s.project));
++    assert_eq!(recovered(&f.s), f.s.project.to_json());
++    assert_eq!(f.s.history.undo.len(), undo + 1);
++    assert_eq!(f.s.history.undo.last().unwrap().0, "Linked change");
++    assert_eq!(f.s.journal.len(), journal + 2);
++    assert_eq!(f.s.drain_events(), vec![Event::ProjectChanged { revision:f.s.revision }]);
++}
++
++#[test]
++fn failed_group_never_publishes_and_restores_observable_buffers() {
++    let mut f = Fixture::new();
++    f.s.toast("Existing event");
++    let before = f.s.previews.live.project().unwrap();
++    let (rev, saved, events, journal, undo, state) = (f.s.revision, f.s.saved_revision, f.s.events.clone(), f.s.journal.clone(), f.s.history.undo.len(), serde_json::to_value(&f.s.state).unwrap());
++    let result: Result<()> = f.s.edit_group("Rejected", |s| {
++        bin(s, "Rejected prefix");
++        s.toast("Rejected toast");
++        same_external(s, &before);
++        reject()
++    });
++    assert!(result.is_err());
++    assert!(Arc::ptr_eq(&f.s.project, &before));
++    same_external(&f.s, &before);
++    assert_eq!((f.s.revision, f.s.saved_revision), (rev, saved));
++    assert_eq!(f.s.events, events);
++    assert_eq!(f.s.journal, journal);
++    assert_eq!(f.s.history.undo.len(), undo);
++    assert_eq!(serde_json::to_value(&f.s.state).unwrap(), state);
++    assert_eq!(f.s.is_dirty(), rev != saved);
++}
++
++#[test]
++fn panic_restores_observers_and_next_command_can_commit() {
++    let mut f = Fixture::new();
++    let before = f.s.previews.live.project().unwrap();
++    let (revision, limit, journal, events) = (f.s.revision, f.s.history.limit, f.s.journal.clone(), f.s.events.clone());
++    let p = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++        let _: Result<()> = f.s.edit_group("Panicking group", |s| {
++            bin(s, "Rejected panic prefix");
++            same_external(s, &before);
++            panic!("injected group panic")
++        });
++    }));
++    assert!(p.is_err());
++    same_external(&f.s, &before);
++    assert_eq!(f.s.revision, revision);
++    assert_eq!(f.s.history.limit, limit);
++    assert_eq!(f.s.journal, journal);
++    assert_eq!(f.s.events, events);
++    bin(&mut f.s, "Valid next command");
++    assert!(Arc::ptr_eq(&f.s.previews.live.project().unwrap(), &f.s.project));
++    assert_eq!(recovered(&f.s), f.s.project.to_json());
++}
++
++#[test]
++fn nested_success_stays_staged_and_outer_failure_discards_everything() {
++    let mut f = Fixture::new();
++    let before = f.s.previews.live.project().unwrap();
++    let journal = f.s.journal.clone();
++    let result: Result<()> = f.s.edit_group("Outer", |s| {
++        bin(s, "Outer prefix");
++        s.edit_group("Inner", |s| { bin(s, "Inner success"); same_external(s, &before); Ok(()) })?;
++        same_external(s, &before);
++        reject()
++    });
++    assert!(result.is_err());
++    same_external(&f.s, &before);
++    assert_eq!(f.s.project.to_json(), before.to_json());
++    assert_eq!(f.s.journal, journal);
++}
++
++#[test]
++fn nested_failure_can_be_caught_and_outer_commit_contains_only_valid_edits() {
++    let mut f = Fixture::new();
++    let before = f.s.previews.live.project().unwrap();
++    let undo = f.s.history.undo.len();
++    let journal = f.s.journal.len();
++    f.s.edit_group("Outer success", |s| {
++        bin(s, "Keep A");
++        let outer_project = s.project.to_json();
++        let inner: Result<()> = s.edit_group("Inner rejection", |s| { bin(s, "Discard B"); reject() });
++        assert!(inner.is_err());
++        assert_eq!(s.project.to_json(), outer_project);
++        same_external(s, &before);
++        bin(s, "Keep C");
++        Ok(())
++    }).unwrap();
++    assert_eq!(f.s.history.undo.len(), undo + 1);
++    assert_eq!(f.s.journal.len(), journal + 2);
++    assert!(!f.s.project.to_json().contains("Discard B"));
++    assert_eq!(recovered(&f.s), f.s.project.to_json());
++    assert_eq!(f.s.events.iter().filter(|e| matches!(e, Event::ProjectChanged { .. })).count(), 1);
++}
++
++#[test]
++fn nested_panic_caught_by_outer_group_can_continue_without_publishing() {
++    let mut f = Fixture::new();
++    let before = f.s.previews.live.project().unwrap();
++    f.s.edit_group("Recovered outer", |s| {
++        bin(s, "Keep outer");
++        let outer = s.project.to_json();
++        let p = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            let _: Result<()> = s.edit_group("Inner panic", |s| { bin(s, "Discard panic"); panic!("injected") });
++        }));
++        assert!(p.is_err());
++        assert_eq!(s.project.to_json(), outer);
++        same_external(s, &before);
++        bin(s, "Keep after panic");
++        Ok(())
++    }).unwrap();
++    assert!(!f.s.project.to_json().contains("Discard panic"));
++    assert_eq!(recovered(&f.s), f.s.project.to_json());
++}
++
++#[test]
++fn journal_overflow_failure_restores_evicted_prefix_exactly() {
++    let mut f = Fixture::new();
++    f.s.journal = (0..10_000).map(|n| (format!("existing.{n}"), json!({"n":n}))).collect();
++    let before = f.s.journal.clone();
++    let r: Result<()> = f.s.edit_group("Overflow", |s| {
++        bin(s, "Triggers cap");
++        assert_eq!(s.journal.len(), 9001);
++        let inner: Result<()> = s.edit_group("Nested overflow failure", |s| { bin(s, "Inner"); reject() });
++        assert!(inner.is_err());
++        reject()
++    });
++    assert!(r.is_err());
++    assert_eq!(f.s.journal, before);
++}
++
++#[test]
++fn previous_merged_gesture_cannot_absorb_first_group_edit() {
++    let mut f = Fixture::new();
++    f.s.edit_merged("Gesture", "same-key", |_, _| Ok(())).unwrap();
++    let before = f.s.project.to_json();
++    let undo = f.s.history.undo.len();
++    f.s.edit_group("Grouped gesture", |s| s.edit_merged("Gesture", "same-key", |_, _| Ok(()))).unwrap();
++    assert_eq!(f.s.history.undo.len(), undo + 1);
++    assert_eq!(f.s.undo().as_deref(), Some("Grouped gesture"));
++    assert_eq!(f.s.project.to_json(), before);
++}
++
++#[test]
++fn direct_history_undo_redo_publish_complete_group_snapshots() {
++    let mut f = Fixture::new();
++    let before = f.s.project.to_json();
++    f.s.edit_group("Linked pair", |s| { bin(s, "Wide"); bin(s, "Tall"); Ok(()) }).unwrap();
++    let after = f.s.project.to_json();
++    assert_eq!(f.s.undo().as_deref(), Some("Linked pair"));
++    assert_eq!(f.s.project.to_json(), before);
++    assert_eq!(f.s.previews.live.project().unwrap().to_json(), before);
++    assert_eq!(recovered(&f.s), before);
++    assert_eq!(f.s.redo().as_deref(), Some("Linked pair"));
++    assert_eq!(f.s.project.to_json(), after);
++    assert_eq!(f.s.previews.live.project().unwrap().to_json(), after);
++    assert_eq!(recovered(&f.s), after);
++}
++
++#[test]
++fn undo_redo_inside_failed_group_do_not_publish_and_history_is_restored() {
++    let mut f = Fixture::new();
++    bin(&mut f.s, "Second baseline");
++    let before = f.s.previews.live.project().unwrap();
++    let undo = f.s.history.undo.len();
++    let r: Result<()> = f.s.edit_group("Rejected navigation", |s| {
++        assert!(s.undo().is_some());
++        same_external(s, &before);
++        assert!(s.redo().is_some());
++        same_external(s, &before);
++        reject()
++    });
++    assert!(r.is_err());
++    assert_eq!(f.s.history.undo.len(), undo);
++    assert!(f.s.history.redo.is_empty());
++    same_external(&f.s, &before);
++}
++
++#[test]
++fn successful_group_preserves_existing_events_and_committed_nonrevision_events() {
++    let mut f = Fixture::new();
++    f.s.toast("Existing");
++    let existing = f.s.events.clone();
++    f.s.edit_group("Events", |s| { bin(s, "One"); s.toast("Committed"); bin(s, "Two"); Ok(()) }).unwrap();
++    assert_eq!(&f.s.events[..existing.len()], &existing);
++    assert_eq!(f.s.events.iter().filter(|e| matches!(e, Event::ProjectChanged { .. })).count(), 1);
++    assert!(f.s.events.contains(&Event::Toast { message:"Committed".into(), error:false }));
++}
++
++#[test]
++fn failed_group_keeps_original_merge_key() {
++    let mut f = Fixture::new();
++    f.s.history.merge_key = Some("prior-key".into());
++    let r: Result<Value> = f.s.edit_group("Failed empty", |_| reject());
++    assert!(r.is_err());
++    assert_eq!(f.s.history.merge_key.as_deref(), Some("prior-key"));
++    let _ = &f.root; // Every test preserves its recovery artifacts in the owned root.
++}
++
++#[test]
++fn source_monitor_history_tracks_only_the_committed_group() {
++    let mut f = Fixture::new();
++    let sentinel = filmcraft_project::ItemId(999_999_999);
++    f.s.state.source_history = vec![sentinel];
++    let r: Result<()> = f.s.edit_group("Rejected source history", |s| {
++        bin(s, "Temporary edit");
++        assert_eq!(s.state.source_history, vec![sentinel], "inner execute tracked staged history");
++        reject()
++    });
++    assert!(r.is_err());
++    assert_eq!(f.s.state.source_history, vec![sentinel]);
++    f.s.edit_group("Committed source history", |s| {
++        bin(s, "Committed edit");
++        assert_eq!(s.state.source_history, vec![sentinel]);
++        Ok(())
++    }).unwrap();
++    assert!(f.s.state.source_history.is_empty(), "outer commit must remove the dangling history item");
++}
++
++#[test]
++fn successful_nested_groups_publish_once_as_one_undo_step() {
++    let mut f = Fixture::new();
++    let before = f.s.previews.live.project().unwrap();
++    let undo = f.s.history.undo.len();
++    f.s.edit_group("Outer commit", |s| {
++        bin(s, "Outer A");
++        s.edit_group("Inner commit", |s| {
++            bin(s, "Inner B");
++            same_external(s, &before);
++            Ok(())
++        })?;
++        same_external(s, &before);
++        bin(s, "Outer C");
++        Ok(())
++    }).unwrap();
++    assert_eq!(f.s.history.undo.len(), undo + 1);
++    assert_eq!(f.s.history.undo.last().unwrap().0, "Outer commit");
++    assert_eq!(f.s.previews.live.project().unwrap().to_json(), f.s.project.to_json());
++    assert_eq!(recovered(&f.s), f.s.project.to_json());
++    assert_eq!(f.s.drain_events(), vec![Event::ProjectChanged { revision:f.s.revision }]);
++    assert_eq!(f.s.undo().as_deref(), Some("Outer commit"));
++    assert_eq!(f.s.project.to_json(), before.to_json());
++}
++
++#[test]
++fn successful_empty_group_preserves_gesture_key_and_existing_events() {
++    let mut f = Fixture::new();
++    f.s.history.merge_key = Some("existing gesture".into());
++    f.s.toast("Already queued");
++    let before = f.s.project.to_json();
++    let revision = f.s.revision;
++    let events = f.s.events.clone();
++    f.s.edit_group("Empty", |_| Ok(())).unwrap();
++    assert_eq!(f.s.project.to_json(), before);
++    assert_eq!(f.s.revision, revision);
++    assert_eq!(f.s.events, events);
++    assert_eq!(f.s.history.merge_key.as_deref(), Some("existing gesture"));
++}
++
++#[test]
++fn failure_from_saved_project_does_not_make_it_dirty_or_create_recovery() {
++    let mut f = Fixture::new();
++    let path = f.root.join("clean.fcproj");
++    f.s.execute("file.saveAs", json!({"path":path})).unwrap();
++    flush(&f.s);
++    assert!(!f.s.is_dirty());
++    let before = f.s.project.clone();
++    let revision = f.s.revision;
++    let recovery = f.s.persistence.as_ref().unwrap().session_dir.join("snapshot.fcproj");
++    assert!(!recovery.exists());
++    let r: Result<()> = f.s.edit_group("Rejected clean edit", |s| {
++        bin(s, "Do not save");
++        s.sync_persistence();
++        flush(s);
++        assert!(Arc::ptr_eq(&s.previews.live.project().unwrap(), &before));
++        assert!(!recovery.exists());
++        reject()
++    });
++    assert!(r.is_err());
++    assert!(!f.s.is_dirty());
++    assert_eq!(f.s.revision, revision);
++    assert!(!recovery.exists());
++    let mut reopened = Session::default();
++    reopened.execute("file.open", json!({"path":path})).unwrap();
++    assert_eq!(reopened.project.to_json(), before.to_json());
++}

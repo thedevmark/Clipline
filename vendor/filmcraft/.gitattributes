@@ -1,0 +1,2 @@
+# Patch context uses a required single space on unchanged blank lines.
+*.patch text eol=lf whitespace=-blank-at-eol

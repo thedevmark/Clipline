@@ -28,7 +28,7 @@ Agents inherit the session model. The exact model identifier is not exposed in t
 
 | Package | State | Evidence / next gate |
 | --- | --- | --- |
-| W0: baseline and engine proof | Running; executable trials and Windows native proof complete | Filmcraft advances to integration; editor widget/cancellation/resource gates remain. Premiere copy now open, functional baseline running |
+| W0: baseline and engine proof | Running; executable trials and Windows native proof complete | Filmcraft advances to integration; editor widget/cancellation/resource gates remain. Premiere functional template baseline complete; matched workflow benchmark remains |
 | W1: Creator Library / Kit | Persistence slice integrated; incomplete | Shared identity, versioned Kits, conflict handling and bounded metadata pages pass tests. Native generations, jobs, retention, migration and UI remain |
 | W2: Twitch intake | Pending W1 | Source provenance, actual account import, paging/deduplication, context |
 | W3: editor / linked outputs | Pending W0/W1 | Native document authority, manual override preservation, performance |
@@ -37,6 +37,27 @@ Agents inherit the session model. The exact model identifier is not exposed in t
 | W6: optional Jev | Evaluation design ready; no API access used | Opt-in data/cost boundary; local product does not depend on it |
 | W7: outputs / Homebase / results | Pending W3-W5 | Immutable jobs, verified exports, idempotent delivery, real analytics |
 | W8: migration / release candidate | Pending | Clean Windows package, rollback, matched workflow benchmark |
+
+## Active native integration checkpoint
+
+The controller is still executing the full goal. The native corrections below pass their bounded Windows suites and are packaged as reproducible source inputs. Full native editor integration remains incomplete. Reuse Filmcraft's native editor. Do not replace it with the fixed W0 demo API or a restricted PySide timeline.
+
+- Publication owner: `drift/gui-transaction-patch/filmcraft-edit-group-publication.patch`. Sixteen observer tests cover committed LiveMix/autosave, failure/unwind/nesting, journal overflow, events, source history and direct undo/redo. Original native failure assertions confirmed rejected state reached LiveMix and recovery before shutdown. Shutdown later replaced that recovery file with baseline; do not claim its final retained file still contains the rejected state. A future replay preserves the rejected bytes separately.
+- Linked command owner: `baseline/linked-engine-integration/filmcraft-linked-edit.patch`. Eighteen tests now cover native razor and regular trim, repeated cuts, UUID branch identities, source-local effects/audio/UI preservation, rollback, stale/unsupported requests, dynamic trim rejection, missing audio ownership, silent sources and malformed lineage. The shared native command entry point is `Session::execute`; the History panel also calls direct undo/redo. Unsupported move/reorder/speed/full-editor paths remain future work.
+- Independent review found two linked-patch issues: `clip.link` could disconnect audio and subsequent shared edits would leave it behind; lineage validation accepted cycles/live-node parents. The author corrected both in the frozen combined source. Both corrections passed the eighteen-test Windows public command suite. Parent also caught and corrected unrelated UTF-8 corruption in the first publication patch; the refreshed patch preserves untouched Unicode exactly.
+- Combined source, test commands and hashes: `baseline/linked-engine-integration/frozen-source.json`. There is one frozen source and one shared native target cache. The observer suite ran first: sixteen passed, zero failed. The linked command suite then ran: eighteen passed, zero failed. Both returned exit zero and unchanged source hashes. The controller read both raw logs. No overlapping compiler/source writes.
+- WSL stopped starting with `HCS_E_CONNECTION_TIMEOUT` before the correction compiler ran. No global WSL restart/settings change occurred. The original WSL proof remains historical evidence; this failure is a build-runtime blocker, not a passing correction test.
+- Fallback: isolated official Rust 1.95 Windows GNU compiler/Cargo/std/rust-mingw, verified component hashes, total downloaded archive payload 143,935,324 bytes. A real native Windows EXE compiled and ran. The UUID/getrandom raw-dylib build later required the verified official LLVM-MinGW archive (190,836,485 bytes, SHA256 `317492c456aa27ee607a5919f1d2d38dcdc1112516a24d0bf4b00d078f52d17a`). The launcher uses its absolute `llvm-dlltool.exe` while keeping bundled GNU GCC first. A real raw-dylib Windows EXE then compiled and ran. Launcher and exact provenance: `filmcraft/windows-toolchain/run_cargo.py`, `download-plan.json`, `setup-result.json`, `README.md`. No global installation/PATH change.
+- Full-workspace offline resolution pulled unrelated automation dependencies. Tests now use external harnesses against the frozen engine path. A bounded selected-graph cache fill added exact UUID 1.26.1/getrandom 0.4.3 with matching Cargo checksums. The observer build has returned to offline/locked mode, at most two compiler jobs. Resolver failures before compiler startup are retained; do not count them as executed tests.
+- Experimental fixed-split process package: `filmcraft/integration-package/result.json` records twelve passing tests, including two native Windows tests. Keep this package as W0 evidence. It is not the production timeline API and is not wired into Clipline.
+
+Next controller action: complete source preparation review and the streamed real-media native round trip, then implement multi-layer Kit bundles and build/wire the native editor. Do not claim a complete GUI, autosave integration or W3 completion from engine-only tests.
+
+### Pinned source preparation
+
+`vendor/filmcraft/pin.json` now binds the verified upstream archive, combined patch and all six changed-file hashes. `scripts/engine/prepare_filmcraft.py` prepares only a fresh destination and leaves diagnostic failures intact. The first actual attempt exposed missing new-file mode headers; the second exposed inherited Windows Git autocrlf conversion. Both failures remain retained. The corrected third attempt applied cleanly, with all six file hashes identical to the Windows-tested frozen source. New-file, Unicode and exact-byte tests now pass: nine tests and seven subtests. Git attributes retain LF patch bytes. Independent source-package review approved the current boundary without P0/P1/P2 findings. Its independent hashes confirm archive, patch and all six changed files. The ZIP comment equals the pinned upstream commit; the archive endpoint is reconstructed rather than a retained original request.
+
+Local raw tests: `drift/gui-transaction-patch/results/windows-native-external/attempt-002/` and `baseline/linked-engine-integration/results/windows-native-linked/attempt-001/`. Source receipts: `filmcraft/product-source-preparation-003/` and the final helper replay `filmcraft/product-source-preparation-004/` (embedded output-hash receipt). These inputs are not yet a complete built patched GUI. The next native slice must include gameplay and facecam roles; the v1 single-video manifest is insufficient for a layered Kit.
 
 ## Cumulative acceptance ledger
 
@@ -47,7 +68,7 @@ Agents inherit the session model. The exact model identifier is not exposed in t
 | R03 linked landscape/portrait | Native Filmcraft grouped split/trim, undo, rollback, metadata and crop/keyframe preservation pass on Windows. General editor integration remains open |
 | R04 capable open-source editor | Filmcraft chosen for integration after executable Windows proof and Mark's clarification. Reuse its capable native editor; integration is unfinished |
 | R05 alternative foundation coverage | Filmcraft/Drift runtime complete; Concat/MLT screened with documented automation/distribution gaps; OpenCut watch |
-| R06 rebuild-versus-extend | Selective core rebuild accepted as implementation direction; engine choice pending |
+| R06 rebuild-versus-extend | Selective core rebuild accepted; Filmcraft chosen for integration |
 | R07 lag / small projects | 10,000 moment metadata test uses bounded keyset pages without media access. UI latency and Premiere comparison remain unmeasured |
 | R08 Creator Kit / asset reuse | SQLite asset/Kit/moment core integrated; Filmcraft native template instantiated and rebound to another source. No Creator Kit UI yet |
 | R09 fewer caption repairs | Actual baseline corpus and manual repairs unmeasured |
@@ -87,6 +108,10 @@ Filmcraft passed native import/edit/save/reopen, razor/undo/redo, dual exports, 
 
 Drift passed headless Windows commands, native persistence and layered gameplay/facecam renders. Its failed compound command retained the successful prefix; `undo_to` restored it. SRT import initially extended a four-second sequence to thirty seconds until duration was explicit. Changing the canvas alone left subtitle geometry wrong. The explicit `60000/1001` string and denominator field failed schema validation; numeric 59.94 produced exact packet spacing in the tested export, with unusual average-rate metadata. These are integration obligations, not issues to hide behind a successful export.
 
+Filmcraft's Windows native export queue cancellation/retry gate subsequently passed through published MCP. The job was encoding with 16/240 frames before cancel; cancellation completed at 32/240 and the native job reported finished with `cancelled`. Its partial output was retained and stayed unchanged during a one-second check. Retrying the same queue item produced a complete 240-frame, four-second 1920x1080 square-pixel output with successful video/audio decoding. A deliberate I/O failure followed by retry also completed a thirty-frame half-second export. The owned MCP process exited normally. Receipts: `filmcraft/cancellation/report.md` and `filmcraft/cancellation/attempt-2/`. This does not establish GUI cancellation, queue persistence across restart, uncontended speed or OS thread instrumentation.
+
+Source inspection also confirms native `file.import` uses `import_streamed` and a host random-access `Services::reader` when available. The earlier byte-import proof is not a large-file memory test. Preserve the streaming path for long originals and measure active decode/cache bounds before closing R07.
+
 Concat v0.2.7 has Windows packages, but its documented release automation does not match a shipped MCP claim; native GUI Remote settings or a source build are required. MLT v7.42.0 release screening found source distribution rather than a ready Windows GitHub binary. Neither reserve was executed. No full production adapter is selected.
 
 Mark then clarified that Filmcraft supplies the Premiere-style editor. Filmcraft is now the chosen integration direction; Drift remains reserve. Work now concentrates on Clipline's Twitch workflow and the real native integration boundaries, rather than more generic editor comparisons. Mark can provide Premiere workflow context; reported time estimates remain distinct from instrumented measurements.
@@ -109,7 +134,9 @@ The product fix fits the complete original display frame into landscape and norm
 
 `native/core/creator_library.py` owns stable asset UUIDs keyed by SHA256, verified explicit relocation, immutable Kit versions and bindings, pinned moment references, semantic property overrides, explicit three-way update conflicts and revision guards. It copies no source media. The parent reviewed the returned prototype and strengthened the SQL binding guard to reject extra historical roles. Metadata listing uses keyset pagination and cannot load media. The 10,000-moment test reads 73 bounded pages with media opens forbidden; this is correctness evidence, not an editor latency benchmark.
 
-Parent-run combined check after ProjectStore integration: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q` — **105 passed, 821 subtests passed**. After adding an anamorphic landscape regression, the affected export/store tests passed: **8 passed, 13 subtests passed**. These checks include copied baseline Homebase tests in the combined run; they do not prove live delivery. The product currently exposes no library UI. Durable jobs, backups, retention, migration and engine wiring are unfinished.
+Parent-run combined check after source-package integration: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q` — **115 passed, 828 subtests passed**. The final source preparation helper separately passed nine tests and seven subtests, and its actual archive replay verified all six output hashes.
+
+Earlier parent-run combined check after ProjectStore integration: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q` — **105 passed, 821 subtests passed**. After adding an anamorphic landscape regression, the affected export/store tests passed: **8 passed, 13 subtests passed**. These checks include copied baseline Homebase tests in the combined run; they do not prove live delivery. The product currently exposes no library UI. Durable jobs, backups, retention, migration and engine wiring are unfinished.
 
 `native/core/project_store.py` now publishes immutable native documents through one atomic current pointer on Windows. Actual child-process interruption, competing writer, stale publication and corrupt-document tests pass. Parent also stored the real Filmcraft FCProj, reloaded identical bytes, and independently reopened/rendered it through the Windows release. Publication revisions advance independently of undoable native metadata and engine session counters. This proves process-interruption behavior, not power-loss durability or a wired autosave path.
 
@@ -119,8 +146,8 @@ Independent review closed the fixture and export findings. Six independently ren
 
 ### Next dependency gates
 
-1. Integrate a reviewed Filmcraft gateway package after removing/restricting fixed proof assumptions. Identify the native editor command interception owner and test cancellation/retry/resource behavior.
-2. Finish independent review of the export repair and integrated Creator Library core; fix material findings.
-3. Finish the opened Premiere template baseline, then run matched measurements under exclusive resource conditions. Preserve unknown human-time and caption-accuracy fields.
+1. Preserve the passing frozen native publication/linked-command evidence and finish source package review. Run streamed real-media edits and multi-layer Kit integration, then build the patched native editor. Preserve the full native editor; leave the fixed W0 demo API outside product code.
+2. Export/Creator Library reviews passed with their findings corrected. Continue W1 native wiring, jobs and recovery.
+3. Premiere functional template baseline is complete. Run matched measurements under exclusive resource conditions before acceptance. Preserve unknown human-time and caption-accuracy fields.
 4. Wire the chosen native engine and matching-generation persistence before connecting moment editing to the new library. Complete W1 jobs/retention/recovery, then W2 intake and W3 editor.
 5. Carry R01–R18 and technical A01–A20 through W4–W8. Local caption preparation can proceed independently; Jev remains optional and unused.
