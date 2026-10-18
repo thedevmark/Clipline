@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import asdict
@@ -101,6 +103,25 @@ class LibraryTests(unittest.TestCase):
     def test_kit_revisions_and_asset_bindings_are_immutable_in_sqlite(self):
         for command in ["UPDATE kit_versions SET descriptor='{}'", "DELETE FROM kit_versions", "UPDATE kit_assets SET role='wrong'", "DELETE FROM kit_assets"]:
             with self.assertRaises(sqlite3.IntegrityError):self.library.connection.execute(command)
+
+    def test_native_kit_record_preserves_exact_stored_descriptor_across_revisions(self):
+        descriptor = copy.deepcopy(self.descriptor)
+        descriptor["name"] = "Créateur 🎮"
+        descriptor["properties"]["portrait.crop"] = [0.1, 0, 0.3, 1]
+        kit_id = self.library.create_kit(descriptor)
+        stored = self.library.connection.execute(
+            "SELECT descriptor FROM kit_versions WHERE kit_id=? AND version=1", (kit_id,),
+        ).fetchone()[0]
+        record = self.library.kit_record(kit_id, 1)
+        self.assertEqual(record.descriptor_json.encode("utf8"), stored.encode("utf8"))
+        self.assertEqual(record.descriptor_sha256, hashlib.sha256(stored.encode("utf8")).hexdigest())
+        self.assertEqual(json.loads(record.descriptor_json), self.library.kit(kit_id, 1))
+        descriptor["name"] = "Revised creator"
+        self.library.revise_kit(kit_id, descriptor, expected_version=1)
+        self.assertEqual(self.library.kit_record(kit_id, 1), record)
+        self.assertNotEqual(self.library.kit_record(kit_id, 2).descriptor_sha256, record.descriptor_sha256)
+        with self.assertRaises(LibraryError):
+            self.library.kit_record(kit_id, 3)
 
     def test_stale_kit_publication_rejects_without_partial_version(self):
         self.revise(**{"caption.font_size": 50})

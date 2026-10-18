@@ -48,6 +48,14 @@ class Asset:
 
 
 @dataclass(frozen=True)
+class KitRecord:
+    kit_id: str
+    version: int
+    descriptor_json: str
+    descriptor_sha256: str
+
+
+@dataclass(frozen=True)
 class Moment:
     id: str
     title: str
@@ -369,11 +377,19 @@ class CreatorLibrary:
             self._insert_version(kit_id, 1, descriptor)
         return kit_id
 
-    def kit(self, kit_id: str, version: int) -> dict:
+    def kit_record(self, kit_id: str, version: int) -> KitRecord:
+        """Read the exact immutable descriptor bytes for native creation/provenance.
+
+        Hash the stored UTF-8 text, not another serializer's representation.
+        """
         row = self.connection.execute("SELECT descriptor FROM kit_versions WHERE kit_id=? AND version=?", (kit_id, version)).fetchone()
         if row is None:
             raise LibraryError("Unknown Kit version")
-        return json.loads(row["descriptor"])
+        text = row["descriptor"]
+        return KitRecord(kit_id, version, text, hashlib.sha256(text.encode("utf8")).hexdigest())
+
+    def kit(self, kit_id: str, version: int) -> dict:
+        return json.loads(self.kit_record(kit_id, version).descriptor_json)
 
     def revise_kit(self, kit_id: str, descriptor: dict, *, expected_version: int) -> int:
         descriptor = _descriptor(descriptor)
