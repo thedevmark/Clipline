@@ -7,15 +7,16 @@
   "archive_bytes": 21093176,
   "archive_sha256": "851a166241377875964251523594bb85c14171c740aa0d32b476ddeeb78d27e3",
   "patch_file": "clipline-native-edits.patch",
-  "patch_sha256": "8d08661a38c3b93e37413f937f93a70daee9b8e27c0fc08bc509aac22d9c5b06",
+  "patch_sha256": "e42ec1ed6a0717465b6414a48c3ab54b3001c5b6223b7c4571db883a9e210343",
   "patched_files_sha256": {
     "Cargo.lock": "37da28b37a2dbcd15cbf8c5156210ec0f6c717bcb544aa71ed693430214c0062",
-    "crates/engine/Cargo.toml": "0c5825b7dc8df028e2fd69999a8590bf8e0912f18f27e7fa5c98839251981cfa",
+    "crates/engine/Cargo.toml": "97f24e022bd9d096456ffbda434b5ebdede411843343af3afae408928d10034a",
     "crates/engine/src/lib.rs": "cbf08f31bf286486cae84896ec719411c558e5e9f6dcc4392fe66b5f6d3f89b5",
-    "crates/engine/src/linked_edits.rs": "f087f3e522e4a83d3cfbe0557c443a1cb7cb267504aa11b72f1a2b36f1b47089",
+    "crates/engine/src/linked_edits.rs": "c4b154b8dbbf1b6643988a02d8869e588a8064f9f93103dfa5fb41b9399bc59f",
     "crates/engine/src/linked_edits/tests.rs": "2c1b0233a39bac314d81765b5d27058c617bb3e81d1c3ae46e1d948eca6cdddc",
-    "crates/engine/tests/edit_group_publication.rs": "c0a747755ea3b8162a762fa1b4efd389d9685886ffddfdafa08f3824672899fb"
+    "crates/engine/tests/edit_group_publication.rs": "c0a747755ea3b8162a762fa1b4efd389d9685886ffddfdafa08f3824672899fb",
+    "crates/engine/tests/clipline_linked_commands.rs": "cc7e83d6e5a6d8b89c6354ab4997f588e97f2e56ba75d12c8970adade7f532c1"
   },
-  "scope": "Native linked razor and regular trim plus transactional publication. Full editor integration is incomplete.",
+  "scope": "Native schema1/schema2 linked gameplay/facecam razor and regular trim, exact float parsing and transactional publication. Full editor integration remains incomplete.",
   "archive_url_provenance": "Conventional tag archive reconstruction endpoint; original request URL was not retained. Verified archive ZIP comment equals upstream_commit."
 }

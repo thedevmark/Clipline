@@ -2,7 +2,7 @@
 
 Clipline reuses Filmcraft's native editor and document. This directory pins a source archive and one combined patch. It does not contain a second timeline model or the evaluation's fixed-split demo process.
 
-The pinned engine changes provide linked native razor/regular trim and committed-only playback/autosave publication. Native times, source handles, effects and history remain authoritative. The current link schema binds one video and its native audio per composition. Multi-layer Creator Kit bundles and general shared move/insert/reorder/speed commands remain incomplete. Identified unsupported linked timing commands reject explicitly. Do not expose this scope as a complete Clipline editor.
+The pinned engine changes provide linked native razor/regular trim and committed-only playback/autosave publication. Native times, source handles, effects and history remain authoritative. Exact JSON float parsing preserves framing values through native save/reopen. Schema2 binds gameplay and an optional separate facecam role across shared, landscape and portrait sequences. Gameplay inherits native audio once; facecam adds no audio. Schema1 remains supported. General shared move/insert/reorder/speed commands remain incomplete. Identified unsupported linked timing commands reject explicitly. Do not expose this scope as a complete Clipline editor.
 
 ## Prepare source
 
@@ -18,9 +18,9 @@ A `prepared-source.json` receipt certifies source preparation only. Compilation,
 
 ## Checks and remaining work
 
-The combined frozen engine ran 18 public command tests and 16 publication observer tests on Windows GNU. The controller read both raw logs. Fresh archive preparation produced byte-identical copies of all six changed files. The Python source preparation tests cover Unicode, new native files, Windows Git isolation, changed inputs, existing work, unsafe archives and mismatched patched bytes.
+The combined frozen engine ran 26 public command tests and 16 publication observer tests on Windows GNU. The controller read both raw logs. Fresh archive preparation produced byte-identical copies of all seven changed files. The public command test is also retained as crates/engine/tests/clipline_linked_commands.rs in the prepared source. It ran through the isolated external harness; its newly packaged upstream test target has not yet run. The Python source preparation tests cover Unicode, new native files, Windows Git isolation, changed inputs, existing work, unsafe archives and mismatched patched bytes.
 
-These are bounded engine checks. The full upstream suite, a built patched GUI, multi-layer Kit integration, unrestricted linked editing, resource limits and complete clip-to-export acceptance remain open. The execution ledger records the exact local receipts and unresolved gates.
+These are bounded engine checks. The full upstream suite, a built patched GUI, the complete Creator Kit application flow, unrestricted linked editing, resource limits and complete clip-to-export acceptance remain open. The execution ledger records the exact local receipts and unresolved gates.
 
 ## Source notices
 

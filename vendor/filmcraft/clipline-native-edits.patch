@@ -12,7 +12,13 @@ diff --git a/Cargo.lock b/Cargo.lock
 diff --git a/crates/engine/Cargo.toml b/crates/engine/Cargo.toml
 --- a/crates/engine/Cargo.toml
 +++ b/crates/engine/Cargo.toml
-@@ -44,6 +44,7 @@
+@@ -39,11 +39,12 @@
+ filmcraft-speech = { workspace = true }
+ filmcraft-tts = { workspace = true }
+ serde = { workspace = true }
+-serde_json = { workspace = true }
++serde_json = { workspace = true, features = ["float_roundtrip"] }
+ thiserror = { workspace = true }
  log = { workspace = true }
  craft-docpath = { workspace = true }
  web-time = "1"
@@ -237,7 +243,7 @@ diff --git a/crates/engine/src/linked_edits.rs b/crates/engine/src/linked_edits.
 new file mode 100644
 --- /dev/null
 +++ b/crates/engine/src/linked_edits.rs
-@@ -0,0 +1,322 @@
+@@ -0,0 +1,390 @@
 +//! Clipline links bind native clips; all time calculations remain in the native edit engine.
 +use std::collections::{BTreeMap, BTreeSet};
 +use filmcraft_edit::{Edge, TrimMode};
@@ -271,12 +277,31 @@ new file mode 100644
 +struct Unit {
 +    id: String,
 +    parent: Option<String>,
++    #[serde(default, skip_serializing_if = "is_zero")]
 +    shared: u64,
++    #[serde(default, skip_serializing_if = "is_zero")]
 +    landscape: u64,
++    #[serde(default, skip_serializing_if = "is_zero")]
 +    portrait: u64,
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    roles: Vec<Role>,
 +    #[serde(flatten)]
 +    extra: BTreeMap<String, Value>,
 +}
++fn is_zero(v: &u64) -> bool { *v == 0 }
++#[derive(Clone, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Role {
++    role: String,
++    audio: String,
++    shared: u64,
++    landscape: u64,
++    portrait: u64,
++}
++#[derive(Clone, Copy, PartialEq, Eq)]
++enum AudioPolicy { Inherit, None }
++#[derive(Clone)]
++struct Binding { slot: usize, role: String, audio: AudioPolicy, clips: [ClipId; 3] }
 +#[derive(Clone, Serialize, Deserialize)]
 +struct Ancestor { id: String, parent: Option<String> }
 +impl Links {
@@ -289,7 +314,39 @@ new file mode 100644
 +    fn bind(&mut self, clips: [ClipId; 3]) {
 +        [self.shared, self.landscape, self.portrait] = clips.map(|c| c.0);
 +    }
++    fn bindings(&self, schema: u32) -> Result<Vec<Binding>> {
++        if self.extra.contains_key("layers") { return Err(bad("unrecognized layer bindings; use schema2 roles")); }
++        match schema {
++            1 if self.roles.is_empty() && self.clips().iter().all(|id| id.0 != 0) =>
++                Ok(vec![Binding { slot: 0, role: "gameplay".into(), audio: AudioPolicy::Inherit, clips: self.clips() }]),
++            2 if self.clips().iter().all(|id| id.0 == 0) && (1..=2).contains(&self.roles.len()) => {
++                let mut names = BTreeSet::new();
++                let mut bindings = Vec::new();
++                for (slot, role) in self.roles.iter().enumerate() {
++                    if !names.insert(role.role.as_str()) { return Err(bad("duplicate bundle role")); }
++                    let policy = match (role.role.as_str(), role.audio.as_str()) {
++                        ("gameplay", "inherit") => AudioPolicy::Inherit,
++                        ("facecam", "none") => AudioPolicy::None,
++                        _ => return Err(bad("unknown role or unsupported native audio policy")),
++                    };
++                    let clips = [ClipId(role.shared), ClipId(role.landscape), ClipId(role.portrait)];
++                    if clips.iter().any(|id| id.0 == 0) { return Err(bad("missing bundle role binding")); }
++                    bindings.push(Binding { slot, role: role.role.clone(), audio: policy, clips });
++                }
++                if !names.contains("gameplay") { return Err(bad("bundle needs one gameplay role")); }
++                Ok(bindings)
++            }
++            _ => Err(bad("invalid schema-specific unit bindings")),
++        }
++    }
++    fn bind_role(&mut self, slot: usize, schema: u32, clips: [ClipId; 3]) -> Result<()> {
++        if schema == 1 { self.bind(clips); return Ok(()); }
++        let role = self.roles.get_mut(slot).ok_or_else(|| bad("stale bundle role slot"))?;
++        [role.shared, role.landscape, role.portrait] = clips.map(|id| id.0);
++        Ok(())
++    }
 +}
++
 +fn bad(msg: impl Into<String>) -> EngineError {
 +    EngineError::BadParams { cmd: "clipline.linkedEdit".into(), msg: msg.into() }
 +}
@@ -305,7 +362,7 @@ new file mode 100644
 +}
 +fn validate(s: &Session, owner: ItemId, links: &Links) -> Result<()> {
 +    let sequences = links.sequences();
-+    if links.schema != 1 || owner != sequences[0] || sequences.iter().collect::<BTreeSet<_>>().len() != 3
++    if !matches!(links.schema, 1 | 2) || owner != sequences[0] || sequences.iter().collect::<BTreeSet<_>>().len() != 3
 +        || links.units.is_empty() || links.units.len() > MAX_UNITS || links.lineage.len() > MAX_LINEAGE {
 +        return Err(bad("invalid linked manifest structure or unsupported schema"));
 +    }
@@ -345,32 +402,40 @@ new file mode 100644
 +        if unit.parent.as_ref().is_some_and(|p| p == &unit.id || p.is_empty() || p.len() > 160 || live_names.contains(p.as_str())) {
 +            return Err(bad("invalid parent lineage"));
 +        }
-+        let root = clip(s, sequences[0], unit.clips()[0])?;
-+        for (seq, id) in sequences.into_iter().zip(unit.clips()) {
-+            let q = s.project.sequence(seq).ok_or_else(|| bad("missing linked sequence"))?;
-+            if q.settings.frame_rate != rate { return Err(bad("linked sequence frame rates differ")); }
-+            let (track, c) = q.find_item(id).ok_or_else(|| bad("stale linked clip binding"))?;
-+            let tr = q.track(track).ok_or_else(|| bad("missing linked track"))?;
-+            if tr.kind != TrackKind::Video || !bindings.insert(id) || !safe_clip(c)
-+                || (c.item, c.start, c.duration, c.source_in) != (root.item, root.start, root.duration, root.source_in) {
-+                return Err(bad("linked clip timing or source diverged, or speed/hold unsupported"));
-+            }
-+            // Locked peers cannot be silently skipped by native linked trim/razor.
-+            let partners: Vec<_> = q.all_tracks().flat_map(|t| t.items.iter().map(move |c| (t, c)))
-+                .filter(|(_, p)| p.id == id || (c.link.is_some() && p.link == c.link)).collect();
-+            let streams = s.project.source_streams(c.item);
-+            if !streams.0 { return Err(bad("linked video source is missing or unavailable")); }
-+            if streams.1
-+                && (c.link.is_none() || !partners.iter().any(|(t, _)| t.kind == TrackKind::Audio)) {
-+                return Err(bad("audio-capable linked source is missing native audio ownership"));
-+            }
-+            for (t, partner) in &partners {
-+                if t.locked || !safe_clip(partner)
-+                    || (partner.item, partner.start, partner.duration, partner.source_in) != (c.item, c.start, c.duration, c.source_in) {
-+                    return Err(bad("linked audio/video is locked or has divergent source/timing"));
++        let roles = unit.bindings(links.schema)?;
++        let gameplay = roles.iter().find(|r| r.role == "gameplay").ok_or_else(|| bad("missing gameplay role"))?;
++        let timeline = clip(s, sequences[0], gameplay.clips[0])?;
++        let mut role_tracks = BTreeSet::new();
++        for role in &roles {
++            let root = clip(s, sequences[0], role.clips[0])?;
++            for (seq, id) in sequences.into_iter().zip(role.clips) {
++                let q = s.project.sequence(seq).ok_or_else(|| bad("missing linked sequence"))?;
++                if q.settings.frame_rate != rate { return Err(bad("linked sequence frame rates differ")); }
++                let (track, c) = q.find_item(id).ok_or_else(|| bad("stale linked clip binding"))?;
++                let tr = q.track(track).ok_or_else(|| bad("missing linked track"))?;
++                if tr.kind != TrackKind::Video || !bindings.insert(id) || !role_tracks.insert((seq, track)) || !safe_clip(c)
++                    || (c.item, c.start, c.duration, c.source_in) != (root.item, root.start, root.duration, root.source_in)
++                    || (c.start, c.duration) != (timeline.start, timeline.duration) {
++                    return Err(bad("bundle role timing/source diverged, shares a video track, or speed/hold unsupported"));
 +                }
-+                if partner.id != id && t.kind != TrackKind::Audio {
-+                    return Err(bad("linked unit contains unsupported extra video partners"));
++                let streams = s.project.source_streams(c.item);
++                if !streams.0 { return Err(bad("linked video source is missing or unavailable")); }
++                let partners: Vec<_> = q.all_tracks().flat_map(|t| t.items.iter().map(move |c| (t, c)))
++                    .filter(|(_, p)| p.id == id || (c.link.is_some() && p.link == c.link)).collect();
++                match role.audio {
++                    AudioPolicy::None if c.link.is_some() => return Err(bad("audio:none role must have no native audio/video link")),
++                    AudioPolicy::Inherit if streams.1 && (c.link.is_none() || !partners.iter().any(|(t, _)| t.kind == TrackKind::Audio)) =>
++                        return Err(bad("audio-capable linked source is missing native audio ownership")),
++                    _ => {}
++                }
++                for (t, partner) in &partners {
++                    if t.locked || !safe_clip(partner)
++                        || (partner.item, partner.start, partner.duration, partner.source_in) != (c.item, c.start, c.duration, c.source_in) {
++                        return Err(bad("linked audio/video is locked or has divergent source/timing"));
++                    }
++                    if partner.id != id && t.kind != TrackKind::Audio {
++                        return Err(bad("native audio group contains an extra video role"));
++                    }
 +                }
 +            }
 +        }
@@ -417,8 +482,10 @@ new file mode 100644
 +    let unit_for = |id: ClipId| -> Option<usize> {
 +        let target = q.find_item(id)?.1;
 +        links.units.iter().position(|u| {
-+            let bound = u.clips()[active_index];
-+            bound == id || q.find_item(bound).is_some_and(|(_, c)| c.link.is_some() && c.link == target.link)
++            u.bindings(links.schema).is_ok_and(|roles| roles.iter().any(|role| {
++                let bound = role.clips[active_index];
++                bound == id || q.find_item(bound).is_some_and(|(_, c)| c.link.is_some() && c.link == target.link)
++            }))
 +        })
 +    };
 +    let mut indices = BTreeSet::new();
@@ -449,7 +516,9 @@ new file mode 100644
 +            if unlinked { return Err(bad("razor targets both linked and independent clips; select a linked clip")); }
 +        }
 +        for i in &indices {
-+            let c = clip(s, active, links.units[*i].clips()[active_index])?;
++            let roles = links.units[*i].bindings(links.schema)?;
++            let gameplay = roles.iter().find(|r| r.role == "gameplay").ok_or_else(|| bad("missing gameplay role"))?;
++            let c = clip(s, active, gameplay.clips[active_index])?;
 +            if !(c.start < t && t < c.start + c.duration) { return Err(bad("razor must be inside the linked unit")); }
 +        }
 +        if links.units.len() + indices.len() > MAX_UNITS || links.lineage.len() + indices.len() > MAX_LINEAGE {
@@ -494,51 +563,56 @@ new file mode 100644
 +                Operation::Split(t) => {
 +                    for index in self.indices.iter().copied().rev() {
 +                        let parent = self.links.units[index].clone();
-+                        let mut right_ids = [ClipId(0); 3];
-+                        for (peer, (seq, id)) in sequences.into_iter().zip(parent.clips()).enumerate() {
-+                            let before = clip(s, seq, id)?.clone();
-+                            let q = s.project.sequence(seq).ok_or_else(|| bad("missing peer"))?;
-+                            let track_id = q.find_item(id).ok_or_else(|| bad("missing peer clip"))?.0;
-+                            let existing: BTreeSet<_> = q.all_tracks().flat_map(|tr| tr.items.iter().map(|c| c.id)).collect();
-+                            s.state.active_sequence = Some(seq);
-+                            let result = s.execute_linked_native("timeline.razor", &json!({"clip":id.0,"time":t.0}))?;
-+                            let q = s.project.sequence(seq).ok_or_else(|| bad("missing peer after razor"))?;
-+                            let right: Vec<_> = q.track(track_id).ok_or_else(|| bad("missing peer track"))?.items.iter()
-+                                .filter(|c| !existing.contains(&c.id) && c.item == before.item && c.start == t).collect();
-+                            if right.len() != 1 || right[0].effects != before.effects || clip(s, seq, id)?.effects != before.effects {
-+                                return Err(bad("native razor did not preserve a unique right clip and source-local effects"));
++                        let roles = parent.bindings(self.links.schema)?;
++                        let mut right = parent.clone();
++                        for role in roles {
++                            let mut right_ids = [ClipId(0); 3];
++                            for (peer, (seq, id)) in sequences.into_iter().zip(role.clips).enumerate() {
++                                let before = clip(s, seq, id)?.clone();
++                                let q = s.project.sequence(seq).ok_or_else(|| bad("missing peer"))?;
++                                let track_id = q.find_item(id).ok_or_else(|| bad("missing peer clip"))?.0;
++                                let existing: BTreeSet<_> = q.all_tracks().flat_map(|tr| tr.items.iter().map(|c| c.id)).collect();
++                                s.state.active_sequence = Some(seq);
++                                let result = s.execute_linked_native("timeline.razor", &json!({"clip":id.0,"time":t.0}))?;
++                                let q = s.project.sequence(seq).ok_or_else(|| bad("missing peer after razor"))?;
++                                let found: Vec<_> = q.track(track_id).ok_or_else(|| bad("missing peer track"))?.items.iter()
++                                    .filter(|c| !existing.contains(&c.id) && c.item == before.item && c.start == t).collect();
++                                if found.len() != 1 || found[0].effects != before.effects || clip(s, seq, id)?.effects != before.effects {
++                                    return Err(bad("native razor did not preserve a unique right clip and source-local effects"));
++                                }
++                                right_ids[peer] = found[0].id;
++                                if peer == self.active { cuts += result.get("cuts").and_then(Value::as_u64).ok_or_else(|| bad("invalid native razor result"))?; }
 +                            }
-+                            right_ids[peer] = right[0].id;
-+                            if peer == self.active { cuts += result.get("cuts").and_then(Value::as_u64).ok_or_else(|| bad("invalid native razor result"))?; }
++                            right.bind_role(role.slot, self.links.schema, right_ids)?;
 +                        }
 +                        self.links.lineage.push(Ancestor { id: parent.id.clone(), parent: parent.parent.clone() });
 +                        let mut left = parent.clone();
-+                        let mut right = parent.clone();
-+                        // Fresh UUIDs survive undo followed by a different branch without identity reuse.
 +                        left.id = format!("unit-{}", uuid::Uuid::new_v4());
 +                        right.id = format!("unit-{}", uuid::Uuid::new_v4());
 +                        left.parent = Some(parent.id.clone());
 +                        right.parent = Some(parent.id);
-+                        right.bind(right_ids);
 +                        self.links.units.splice(index..=index, [left, right]);
 +                    }
 +                }
 +                Operation::Trim(edge, delta) => {
-+                    let index = self.indices[0];
-+                    let unit = &self.links.units[index];
++                    let roles = self.links.units[self.indices[0]].bindings(self.links.schema)?;
 +                    applied = delta;
-+                    for (seq, id) in sequences.into_iter().zip(unit.clips()) {
-+                        s.state.active_sequence = Some(seq);
-+                        let d = commands::trim_delta(s, id, edge, TrimMode::Regular, delta)?;
-+                        if (delta.0 > 0 && d < applied) || (delta.0 < 0 && d > applied) { applied = d; }
++                    for role in &roles {
++                        for (seq, id) in sequences.into_iter().zip(role.clips) {
++                            s.state.active_sequence = Some(seq);
++                            let d = commands::trim_delta(s, id, edge, TrimMode::Regular, delta)?;
++                            if (delta.0 > 0 && d < applied) || (delta.0 < 0 && d > applied) { applied = d; }
++                        }
 +                    }
 +                    if applied == Tick::ZERO { return Err(bad("native engine allows no common trim delta")); }
-+                    for (seq, id) in sequences.into_iter().zip(unit.clips()) {
-+                        let before = clip(s, seq, id)?.effects.clone();
-+                        s.state.active_sequence = Some(seq);
-+                        let result = s.execute_linked_native("timeline.trim", &json!({"clip":id.0,"edge":if edge == Edge::In {"in"} else {"out"},"mode":"regular","delta":applied.0}))?;
-+                        if result.get("delta").and_then(Value::as_i64) != Some(applied.0) || clip(s, seq, id)?.effects != before {
-+                            return Err(bad("native trim result differs between peers or changed source-local effects"));
++                    for role in &roles {
++                        for (seq, id) in sequences.into_iter().zip(role.clips) {
++                            let before = clip(s, seq, id)?.effects.clone();
++                            s.state.active_sequence = Some(seq);
++                            let result = s.execute_linked_native("timeline.trim", &json!({"clip":id.0,"edge":if edge == Edge::In {"in"} else {"out"},"mode":"regular","delta":applied.0}))?;
++                            if result.get("delta").and_then(Value::as_i64) != Some(applied.0) || clip(s, seq, id)?.effects != before {
++                                return Err(bad("native trim differs between bundle peers or changed source-local effects"));
++                            }
 +                        }
 +                    }
 +                }
@@ -1216,4 +1290,454 @@ new file mode 100644
 +    let mut reopened = Session::default();
 +    reopened.execute("file.open", json!({"path":path})).unwrap();
 +    assert_eq!(reopened.project.to_json(), before.to_json());
++}
+diff --git a/crates/engine/tests/clipline_linked_commands.rs b/crates/engine/tests/clipline_linked_commands.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/engine/tests/clipline_linked_commands.rs
+@@ -0,0 +1,445 @@
++use std::collections::{BTreeMap,BTreeSet};
++use filmcraft_engine::{Session,EngineError,Result};
++use filmcraft_engine::project::{ClipId,ItemId,TrackItem};
++use filmcraft_engine::time::Tick;
++use serde::{Deserialize,Serialize};
++use serde_json::{Value,json};
++const KEY: &str="clipline.links.v1";
++const MAX_METADATA: usize=256*1024;
++#[derive(Clone, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct Links {
++    schema: u32,
++    revision: u64,
++    shared_sequence: u64,
++    landscape_sequence: u64,
++    portrait_sequence: u64,
++    units: Vec<Unit>,
++    #[serde(default, skip_serializing_if = "Vec::is_empty")]
++    lineage: Vec<Ancestor>,
++    #[serde(flatten)]
++    extra: BTreeMap<String, Value>,
++}
++#[derive(Clone, Serialize, Deserialize)]
++struct Unit {
++    id: String,
++    parent: Option<String>,
++    shared: u64,
++    landscape: u64,
++    portrait: u64,
++    #[serde(flatten)]
++    extra: BTreeMap<String, Value>,
++}
++#[derive(Clone, Serialize, Deserialize)]
++struct Ancestor { id: String, parent: Option<String> }
++impl Links {
++    fn sequences(&self) -> [ItemId; 3] {
++        [ItemId(self.shared_sequence), ItemId(self.landscape_sequence), ItemId(self.portrait_sequence)]
++    }
++}
++impl Unit {
++    fn clips(&self) -> [ClipId; 3] { [ClipId(self.shared), ClipId(self.landscape), ClipId(self.portrait)] }
++    fn bind(&mut self, clips: [ClipId; 3]) {
++        [self.shared, self.landscape, self.portrait] = clips.map(|c| c.0);
++    }
++}
++
++fn clip(s:&Session,seq:ItemId,id:ClipId)->Result<&TrackItem> {
++    s.project.sequence(seq).and_then(|q|q.find_item(id)).map(|(_,c)|c).ok_or_else(||EngineError::Other("native clip missing".into()))
++}
++use std::sync::Arc;
++const TPS: i64 = filmcraft_engine::time::TICKS_PER_SECOND;
++
++fn run(s: &mut Session, id: &str, p: Value) -> Value { s.execute(id, p).unwrap() }
++fn fixture() -> (Session, ItemId) {
++    let mut s = Session::default();
++    run(&mut s, "file.newProject", json!({"name":"Linked command regression"}));
++    run(&mut s, "file.newOfflineFile", json!({"name":"Footage", "seconds":20,"fps":60,"video":true,"audio":true,"width":1920,"height":1080}));
++    let media = s.project.items.values().find(|i| i.as_media().is_some()).unwrap().id;
++    let mut seqs = Vec::new();
++    let mut ids = Vec::new();
++    for (name,w,h) in [("Shared",1920,1080),("Landscape",1920,1080),("Portrait",1080,1920)] {
++        let seq = run(&mut s, "file.newSequence", json!({"name":name,"fps":60,"video":2,"audio":2,"width":w,"height":h}))["sequence"].as_u64().unwrap();
++        run(&mut s, "timeline.place", json!({"item":media.0,"track":"V1","audioTrack":"A1","time":TPS,"sourceIn":2*TPS,"duration":6*TPS}));
++        seqs.push(seq);
++        ids.push(s.active_sequence().unwrap().video_tracks[0].items[0].id.0);
++    }
++    run(&mut s, "effects.apply", json!({"clips":[ids[2]],"effect":"crop"}));
++    run(&mut s, "effects.setParam", json!({"clip":ids[2],"effect":"crop","param":"left","value":22.0}));
++    run(&mut s, "effects.setParam", json!({"clip":ids[2],"effect":"motion","param":"position","value":[540,960],"keyframe":true,"time":TPS/2}));
++    run(&mut s, "effects.setParam", json!({"clip":ids[2],"effect":"motion","param":"position","value":[580,920],"keyframe":true,"time":5*TPS}));
++    let links = json!({"schema":1,"revision":0,"sourceAsset":"sha256:fixture-only","kit":{"id":"test-kit","version":3},
++        "sharedSequence":seqs[0],"landscapeSequence":seqs[1],"portraitSequence":seqs[2],
++        "units":[{"id":"root","parent":null,"shared":ids[0],"landscape":ids[1],"portrait":ids[2],"authored":"keep me"}]});
++    run(&mut s,"metadata.set",json!({"item":seqs[0],"field":KEY,"value":links.to_string()}));
++    (s, ItemId(seqs[0]))
++}
++fn links(s: &Session, owner: ItemId) -> Links { serde_json::from_str(&s.project.item(owner).unwrap().metadata[KEY]).unwrap() }
++fn snapshot(s: &Session) -> Value { serde_json::to_value(&*s.project).unwrap() }
++fn assert_rejected(s: &mut Session, id: &str, params: Value) {
++    let before = snapshot(s);
++    let rev = s.revision;
++    let undo = s.history.undo.len();
++    let redo = s.history.redo.len();
++    let journal = s.journal.clone();
++    let state = serde_json::to_value(&s.state).unwrap();
++    assert!(s.execute(id,params).is_err());
++    assert_eq!(snapshot(s), before);
++    assert_eq!(s.revision, rev);
++    assert_eq!((s.history.undo.len(),s.history.redo.len()),(undo,redo));
++    assert_eq!(s.journal,journal);
++    assert_eq!(serde_json::to_value(&s.state).unwrap(),state);
++}
++fn assert_units(s: &Session, owner: ItemId, count: usize) {
++    let m = links(s,owner);
++    let first=m.sequences()[0];
++    for u in &m.units {
++        let base=clip(s,first,u.clips()[0]).unwrap();
++        for (seq,id) in m.sequences().into_iter().zip(u.clips()) {
++            let native=clip(s,seq,id).unwrap();
++            assert_eq!((native.item,native.start,native.duration,native.source_in),(base.item,base.start,base.duration,base.source_in));
++        }
++    }
++    assert_eq!(m.units.len(),count);
++    for unit in &m.units {
++        assert_eq!(unit.extra["authored"],json!("keep me"));
++        for (seq,id) in m.sequences().into_iter().zip(unit.clips()) {
++            let q=s.project.sequence(seq).unwrap();
++            let c=clip(s,seq,id).unwrap();
++            let audio: Vec<_>=q.audio_tracks.iter().flat_map(|t|&t.items).filter(|a|a.link.is_some() && a.link==c.link).collect();
++            assert_eq!(audio.len(),1);
++            assert_eq!((audio[0].start,audio[0].duration,audio[0].source_in),(c.start,c.duration,c.source_in));
++        }
++    }
++}
++#[test]
++fn repeated_native_razor_preserves_audio_source_local_effects_and_ui_with_one_undo() {
++    let (mut s,owner)=fixture();
++    let first=links(&s,owner);
++    let portrait=first.sequences()[2];
++    let effects=clip(&s,portrait,first.units[0].clips()[2]).unwrap().effects.clone();
++    let ev=serde_json::to_value(&effects).unwrap();
++    let motion=ev.as_array().unwrap().iter().find(|e|e["effect"]=="motion").unwrap();
++    let times: Vec<_>=motion["params"]["position"]["keyframes"].as_array().unwrap().iter().map(|k|k["time"].as_i64().unwrap()).collect();
++    assert_eq!(times,vec![3*TPS/2,6*TPS]);
++    s.state.linked_selection=false;
++    s.state.selection=vec![first.units[0].clips()[2]];
++    let state=serde_json::to_value(&s.state).unwrap();
++    let before=snapshot(&s);
++    let n=s.history.undo.len();
++    let j=s.journal.len();
++    let r=run(&mut s,"timeline.razor",json!({"clip":first.units[0].portrait,"time":3*TPS,"expectedLinksRevision":0}));
++    assert_eq!(r["cuts"],2);
++    assert_eq!(s.history.undo.len(),n+1);
++    assert_eq!(s.journal.len(),j+1);
++    assert_eq!(s.journal.last().unwrap().0,"timeline.razor");
++    assert_eq!(serde_json::to_value(&s.state).unwrap(),state);
++    assert_units(&s,owner,2);
++    let after=snapshot(&s);
++    run(&mut s,"edit.undo",json!({})); assert_eq!(snapshot(&s),before);
++    run(&mut s,"edit.redo",json!({})); assert_eq!(snapshot(&s),after);
++    let right=links(&s,owner).units[1].clone();
++    run(&mut s,"timeline.razor",json!({"clip":right.portrait,"time":5*TPS,"unit":right.id}));
++    assert_units(&s,owner,3);
++    let m=links(&s,owner);
++    let reopened=filmcraft_format::decode(&filmcraft_format::encode(&s.project,false)).unwrap();
++    assert_eq!(*s.project,reopened.project);
++    assert_eq!(m.revision,2);
++    assert_eq!(m.lineage.len(),2);
++    for unit in &m.units { assert_eq!(clip(&s,portrait,unit.clips()[2]).unwrap().effects,effects); }
++}
++#[test]
++fn undo_then_different_split_uses_fresh_child_identity() {
++    let (mut s,owner)=fixture();
++    let id=links(&s,owner).units[0].portrait;
++    run(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));
++    let branch: BTreeSet<_>=links(&s,owner).units.into_iter().map(|u|u.id).collect();
++    run(&mut s,"edit.undo",json!({}));
++    run(&mut s,"timeline.razor",json!({"clip":id,"time":4*TPS}));
++    let other: BTreeSet<_>=links(&s,owner).units.into_iter().map(|u|u.id).collect();
++    assert!(branch.is_disjoint(&other));
++    assert_units(&s,owner,2);
++}
++#[test]
++fn native_trim_in_and_out_share_engine_delta_and_keep_effects() {
++    let (mut s,owner)=fixture();
++    let id=links(&s,owner).units[0].portrait;
++    let original=clip(&s,s.state.active_sequence.unwrap(),ClipId(id)).unwrap().effects.clone();
++    for (edge,delta) in [("in",30),("out",-60)] {
++        let before=snapshot(&s); let n=s.history.undo.len();
++        let r=run(&mut s,"timeline.trim",json!({"clip":id,"edge":edge,"mode":"regular","deltaFrames":delta}));
++        assert_eq!(r["delta"],s.sequence_rate().tick_of(delta).0);
++        assert_eq!(s.history.undo.len(),n+1); assert_units(&s,owner,1);
++        assert_eq!(clip(&s,s.state.active_sequence.unwrap(),ClipId(id)).unwrap().effects,original);
++        let after=snapshot(&s);run(&mut s,"edit.undo",json!({}));assert_eq!(snapshot(&s),before);
++        run(&mut s,"edit.redo",json!({}));assert_eq!(snapshot(&s),after);
++    }
++    assert_eq!(links(&s,owner).revision,2);
++}
++#[test]
++fn no_clip_ui_razor_and_audio_target_reach_linked_dispatch() {
++    let (mut s,owner)=fixture();
++    run(&mut s,"timeline.razor",json!({"time":3*TPS}));assert_units(&s,owner,2);
++    let m=links(&s,owner);let c=clip(&s,m.sequences()[2],m.units[1].clips()[2]).unwrap();
++    let audio=s.active_sequence().unwrap().audio_tracks[0].items.iter().find(|a|a.link==c.link).unwrap().id;
++    run(&mut s,"timeline.trim",json!({"clip":audio.0,"edge":"out","deltaFrames":-20}));
++    assert_units(&s,owner,2);
++}
++#[test]
++fn stale_invalid_boundary_and_unsupported_requests_are_atomic() {
++    let (mut s,owner)=fixture();let id=links(&s,owner).units[0].portrait;
++    for p in [json!({"clip":id,"time":3*TPS,"expectedRevision":0}),json!({"clip":id,"time":3*TPS,"expectedLinksRevision":99}),
++        json!({"clip":id,"time":TPS}),json!({"clip":id,"time":7*TPS}),json!({"clip":id,"time":3*TPS,"unit":"stale"}),
++        json!({"clip":999999,"time":3*TPS}),json!({"clip":id,"time":"bad"}),json!({"clip":id,"time":3*TPS,"frame":180})] {
++        assert_rejected(&mut s,"timeline.razor",p);
++    }
++    for p in [json!({"clip":id,"edge":"out","mode":"ripple","deltaFrames":-1}),json!({"clip":id,"edge":"bad","deltaFrames":-1}),
++        json!({"clip":id,"edge":"in","delta":0}),json!({"clip":id,"edge":"out","deltaFrames":-1,"delta":-1})] {
++        assert_rejected(&mut s,"timeline.trim",p);
++    }
++    for id in ["timeline.move","timeline.rateStretch","timeline.roll","timeline.slip","timeline.slide","clip.speedDuration","sequence.addEdit","sequence.addEditAllTracks","sequence.lift","sequence.extract","edit.clear","edit.rippleDelete"] {
++        assert_rejected(&mut s,id,json!({}));
++    }
++}
++#[test]
++fn locked_audio_peer_and_diverged_manifest_refuse_before_any_native_edit() {
++    let (mut s,owner)=fixture();let m=links(&s,owner);let id=m.units[0].portrait;
++    let shared=m.sequences()[0];
++    Arc::make_mut(&mut s.project).sequence_mut(shared).unwrap().audio_tracks[0].locked=true;
++    assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));
++    Arc::make_mut(&mut s.project).sequence_mut(shared).unwrap().audio_tracks[0].locked=false;
++    Arc::make_mut(&mut s.project).sequence_mut(shared).unwrap().video_tracks[0].items[0].duration=Tick(TPS);
++    assert_rejected(&mut s,"timeline.trim",json!({"clip":id,"edge":"out","deltaFrames":-1}));
++}
++#[test]
++fn independent_native_sequence_still_uses_native_handler() {
++    let (mut s,_)=fixture();
++    run(&mut s,"file.newSequence",json!({"name":"Independent","fps":60,"video":1,"audio":1}));
++    let media=s.project.items.values().find(|i|i.as_media().is_some()).unwrap().id;
++    run(&mut s,"timeline.place",json!({"item":media.0,"time":0,"sourceIn":0,"duration":4*TPS}));
++    let id=s.active_sequence().unwrap().video_tracks[0].items[0].id;
++    run(&mut s,"timeline.razor",json!({"clip":id.0,"time":TPS}));
++    assert_eq!(s.active_sequence().unwrap().video_tracks[0].items.len(),2);
++}
++#[test]
++fn mixed_all_tracks_razor_is_rejected_instead_of_dropping_independent_intent() {
++    let (mut s,owner)=fixture();let m=links(&s,owner);
++    let media=clip(&s,m.sequences()[2],m.units[0].clips()[2]).unwrap().item;
++    run(&mut s,"timeline.place",json!({"item":media.0,"track":"V2","audioTrack":"A2","time":TPS,"sourceIn":2*TPS,"duration":6*TPS}));
++    assert_rejected(&mut s,"timeline.razor",json!({"time":3*TPS}));
++}
++
++#[test]
++fn trim_uses_the_most_restrictive_native_peer_handle() {
++    let (mut s,owner)=fixture(); let m=links(&s,owner);
++    let media=clip(&s,m.sequences()[1],m.units[0].clips()[1]).unwrap().item;
++    run(&mut s,"sequence.open",json!({"item":m.landscape_sequence}));
++    run(&mut s,"timeline.place",json!({"item":media.0,"track":"V1","audioTrack":"A1","time":15*TPS/2,"sourceIn":0,"duration":TPS}));
++    run(&mut s,"sequence.open",json!({"item":m.portrait_sequence}));
++    let r=run(&mut s,"timeline.trim",json!({"clip":m.units[0].portrait,"edge":"out","delta":2*TPS}));
++    assert_eq!(r["delta"],TPS/2);
++    assert_units(&s,owner,1);
++    for (seq,id) in m.sequences().into_iter().zip(m.units[0].clips()) {
++        assert_eq!(clip(&s,seq,id).unwrap().duration,Tick(13*TPS/2));
++    }
++}
++#[test]
++fn malformed_and_duplicate_bindings_are_rejected_without_rewriting_metadata() {
++    let (mut s,owner)=fixture();let id=links(&s,owner).units[0].portrait;
++    let text=s.project.item(owner).unwrap().metadata[KEY].clone();
++    Arc::make_mut(&mut s.project).item_mut(owner).unwrap().metadata.insert(KEY.into(),"{".into());
++    assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));
++    let mut m: Value=serde_json::from_str(&text).unwrap();
++    let mut dup=m["units"][0].clone();dup["id"]=json!("duplicate-binding");m["units"].as_array_mut().unwrap().push(dup);
++    Arc::make_mut(&mut s.project).item_mut(owner).unwrap().metadata.insert(KEY.into(),m.to_string());
++    assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));
++}
++
++#[test]
++fn post_edit_metadata_rejection_restores_all_peers_history_and_revision() {
++    let (mut s,owner)=fixture();let mut m=links(&s,owner);let id=m.units[0].portrait;
++    let size=serde_json::to_string(&m).unwrap().len();
++    m.extra.insert("large".into(),Value::String("x".repeat(MAX_METADATA-size-32)));
++    let text=serde_json::to_string(&m).unwrap();assert!(text.len()<MAX_METADATA);
++    Arc::make_mut(&mut s.project).item_mut(owner).unwrap().metadata.insert(KEY.into(),text);
++    let events=s.events.len();
++    assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));
++    assert_eq!(s.events.len(),events);
++    assert_units(&s,owner,1);
++}
++
++#[test]
++fn direct_trim_keyboard_and_dynamic_commands_cannot_bypass_shared_edit() {
++    let (mut s,owner)=fixture();let id=links(&s,owner).units[0].portrait;
++    run(&mut s,"trim.selectEditPoint",json!({"clip":id,"edge":"out","kind":"trim"}));
++    assert!(!s.state.edit_points.is_empty());
++    for command in ["trim.backward","trim.forward","trim.backwardMany","trim.forwardMany","trim.nudge",
++        "trim.extendToPlayhead","trim.ripplePrevious","trim.rippleNext","trim.previous","trim.next",
++        "trim.shuttle","trim.tick","trim.shuttleStop","trim.cancelDynamic","trim.playAround"] {
++        assert_rejected(&mut s,command,json!({"frames":-1,"clock":100.0,"direction":"forward"}));
++        assert!(!s.trim_play.active());
++        assert_units(&s,owner,1);
++    }
++    assert!(s.execute("trim.monitor",json!({})).is_ok());
++    run(&mut s,"trim.clear",json!({}));
++}
++
++#[test]
++fn native_unlink_is_rejected_and_preexisting_lost_audio_ownership_is_detected() {
++    let (mut s,owner)=fixture();let m=links(&s,owner);let id=m.units[0].portrait;
++    let seq=m.sequences()[2];let video=clip(&s,seq,ClipId(id)).unwrap();
++    let audio=s.project.sequence(seq).unwrap().audio_tracks[0].items.iter().find(|a|a.link==video.link).unwrap().id;
++    assert_rejected(&mut s,"clip.link",json!({"clips":[id,audio.0]}));
++    let q=Arc::make_mut(&mut s.project).sequence_mut(seq).unwrap();
++    q.find_item_mut(ClipId(id)).unwrap().1.link=None;
++    q.find_item_mut(audio).unwrap().1.link=None;
++    assert_rejected(&mut s,"timeline.trim",json!({"clip":id,"edge":"out","deltaFrames":-30}));
++    assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));
++}
++#[test]
++fn silent_source_remains_valid_without_native_audio_links() {
++    let (mut s,owner)=fixture();let m=links(&s,owner);
++    let item=clip(&s,m.sequences()[0],m.units[0].clips()[0]).unwrap().item;
++    let project=Arc::make_mut(&mut s.project);
++    let media=project.item_mut(item).unwrap().as_media_mut().unwrap();
++    media.info.audio_streams.clear();
++    for seq in m.sequences() {
++        let q=project.sequence_mut(seq).unwrap();
++        q.audio_tracks.iter_mut().for_each(|t|t.items.clear());
++        q.video_tracks[0].items[0].link=None;
++    }
++    run(&mut s,"timeline.razor",json!({"clip":m.units[0].portrait,"time":3*TPS}));
++    let now=links(&s,owner);assert_eq!(now.units.len(),2);
++    for seq in now.sequences() {assert!(s.project.sequence(seq).unwrap().audio_tracks.iter().all(|t|t.items.is_empty()));}
++}
++
++#[test]
++fn cyclic_known_ancestry_and_live_unit_parents_are_rejected() {
++    let (mut s,owner)=fixture();let mut m=links(&s,owner);let id=m.units[0].portrait;
++    m.lineage=vec![Ancestor{id:"A".into(),parent:Some("B".into())},Ancestor{id:"B".into(),parent:Some("A".into())}];
++    m.units[0].parent=Some("A".into());
++    Arc::make_mut(&mut s.project).item_mut(owner).unwrap().metadata.insert(KEY.into(),serde_json::to_string(&m).unwrap());
++    assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));
++    let (mut s,owner)=fixture();let m=links(&s,owner);
++    run(&mut s,"timeline.razor",json!({"clip":m.units[0].portrait,"time":3*TPS}));
++    let mut m=links(&s,owner);m.units[0].parent=Some(m.units[1].id.clone());let id=m.units[0].portrait;
++    Arc::make_mut(&mut s.project).item_mut(owner).unwrap().metadata.insert(KEY.into(),serde_json::to_string(&m).unwrap());
++    assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":2*TPS}));
++}
++#[test]
++fn legacy_opaque_parent_is_preserved_without_fabricating_ancestry() {
++    let (mut s,owner)=fixture();let mut m=links(&s,owner);let id=m.units[0].portrait;
++    m.units[0].parent=Some("opaque-legacy-root".into());
++    Arc::make_mut(&mut s.project).item_mut(owner).unwrap().metadata.insert(KEY.into(),serde_json::to_string(&m).unwrap());
++    run(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));
++    let now=links(&s,owner);assert_eq!(now.lineage[0].parent.as_deref(),Some("opaque-legacy-root"));
++    assert_units(&s,owner,2);
++}
++
++#[test]
++fn av_subclip_audio_ownership_uses_resolved_parent_streams() {
++    let (mut s,owner)=fixture();let m=links(&s,owner);
++    let media=clip(&s,m.sequences()[0],m.units[0].clips()[0]).unwrap().item;
++    let sub=run(&mut s,"clip.makeSubclip",json!({"item":media.0,"start":0,"end":20*TPS,"name":"AV subclip"}))["item"].as_u64().unwrap();
++    assert!(s.project.source_streams(ItemId(sub)).1);
++    let project=Arc::make_mut(&mut s.project);
++    for seq in m.sequences() {
++        for track in project.sequence_mut(seq).unwrap().all_tracks_mut() {
++            for c in &mut track.items {c.item=ItemId(sub);}
++        }
++    }
++    let q=project.sequence_mut(m.sequences()[2]).unwrap();
++    q.video_tracks[0].items[0].link=None;
++    q.audio_tracks[0].items[0].link=None;
++    assert_rejected(&mut s,"timeline.trim",json!({"clip":m.units[0].portrait,"edge":"out","deltaFrames":-30}));
++}
++#[test]
++fn missing_source_is_unavailable_instead_of_assumed_silent() {
++    let (mut s,owner)=fixture();let m=links(&s,owner);
++    let media=clip(&s,m.sequences()[0],m.units[0].clips()[0]).unwrap().item;
++    Arc::make_mut(&mut s.project).items.remove(&media);
++    assert_rejected(&mut s,"timeline.razor",json!({"clip":m.units[0].portrait,"time":3*TPS}));
++    assert_rejected(&mut s,"timeline.trim",json!({"clip":m.units[0].portrait,"edge":"out","deltaFrames":-30}));
++}
++
++fn manifest_value(s:&Session,owner:ItemId)->Value{serde_json::from_str(&s.project.item(owner).unwrap().metadata[KEY]).unwrap()}
++fn sequences_value(m:&Value)->[ItemId;3]{[ItemId(m["sharedSequence"].as_u64().unwrap()),ItemId(m["landscapeSequence"].as_u64().unwrap()),ItemId(m["portraitSequence"].as_u64().unwrap())]}
++fn role_ids(role:&Value)->[ClipId;3]{[ClipId(role["shared"].as_u64().unwrap()),ClipId(role["landscape"].as_u64().unwrap()),ClipId(role["portrait"].as_u64().unwrap())]}
++fn set_manifest_value(s:&mut Session,owner:ItemId,m:&Value){run(s,"metadata.set",json!({"item":owner.0,"field":KEY,"value":m.to_string()}));}
++fn bundle_fixture()->(Session,ItemId){
++ let(mut s,owner)=fixture();let mut m=manifest_value(&s,owner);let seqs=sequences_value(&m);let unit=m["units"][0].clone();let mut cams=Vec::new();
++ for(peer,seq)in seqs.into_iter().enumerate(){
++  run(&mut s,"sequence.open",json!({"item":seq.0}));let gameplay=ClipId(unit[["shared","landscape","portrait"][peer]].as_u64().unwrap());let media=clip(&s,seq,gameplay).unwrap().item;
++  run(&mut s,"timeline.place",json!({"item":media.0,"track":"V2","audio":false,"time":TPS,"sourceIn":2*TPS,"duration":6*TPS}));
++  let cam=s.project.sequence(seq).unwrap().video_tracks[1].items[0].id.0;cams.push(cam);
++  run(&mut s,"effects.apply",json!({"clips":[cam],"effect":"crop"}));
++  run(&mut s,"effects.setParam",json!({"clip":cam,"effect":"crop","param":"left","value":10+peer*5}));
++  run(&mut s,"effects.setParam",json!({"clip":cam,"effect":"motion","param":"scale","value":125+peer*15}));
++  run(&mut s,"effects.setParam",json!({"clip":cam,"effect":"motion","param":"position","value":[500+peer*20,300+peer*20],"keyframe":true,"time":3*TPS}));
++ }
++ m["schema"]=json!(2);m["kit"]["version"]=json!(4);m["units"][0].as_object_mut().unwrap().remove("shared");m["units"][0].as_object_mut().unwrap().remove("landscape");m["units"][0].as_object_mut().unwrap().remove("portrait");
++ m["units"][0]["roles"]=json!([
++  {"role":"gameplay","audio":"inherit","shared":unit["shared"],"landscape":unit["landscape"],"portrait":unit["portrait"]},
++  {"role":"facecam","audio":"none","shared":cams[0],"landscape":cams[1],"portrait":cams[2]}]);
++ set_manifest_value(&mut s,owner,&m);(s,owner)
++}
++fn assert_bundle(s:&Session,owner:ItemId,count:usize){
++ let m=manifest_value(s,owner);assert_eq!(m["schema"],2);let seqs=sequences_value(&m);let units=m["units"].as_array().unwrap();assert_eq!(units.len(),count);let mut ids=BTreeSet::new();
++ for unit in units{
++  let roles=unit["roles"].as_array().unwrap();assert_eq!(roles.len(),2);let gameplay=roles.iter().find(|r|r["role"]=="gameplay").unwrap();let base=clip(s,seqs[0],role_ids(gameplay)[0]).unwrap();
++  for role in roles{let source=clip(s,seqs[0],role_ids(role)[0]).unwrap();for(seq,id)in seqs.into_iter().zip(role_ids(role)){
++   assert!(ids.insert(id));let c=clip(s,seq,id).unwrap();assert_eq!((c.start,c.duration),(base.start,base.duration));assert_eq!((c.item,c.source_in),(source.item,source.source_in));
++   let q=s.project.sequence(seq).unwrap();
++   if role["audio"]=="none"{assert_eq!(c.link,None);}else{let audio:Vec<_>=q.audio_tracks.iter().flat_map(|t|&t.items).filter(|a|a.link.is_some()&&a.link==c.link).collect();assert_eq!(audio.len(),1);assert_eq!((audio[0].item,audio[0].start,audio[0].duration,audio[0].source_in),(c.item,c.start,c.duration,c.source_in));}
++  }}
++ }
++}
++fn bundle_effects(s:&Session,m:&Value)->BTreeMap<(ItemId,String),Value>{let mut out=BTreeMap::new();for role in m["units"][0]["roles"].as_array().unwrap(){for(seq,id)in sequences_value(m).into_iter().zip(role_ids(role)){out.insert((seq,role["role"].as_str().unwrap().to_string()),serde_json::to_value(&clip(s,seq,id).unwrap().effects).unwrap());}}out}
++#[test]
++fn bundle_split_repeat_trim_undo_reopen_keep_all_native_roles_audio_and_framing(){
++ let(mut s,owner)=bundle_fixture();let m=manifest_value(&s,owner);run(&mut s,"effects.setParam",json!({"clip":m["units"][0]["roles"][0]["portrait"],"effect":"motion","param":"scale","value":121.52777777777777}));let effects=bundle_effects(&s,&m);let portrait=sequences_value(&m)[2];let cam=m["units"][0]["roles"][1]["portrait"].as_u64().unwrap();
++ s.state.linked_selection=false;s.state.selection=vec![ClipId(cam)];let ui=serde_json::to_value(&s.state).unwrap();let before=snapshot(&s);let undo=s.history.undo.len();
++ let r=run(&mut s,"timeline.razor",json!({"clip":cam,"time":3*TPS}));assert_eq!(r["cuts"],3);assert_eq!(s.history.undo.len(),undo+1);assert_eq!(serde_json::to_value(&s.state).unwrap(),ui);assert_bundle(&s,owner,2);
++ let split=snapshot(&s);run(&mut s,"edit.undo",json!({}));assert_eq!(snapshot(&s),before);run(&mut s,"edit.redo",json!({}));assert_eq!(snapshot(&s),split);
++ let m=manifest_value(&s,owner);let right=m["units"][1]["roles"][0]["portrait"].as_u64().unwrap();run(&mut s,"timeline.razor",json!({"clip":right,"time":5*TPS}));assert_bundle(&s,owner,3);
++ let m=manifest_value(&s,owner);let right=m["units"][2]["roles"][1]["portrait"].as_u64().unwrap();let before=snapshot(&s);let undo=s.history.undo.len();let r=run(&mut s,"timeline.trim",json!({"clip":right,"edge":"out","deltaFrames":-30}));assert_eq!(r["delta"],-TPS/2);assert_eq!(s.history.undo.len(),undo+1);assert_bundle(&s,owner,3);
++ let after=snapshot(&s);run(&mut s,"edit.undo",json!({}));assert_eq!(snapshot(&s),before);run(&mut s,"edit.redo",json!({}));assert_eq!(snapshot(&s),after);
++ let m=manifest_value(&s,owner);for unit in m["units"].as_array().unwrap(){for role in unit["roles"].as_array().unwrap(){for(seq,id)in sequences_value(&m).into_iter().zip(role_ids(role)){assert_eq!(serde_json::to_value(&clip(&s,seq,id).unwrap().effects).unwrap(),effects[&(seq,role["role"].as_str().unwrap().to_string())]);}}}
++ assert_eq!(s.state.active_sequence,Some(portrait));let loaded=filmcraft_format::decode(&filmcraft_format::encode(&s.project,false)).unwrap();assert_eq!(*s.project,loaded.project);
++}
++#[test]
++fn bundle_all_tracks_razor_resolves_each_unit_once(){let(mut s,owner)=bundle_fixture();let r=run(&mut s,"timeline.razor",json!({"time":3*TPS}));assert_eq!(r["cuts"],3);assert_bundle(&s,owner,2);}
++#[test]
++fn bundle_trim_uses_facecam_peer_handle_for_every_role(){
++ let(mut s,owner)=bundle_fixture();let m=manifest_value(&s,owner);let seqs=sequences_value(&m);let media=clip(&s,seqs[1],role_ids(&m["units"][0]["roles"][1])[1]).unwrap().item;
++ run(&mut s,"sequence.open",json!({"item":seqs[1].0}));run(&mut s,"timeline.place",json!({"item":media.0,"track":"V2","audio":false,"time":15*TPS/2,"sourceIn":0,"duration":TPS}));run(&mut s,"sequence.open",json!({"item":seqs[2].0}));
++ let r=run(&mut s,"timeline.trim",json!({"clip":m["units"][0]["roles"][0]["portrait"],"edge":"out","delta":2*TPS}));assert_eq!(r["delta"],TPS/2);assert_bundle(&s,owner,1);
++ for role in manifest_value(&s,owner)["units"][0]["roles"].as_array().unwrap(){for(seq,id)in seqs.into_iter().zip(role_ids(role)){assert_eq!(clip(&s,seq,id).unwrap().duration,Tick(13*TPS/2));}}
++}
++#[test]
++fn bundle_in_trim_changes_both_role_sources_and_keeps_native_effect_times(){
++ let(mut s,owner)=bundle_fixture();let m=manifest_value(&s,owner);let effects=bundle_effects(&s,&m);let id=m["units"][0]["roles"][1]["portrait"].as_u64().unwrap();
++ let r=run(&mut s,"timeline.trim",json!({"clip":id,"edge":"in","deltaFrames":30}));assert_eq!(r["delta"],TPS/2);assert_bundle(&s,owner,1);let m=manifest_value(&s,owner);
++ for role in m["units"][0]["roles"].as_array().unwrap(){for(seq,id)in sequences_value(&m).into_iter().zip(role_ids(role)){let c=clip(&s,seq,id).unwrap();assert_eq!(c.source_in,Tick(5*TPS/2));assert_eq!(serde_json::to_value(&c.effects).unwrap(),effects[&(seq,role["role"].as_str().unwrap().to_string())]);}}
++}
++#[test]
++fn bundle_post_edit_failure_rolls_back_six_video_and_three_audio_peers(){
++ let(mut s,owner)=bundle_fixture();let mut m=manifest_value(&s,owner);let id=m["units"][0]["roles"][1]["portrait"].clone();let size=m.to_string().len();m["large"]=json!("x".repeat(MAX_METADATA-size-32));assert!(m.to_string().len()<MAX_METADATA);set_manifest_value(&mut s,owner,&m);let events=s.events.len();
++ assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));assert_eq!(s.events.len(),events);assert_bundle(&s,owner,1);
++}
++#[test]
++fn unknown_roles_policies_or_schema_mixtures_are_rejected_atomically(){
++ let(mut s,owner)=bundle_fixture();let baseline=manifest_value(&s,owner);let id=baseline["units"][0]["roles"][0]["portrait"].clone();
++ for change in 0..6{let mut m=baseline.clone();match change{0=>m["units"][0]["roles"][1]["role"]=json!("overlay"),1=>m["units"][0]["roles"][1]["audio"]=json!("inherit"),2=>m["units"][0]["roles"][0]["audio"]=json!("none"),3=>m["units"][0]["roles"][1]["role"]=json!("gameplay"),4=>m["units"][0]["shared"]=m["units"][0]["roles"][0]["shared"].clone(),_=>m["units"][0]["roles"][1]["unknownPolicy"]=json!(true)}set_manifest_value(&mut s,owner,&m);assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));}
++}
++#[test]
++fn diverged_or_locked_facecam_prevents_all_bundle_changes(){
++ let(mut s,owner)=bundle_fixture();let m=manifest_value(&s,owner);let seq=sequences_value(&m)[1];let cam=role_ids(&m["units"][0]["roles"][1])[1];let id=m["units"][0]["roles"][0]["portrait"].clone();
++ Arc::make_mut(&mut s.project).sequence_mut(seq).unwrap().video_tracks[1].locked=true;assert_rejected(&mut s,"timeline.trim",json!({"clip":id,"edge":"out","deltaFrames":-30}));
++ let q=Arc::make_mut(&mut s.project).sequence_mut(seq).unwrap();q.video_tracks[1].locked=false;q.find_item_mut(cam).unwrap().1.source_in=Tick(3*TPS);
++ assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));
++}
++#[test]
++fn v1_cannot_silently_accept_an_unowned_bundle_field(){
++ let(mut s,owner)=fixture();let mut m=manifest_value(&s,owner);let id=m["units"][0]["portrait"].clone();m["units"][0]["layers"]=json!([{"role":"facecam"}]);set_manifest_value(&mut s,owner,&m);assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));
 +}
