@@ -1,6 +1,6 @@
 # Clipline implementation evidence and handoff
 
-Updated: 2026-10-18. State: W0 executing. Product implementation is now authorized by Mark's instruction to execute the full master plan with agents. Public release, publishing, and paid model use remain separate boundaries.
+Updated: 2026-10-18. State: W0-W4 integration executing; full program remains incomplete. Product implementation is now authorized by Mark's instruction to execute the full master plan with agents. Public release, publishing, and paid model use remain separate boundaries.
 
 ## Ownership and preserved baseline
 
@@ -29,16 +29,22 @@ Agents inherit the session model. The exact model identifier is not exposed in t
 | Package | State | Evidence / next gate |
 | --- | --- | --- |
 | W0: baseline and engine proof | Running; executable trials and Windows native proof complete | Filmcraft advances to integration; editor widget/cancellation/resource gates remain. Premiere functional template baseline complete; matched workflow benchmark remains |
-| W1: Creator Library / Kit | Persistence slice integrated; incomplete | Shared identity, versioned Kits, conflict handling and bounded metadata pages pass tests. Working-copy/native-store wiring, jobs, retention, complete migration and UI remain |
+| W1: Creator Library / Kit | Core persistence, native checkpoints and bounded caption admission integrated; incomplete | Asset/Kit identity, conflicts, bounded pages, generation CAS and actual native checkpoint/reopen pass. Native Kit factory, general recovery/retention, migration and UI remain |
 | W2: Twitch intake | Metadata persistence/API slice integrated; incomplete | Stable provenance, bounded pages and deduplication pass. Native inbox UI, durable preparation, downloads and connected account remain |
-| W3: editor / linked outputs | Pending W0/W1 | Native document authority, manual override preservation, performance |
-| W4: caption quality | Local worker integrated; incomplete | Source-bound immutable hypotheses/alignment and cancellation pass. Accepted corrections, native projection, managed installation and measured repair effort remain |
+| W3: editor / linked outputs | Native integration running; incomplete | Full v2.1 GUI linked edit/reopen passed; v5 source and actual engine gateway/caption frames passed. Clean latest GUI, Kit instantiation, remaining controls, Compare, proxies and performance remain |
+| W4: caption quality | Worker, canonical corrections and native projection integrated; incomplete | Actual admitted local ASR/alignment retains proposals. Explicit correction projects to three native tracks and renders. Managed installation, repair UI, partial realignment and measured accuracy/repair effort remain |
 | W5: creative recipes | Policy ready; implementation pending | Hooks, subtitles, transitions, music/SFX, CTA |
 | W6: optional Jev | Evaluation design ready; no API access used | Opt-in data/cost boundary; local product does not depend on it |
 | W7: outputs / Homebase / results | Pending W3-W5 | Immutable jobs, verified exports, idempotent delivery, real analytics |
 | W8: migration / release candidate | Pending | Clean Windows package, rollback, matched workflow benchmark |
 
-## Active native integration checkpoint
+## Current integration checkpoint
+
+Canonical v5 source is pinned by patch5fc762a2e11ae81461eae872407976ad63d1cd1a92f5363c92ec280ecd5838d4; fresh preparation matches all17 changed files. Root read82 final native checks. Actual product gateways passed native checkpoint publication and accepted-caption correction/linked regeneration/save/reopen on real media. Four native caption frames were rendered and visually reviewed. The working earlier full GUI remains v2.1; the clean v5 GUI build is running with verified process-local GNU-CRT/LLD flags. It is not yet a passing latest-editor result.
+
+Next product units are native Creator Kit instantiation and the editor process/session owner, followed by full GUI workflow integration and measured acceptance. The accepted caption tests use authored evaluation text; speech accuracy and the reported two-hour workflow improvement remain unmeasured. General recovery, global resource governance, all native editing paths, repair UI, hooks/CTA/transition recipes and Homebase acceptance remain open.
+
+## Earlier native integration history
 
 The controller is still executing the full goal. The native corrections below pass their bounded Windows suites and are packaged as reproducible source inputs. Full native editor integration remains incomplete. Reuse Filmcraft's native editor. Do not replace it with the fixed W0 demo API or a restricted PySide timeline.
 
@@ -53,7 +59,7 @@ The controller is still executing the full goal. The native corrections below pa
 
 Next controller action: finish the patched GUI build/launch, close native save/export validation, connect matching-generation working copies, and expose the Twitch/Kit workflow through the editor. Do not claim a complete GUI, autosave integration or W3 completion from engine-only tests.
 
-### Final layered native bundle source
+### Historical v2.1 layered native bundle source
 
 The canonical patch now contains schema2 gameplay/facecam role bindings. Both roles follow shared native razor and regular trim across all three sequences. Gameplay owns native audio once; facecam adds no duplicate audio. Schema1 remains supported. The final Windows source passed **26 public command tests and16 publication observer tests**, with unchanged source hashes. The controller read both final raw logs.
 
@@ -105,22 +111,22 @@ Local raw tests: `drift/gui-transaction-patch/results/windows-native-external/at
 | --- | --- |
 | R01 Twitch stream-to-post direction | Master plan; runtime not complete |
 | R02 clip-first / context / local sources | Metadata persistence, explicit API pages/date windows and nullable VOD context pass. Live check found no saved account. Downloads/native inbox remain |
-| R03 linked landscape/portrait | Native Filmcraft grouped split/trim, undo, rollback, metadata and crop/keyframe preservation pass on Windows. General editor integration remains open |
+| R03 linked landscape/portrait | Native linked split/trim, crop/audio preservation, accepted-caption regeneration, exact undo/reopen and checkpoint gateway pass. General editor controls/integration remain open |
 | R04 capable open-source editor | Filmcraft chosen for integration after executable Windows proof and Mark's clarification. Reuse its capable native editor; integration is unfinished |
 | R05 alternative foundation coverage | Filmcraft/Drift runtime complete; Concat/MLT screened with documented automation/distribution gaps; OpenCut watch |
 | R06 rebuild-versus-extend | Selective core rebuild accepted; Filmcraft chosen for integration |
 | R07 lag / small projects | 10,000 moment metadata test uses bounded keyset pages without media access. UI latency and Premiere comparison remain unmeasured |
 | R08 Creator Kit / asset reuse | SQLite asset/Kit/moment core integrated; Filmcraft native template instantiated and rebound to another source. No Creator Kit UI yet |
 | R09 fewer caption repairs | Actual baseline corpus and manual repairs unmeasured |
-| R10 WhisperX / useful caption reuse | Isolated CPU ASR+WhisperX alignment and cached-assets replay pass; quality default, correction persistence and managed packaging remain |
+| R10 WhisperX / useful caption reuse | Actual admitted cached ASR+WhisperX run, immutable proposals, canonical accepted corrections and native projection pass. Quality selection, repair UI, partial realignment and managed packaging remain |
 | R11 Jev / clipping decisions | Primary-source research; no paid requests or outbound media |
 | R12 hook document / measured winners | Playbook exists; no fabricated performance rows |
-| R13 editable subtitles | Candidate native SRT/title/caption renders tested; Filmcraft sampled preview/export checked. Full styled-word parity remains open |
+| R13 editable subtitles | Explicit accepted revisions project to three native styled tracks; correction, linked regeneration, undo/reopen and real-media native caption frames pass. Latest GUI, repair interface and full styled-word parity remain open |
 | R14 transitions / creative assets | Filmcraft centered dissolve sampled endpoints/midpoint and unchanged frame count pass. Drift transition command/render exercised. Full recipe set remains open |
 | R15 CTAs | Playbook policy; editable application pending |
 | R16 reuse / suitable open source | Source reuse map and executable foundation evaluation |
 | R17 exports / Homebase / learning | Copied unfinished Homebase contract as baseline; runtime verification pending |
-| R18 orchestration | Isolated branch, three bounded agent units, one integration owner, evidence ledger |
+| R18 orchestration | Isolated branch, bounded native/Kit/session agent units, root sole product writer, cumulative evidence ledger; full program remains active |
 
 Carry forward technical-spec A01-A20. A command-line import/export cannot close UI, caption accuracy, human repair-time, linked-edit transaction, or live publishing checks.
 
