@@ -18,6 +18,7 @@ from typing import Any
 
 from native.core.twitch_inbox import TwitchClip, timestamp_identity
 from native.core.accepted_transcript import AcceptedTranscriptStore, install_schema as install_caption_schema
+from native.core.durable_jobs import DurableJobs, install_schema as install_job_schema
 
 
 class LibraryError(ValueError):
@@ -244,6 +245,8 @@ class CreatorLibrary:
             self.connection.execute("PRAGMA journal_mode=WAL")
             install_caption_schema(self.connection)
             self.captions = AcceptedTranscriptStore(self.connection)
+            install_job_schema(self.connection)
+            self.jobs = DurableJobs(self.connection)
         except Exception:
             self.connection.close()
             raise
