@@ -26,6 +26,118 @@ diff --git a/crates/engine/Cargo.toml b/crates/engine/Cargo.toml
  
  [dev-dependencies]
  filmcraft-testkit = { workspace = true }
+diff --git a/crates/engine/src/autosave.rs b/crates/engine/src/autosave.rs
+--- a/crates/engine/src/autosave.rs
++++ b/crates/engine/src/autosave.rs
+@@ -1039,11 +1039,14 @@
+                 if self.prefs.save_current_project
+                     && let Some(p) = &s.path
+                 {
+-                    match filmcraft_format::atomic_write(Path::new(p), &bytes) {
+-                        Ok(()) => {
+-                            let _ = self.events.send(WorkerEvent::SavedProject { path: p.clone(), revision: s.revision });
+-                        }
+-                        Err(e) => self.error(format!("saving {p}: {e}")),
++                    match crate::linked_edits::validate_document(&s.project) {
++                        Err(e) => self.error(format!("current project was not saved: {e}; recovery copy retained at {}", path.display())),
++                        Ok(()) => match filmcraft_format::atomic_write(Path::new(p), &bytes) {
++                            Ok(()) => {
++                                let _ = self.events.send(WorkerEvent::SavedProject { path: p.clone(), revision: s.revision });
++                            }
++                            Err(e) => self.error(format!("saving {p}: {e}")),
++                        },
+                     }
+                 }
+                 Ok(path)
+diff --git a/crates/engine/src/commands.rs b/crates/engine/src/commands.rs
+--- a/crates/engine/src/commands.rs
++++ b/crates/engine/src/commands.rs
+@@ -3382,6 +3382,14 @@
+                     .collect(),
+             ))
+         }),
++        CommandSpec {
++            id: "clipline.saveSnapshot",
++            label: "Save Validated Linked Snapshot",
++            menu: &[], shortcut: None,
++            params: r#"{"path":str,"expectedProjectPath":str|null,"expectedRevision":int,"expectedLinksRevisions":[{"owner":id,"revision":int}]}"#,
++            enabled: always, run: save_linked_snapshot, journal: false,
++        },
++        query!("clipline.validate", "Validate Linked Document", r#"{"expectedRevision":int?,"expectedLinksRevisions":[{"owner":id,"revision":int}]}"#, crate::linked_edits::validate_command),
+         query!("project.inspect", "Inspect Project", "{}", |s, _| Ok(crate::commands::inspect_project(s))),
+         query!("sequence.inspect", "Inspect Sequence", r#"{"item":id?}"#, |s, p| {
+             let id = item_p(p, "item").or(s.state.active_sequence).ok_or(EngineError::NoSequence)?;
+@@ -4312,7 +4320,35 @@
+     p.name = name;
+ }
+ 
++/// Validate CAS and write one native snapshot without adopting it as the working file.
++fn save_linked_snapshot(s: &mut Session, params: &Value) -> Result<Value> {
++    const CMD: &str = "clipline.saveSnapshot";
++    let object = params.as_object().ok_or_else(|| bad(CMD, "parameters must be an object"))?;
++    if object.len() != 4 || !object.contains_key("expectedProjectPath") || !object.contains_key("expectedRevision") || !object.contains_key("expectedLinksRevisions")
++        || object.keys().any(|k| k != "path" && k != "expectedProjectPath" && k != "expectedRevision" && k != "expectedLinksRevisions") {
++        return Err(bad(CMD, "require exactly path, expectedProjectPath, expectedRevision and complete expectedLinksRevisions"));
++    }
++    let path = object.get("path").and_then(Value::as_str).filter(|p| !p.trim().is_empty())
++        .ok_or_else(|| bad(CMD, "need a nonempty explicit path"))?;
++    let matches_project = match &object["expectedProjectPath"] {
++        Value::Null => s.path.is_none(),
++        Value::String(expected) => s.path.as_deref() == Some(expected.as_str()),
++        _ => false,
++    };
++    if !matches_project { return Err(bad(CMD, "stale or invalid expectedProjectPath")); }
++    if s.edit_group_depth != 0 || s.trim_play.active() {
++        return Err(bad(CMD, "finish the staged edit or trim playback before saving a snapshot"));
++    }
++    let mut validation = crate::linked_edits::validate_command(s, &json!({
++        "expectedRevision":object["expectedRevision"],"expectedLinksRevisions":object["expectedLinksRevisions"]
++    }))?;
++    validation["projectPath"] = json!(s.path);
++    let saved = write_project(s, path, false)?;
++    Ok(json!({"path":saved["path"],"validation":validation}))
++}
++
+ fn write_project(s: &mut Session, path: &str, adopt: bool) -> Result<Value> {
++    crate::linked_edits::validate_document(&s.project)?;
+     let t0 = web_time::Instant::now();
+     // Save As renames the project after its new file (not an edit: no undo step, not dirty).
+     if adopt
+diff --git a/crates/engine/src/export_tools.rs b/crates/engine/src/export_tools.rs
+--- a/crates/engine/src/export_tools.rs
++++ b/crates/engine/src/export_tools.rs
+@@ -464,6 +464,7 @@
+ 
+ /// Run an export of `seq` in `project` as a background job (or now, with `wait`); returns the job id.
+ pub fn spawn_export(s: &mut Session, project: Arc<Project>, seq: ItemId, mut settings: ExportSettings, label: String, wait: bool) -> Result<u64> {
++    crate::linked_edits::validate_document(&project)?;
+     let format = settings.format;
+     if !filmcraft_export::available(format) {
+         return Err(EngineError::Other(format!("{} export is not available (no encoder registered)", format.label())));
+@@ -533,6 +534,7 @@
+ 
+ /// `file.exportMedia`: export the active (or `sequence`) sequence now.
+ pub fn export_media(s: &mut Session, p: &Value) -> Result<Value> {
++    crate::linked_edits::validate_document(&s.project)?;
+     let cmd = "file.exportMedia";
+     let seq = sequence_param(s, p, cmd)?;
+     let (preset, mut settings) = settings_from_params(s, p, cmd)?;
+@@ -714,6 +716,7 @@
+ }
+ 
+ fn queue_add(s: &mut Session, p: &Value) -> Result<Value> {
++    crate::linked_edits::validate_document(&s.project)?;
+     let cmd = "export.queue.add";
+     let (preset, settings) = settings_from_params(s, p, cmd)?;
+     let seqs: Vec<ItemId> = match p.get("sequences").and_then(Value::as_array) {
+@@ -894,6 +897,7 @@
+ // ---------------------------------------------------------------------------------------------
+ 
+ fn quick(s: &mut Session, p: &Value) -> Result<Value> {
++    crate::linked_edits::validate_document(&s.project)?;
+     let cmd = "export.quick";
+     let name = str_p(p, "preset").map(str::to_string).or_else(|| s.export_queue.quick_preset.clone()).unwrap_or_else(|| DEFAULT_PRESET.to_string());
+     let mut q = p.clone();
 diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
 --- a/crates/engine/src/lib.rs
 +++ b/crates/engine/src/lib.rs
@@ -64,15 +176,16 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
          let dirty = self.is_dirty();
          let Some(p) = self.persistence.as_mut() else { return };
          let cur = autosave::Sent { revision: self.revision, saved_revision: self.saved_revision, path: self.path.clone() };
-@@ -692,6 +699,7 @@
+@@ -692,6 +699,8 @@
      /// Run a command by id.
      pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
          let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
++        linked_edits::preflight_snapshot(self, id)?;
 +        let linked_plan = linked_edits::prepare(self, id, &params)?;
          if self.exec_depth == 0 && spec.journal && self.trim_play.active() {
              self.settle_trim_playback(id);
          }
-@@ -706,10 +714,15 @@
+@@ -706,10 +715,15 @@
          // Last-resort guard: a panic in a command (a bug that escaped the never-crash rules)
          // becomes an error for the caller (UI, CLI, control channel, MCP) instead of taking the
          // session and its unsaved project down. The panic hook has logged where it happened.
@@ -90,7 +203,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
              source_monitor::track_history(self);
          }
          // source graphics: an edited instance updates the shared layers and the other instances
-@@ -721,9 +734,7 @@
+@@ -721,9 +735,7 @@
          {
              self.log.push(panels::Level::Error, id, e.to_string());
          }
@@ -101,7 +214,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
          if r.is_ok() && spec.journal {
              self.journal.push((id.to_string(), params));
              if self.journal.len() > 10_000 {
-@@ -731,6 +742,14 @@
+@@ -731,6 +743,14 @@
              }
          }
          r
@@ -116,7 +229,23 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
      }
  
      /// Another command arrives while trim-mode playback runs: a dynamic trim is committed first
-@@ -871,43 +890,75 @@
+@@ -838,6 +858,7 @@
+         let mut st = self.state.clone();
+         let r = f(&mut p, &mut st)?;
+         self.refuse_self_nesting(&p)?;
++        if self.edit_group_depth == 0 { linked_edits::validate_transition(&self.project, &p)?; }
+         let old = std::mem::replace(&mut self.project, Arc::new(p));
+         self.history.undo.push((label.to_string(), old));
+         if self.history.undo.len() > self.history.limit {
+@@ -864,6 +885,7 @@
+         let mut st = self.state.clone();
+         let r = f(&mut p, &mut st)?;
+         self.refuse_self_nesting(&p)?;
++        if self.edit_group_depth == 0 { linked_edits::validate_transition(&self.project, &p)?; }
+         self.project = Arc::new(p);
+         self.state = st;
+         self.drop_stale_gap();
+@@ -871,43 +893,79 @@
          Ok(r)
      }
  
@@ -152,10 +281,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
 +        self.events.clear();
          self.history.limit = usize::MAX;
 -        // a panic inside the group must not leave the history unlimited: restore, then let it go on
-+        // A new group must not merge its first gesture into the preceding undo step.
-+        self.history.merge_key = None;
-+        self.edit_group_depth += 1;
-         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
+-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
 -        self.history.limit = limit;
 -        let first = self.history.undo.get(undo).map(|e| e.1.clone());
 -        let rolled_back = |s: &mut Session| {
@@ -172,6 +298,14 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
 -                self.history.undo.push((label.to_string(), first));
 -                if self.history.undo.len() > limit {
 -                    self.history.undo.remove(0);
++        // A new group must not merge its first gesture into the preceding undo step.
++        self.history.merge_key = None;
++        self.edit_group_depth += 1;
++        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            let value = f(self)?;
++            if self.edit_group_depth == 1 { linked_edits::validate_transition(&project, &self.project)?; }
++            Ok::<R, EngineError>(value)
++        }));
 +        self.edit_group_depth -= 1;
 +        self.history.limit = history.limit;
 +        match r {
@@ -223,7 +357,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
              }
          }
      }
-@@ -988,6 +1039,7 @@
+@@ -988,6 +1046,7 @@
          self.history.redo.push((label.clone(), cur));
          self.fix_state();
          self.bump();
@@ -231,7 +365,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
          Some(label)
      }
  
-@@ -998,6 +1050,7 @@
+@@ -998,6 +1057,7 @@
          self.history.undo.push((label.clone(), cur));
          self.fix_state();
          self.bump();
@@ -243,11 +377,11 @@ diff --git a/crates/engine/src/linked_edits.rs b/crates/engine/src/linked_edits.
 new file mode 100644
 --- /dev/null
 +++ b/crates/engine/src/linked_edits.rs
-@@ -0,0 +1,390 @@
+@@ -0,0 +1,521 @@
 +//! Clipline links bind native clips; all time calculations remain in the native edit engine.
 +use std::collections::{BTreeMap, BTreeSet};
 +use filmcraft_edit::{Edge, TrimMode};
-+use filmcraft_project::{ClipId, ItemId, TrackItem, TrackKind};
++use filmcraft_project::{ClipId, ItemId, Project, TrackItem, TrackKind};
 +use filmcraft_time::Tick;
 +use serde::{Deserialize, Serialize};
 +use serde_json::{Value, json};
@@ -361,12 +495,19 @@ new file mode 100644
 +        && c.speed == 1.0 && !c.reverse && c.frame_hold.is_none()
 +}
 +fn validate(s: &Session, owner: ItemId, links: &Links) -> Result<()> {
++    validate_project(&s.project, owner, links, true)
++}
++fn clip_in(project: &Project, seq: ItemId, id: ClipId) -> Result<&TrackItem> {
++    project.sequence(seq).and_then(|q| q.find_item(id)).map(|(_, c)| c)
++        .ok_or_else(|| bad("stale linked clip binding"))
++}
++fn validate_project(project: &Project, owner: ItemId, links: &Links, editable: bool) -> Result<()> {
 +    let sequences = links.sequences();
 +    if !matches!(links.schema, 1 | 2) || owner != sequences[0] || sequences.iter().collect::<BTreeSet<_>>().len() != 3
 +        || links.units.is_empty() || links.units.len() > MAX_UNITS || links.lineage.len() > MAX_LINEAGE {
 +        return Err(bad("invalid linked manifest structure or unsupported schema"));
 +    }
-+    let rate = s.project.sequence(sequences[0]).ok_or_else(|| bad("missing shared sequence"))?.settings.frame_rate;
++    let rate = project.sequence(sequences[0]).ok_or_else(|| bad("missing shared sequence"))?.settings.frame_rate;
 +    let mut names = BTreeSet::new();
 +    for ancestor in &links.lineage {
 +        if ancestor.id.is_empty() || ancestor.id.len() > 160 || !names.insert(ancestor.id.as_str()) {
@@ -404,12 +545,12 @@ new file mode 100644
 +        }
 +        let roles = unit.bindings(links.schema)?;
 +        let gameplay = roles.iter().find(|r| r.role == "gameplay").ok_or_else(|| bad("missing gameplay role"))?;
-+        let timeline = clip(s, sequences[0], gameplay.clips[0])?;
++        let timeline = clip_in(project, sequences[0], gameplay.clips[0])?;
 +        let mut role_tracks = BTreeSet::new();
 +        for role in &roles {
-+            let root = clip(s, sequences[0], role.clips[0])?;
++            let root = clip_in(project, sequences[0], role.clips[0])?;
 +            for (seq, id) in sequences.into_iter().zip(role.clips) {
-+                let q = s.project.sequence(seq).ok_or_else(|| bad("missing linked sequence"))?;
++                let q = project.sequence(seq).ok_or_else(|| bad("missing linked sequence"))?;
 +                if q.settings.frame_rate != rate { return Err(bad("linked sequence frame rates differ")); }
 +                let (track, c) = q.find_item(id).ok_or_else(|| bad("stale linked clip binding"))?;
 +                let tr = q.track(track).ok_or_else(|| bad("missing linked track"))?;
@@ -418,7 +559,7 @@ new file mode 100644
 +                    || (c.start, c.duration) != (timeline.start, timeline.duration) {
 +                    return Err(bad("bundle role timing/source diverged, shares a video track, or speed/hold unsupported"));
 +                }
-+                let streams = s.project.source_streams(c.item);
++                let streams = project.source_streams(c.item);
 +                if !streams.0 { return Err(bad("linked video source is missing or unavailable")); }
 +                let partners: Vec<_> = q.all_tracks().flat_map(|t| t.items.iter().map(move |c| (t, c)))
 +                    .filter(|(_, p)| p.id == id || (c.link.is_some() && p.link == c.link)).collect();
@@ -429,7 +570,7 @@ new file mode 100644
 +                    _ => {}
 +                }
 +                for (t, partner) in &partners {
-+                    if t.locked || !safe_clip(partner)
++                    if (editable && t.locked) || !safe_clip(partner)
 +                        || (partner.item, partner.start, partner.duration, partner.source_in) != (c.item, c.start, c.duration, c.source_in) {
 +                        return Err(bad("linked audio/video is locked or has divergent source/timing"));
 +                    }
@@ -439,6 +580,130 @@ new file mode 100644
 +                }
 +            }
 +        }
++    }
++    Ok(())
++}
++
++// Document validation scans inactive owners too; timing remains solely in native clips.
++const MAX_DOCUMENT_MANIFESTS: usize = 64;
++fn document_links(project: &Project) -> Result<Vec<(ItemId, Links)>> {
++    let mut result = Vec::new();
++    let mut sequences = BTreeSet::new();
++    let mut clips = BTreeSet::new();
++    let mut units = 0usize;
++    let mut ancestors = 0usize;
++    for item in project.items.values().filter(|i| i.metadata.contains_key(KEY)) {
++        if result.len() >= MAX_DOCUMENT_MANIFESTS { return Err(bad("too many linked manifests in document")); }
++        let text = &item.metadata[KEY];
++        if text.len() > MAX_METADATA { return Err(bad("linked metadata exceeds size limit")); }
++        let links: Links = serde_json::from_str(text).map_err(|e| bad(format!("invalid linked metadata: {e}")))?;
++        units += links.units.len();
++        ancestors += links.lineage.len();
++        if units > MAX_UNITS || ancestors > MAX_LINEAGE { return Err(bad("document linked unit/lineage limit exceeded")); }
++        validate_project(project, item.id, &links, false)?;
++        for sequence in links.sequences() {
++            if !sequences.insert(sequence) { return Err(bad("sequence belongs to multiple linked manifests")); }
++        }
++        for unit in &links.units {
++            for role in unit.bindings(links.schema)? {
++                for id in role.clips {
++                    if !clips.insert(id) { return Err(bad("clip belongs to multiple linked manifests")); }
++                }
++            }
++        }
++        result.push((item.id, links));
++    }
++    Ok(result)
++}
++
++pub(crate) fn validate_document(project: &Project) -> Result<()> {
++    document_links(project).map(|_| ())
++}
++
++/// Project-only edits stage a copy, so refusal occurs before history/state/publication changes.
++pub(crate) fn validate_transition(before: &Project, after: &Project) -> Result<()> {
++    for item in before.items.values().filter(|i| i.metadata.contains_key(KEY)) {
++        if after.item(item.id).is_none_or(|i| !i.metadata.contains_key(KEY)) {
++            return Err(bad("removing linked ownership requires an explicit detach operation"));
++        }
++    }
++    validate_document(after)
++}
++
++/// Subset exports may omit a complete linked group, but cannot silently detach one peer.
++pub(crate) fn validate_snapshot(before: &Project, snapshot: &Project) -> Result<()> {
++    for (owner, links) in document_links(before)? {
++        let present = links.sequences().map(|id| snapshot.item(id).is_some());
++        if present.iter().any(|v| *v) && (!present.iter().all(|v| *v)
++            || snapshot.item(owner).is_none_or(|i| !i.metadata.contains_key(KEY))) {
++            return Err(bad("snapshot omits a linked peer sequence"));
++        }
++    }
++    validate_document(snapshot)
++}
++
++pub(crate) fn validate_command(s: &mut Session, params: &Value) -> Result<Value> {
++    let object = params.as_object().ok_or_else(|| bad("validation parameters must be an object"))?;
++    if object.keys().any(|k| k != "expectedRevision" && k != "expectedLinksRevisions") {
++        return Err(bad("unknown validation parameter"));
++    }
++    if let Some(expected) = object.get("expectedRevision") {
++        if expected.as_u64() != Some(s.revision) { return Err(bad("stale or invalid expectedRevision")); }
++    }
++    let links = document_links(&s.project)?;
++    if let Some(expected) = object.get("expectedLinksRevisions") {
++        let values = expected.as_array().ok_or_else(|| bad("expectedLinksRevisions must be an array"))?;
++        if values.len() != links.len() { return Err(bad("expectedLinksRevisions must cover every linked owner")); }
++        let mut seen = BTreeSet::new();
++        for value in values {
++            let row = value.as_object().ok_or_else(|| bad("invalid owner revision"))?;
++            if row.len() != 2 { return Err(bad("owner revision needs exactly owner and revision")); }
++            let owner = row.get("owner").and_then(Value::as_u64).ok_or_else(|| bad("invalid expected owner"))?;
++            let revision = row.get("revision").and_then(Value::as_u64).ok_or_else(|| bad("invalid expected linked revision"))?;
++            if !seen.insert(owner) || !links.iter().any(|(id, l)| id.0 == owner && l.revision == revision) {
++                return Err(bad("stale, duplicate or unknown linked owner revision"));
++            }
++        }
++    }
++    let mut owners = Vec::new();
++    for (owner, links) in links {
++        let sequences = links.sequences();
++        let mut units = Vec::new();
++        for unit in &links.units {
++            let mut roles = Vec::new();
++            for role in unit.bindings(links.schema)? {
++                let root = clip_in(&s.project, sequences[0], role.clips[0])?;
++                let resolved = s.project.resolve_media(root.item);
++                let mut native_audio = Vec::new();
++                for (seq, id) in sequences.into_iter().zip(role.clips) {
++                    let c = clip_in(&s.project, seq, id)?;
++                    let q = s.project.sequence(seq).ok_or_else(|| bad("missing linked sequence"))?;
++                    let audio: Vec<_> = q.audio_tracks.iter().flat_map(|t| &t.items)
++                        .filter(|a| c.link.is_some() && a.link == c.link).map(|a| a.id.0).collect();
++                    native_audio.push(audio);
++                }
++                roles.push(json!({"role":role.role,"audio":if role.audio == AudioPolicy::Inherit {"inherit"} else {"none"},
++                    "sourceItem":root.item.0,"resolvedMediaItem":resolved.map(|(id, _, _)|id.0),
++                    "storedMediaIdentity":resolved.and_then(|(_, m, _)|m.identity),
++                    "clips":{"shared":role.clips[0].0,"landscape":role.clips[1].0,"portrait":role.clips[2].0},
++                    "nativeAudioClips":{"shared":native_audio[0],"landscape":native_audio[1],"portrait":native_audio[2]}}));
++            }
++            units.push(json!({"id":unit.id,"parent":unit.parent,"roles":roles}));
++        }
++        owners.push(json!({"owner":owner.0,"schema":links.schema,"linksRevision":links.revision,
++            "sequences":{"shared":sequences[0].0,"landscape":sequences[1].0,"portrait":sequences[2].0},"units":units}));
++    }
++    Ok(json!({"valid":true,"revision":s.revision,"savedRevision":s.saved_revision,"owners":owners,
++        "sourceIdentityCheck":"native binding and stored import identity; media bytes are not rehashed"}))
++}
++
++/// Recovery/autosave retain working data, including invalid imported documents for repair.
++pub(crate) fn preflight_snapshot(s: &Session, id: &str) -> Result<()> {
++    if matches!(id, "file.save" | "file.saveAs" | "file.saveCopy" | "file.saveAll" | "file.saveAsTemplate"
++        | "file.exportSelectionProject" | "file.projectManager" | "file.exportMedia" | "export.quick" | "export.queue.add"
++        | "file.exportInterchange" | "file.exportEdl" | "file.exportFcp7Xml" | "file.exportFcpxml" | "file.exportOtio"
++        | "file.exportAaf" | "file.exportOmf") {
++        validate_document(&s.project)?;
 +    }
 +    Ok(())
 +}
@@ -947,355 +1212,65 @@ new file mode 100644
 +    assert_rejected(&mut s,"timeline.razor",json!({"clip":m.units[0].portrait,"time":3*TPS}));
 +    assert_rejected(&mut s,"timeline.trim",json!({"clip":m.units[0].portrait,"edge":"out","deltaFrames":-30}));
 +}
-diff --git a/crates/engine/tests/edit_group_publication.rs b/crates/engine/tests/edit_group_publication.rs
-new file mode 100644
---- /dev/null
-+++ b/crates/engine/tests/edit_group_publication.rs
-@@ -0,0 +1,339 @@
-+//! Regression coverage for external visibility, not only eventual project rollback.
-+use filmcraft_engine::{EngineError, Event, Result, Session, autosave::AutosaveConfig};
-+use serde_json::{Value, json};
-+use std::{path::PathBuf, sync::{Arc, atomic::{AtomicUsize, Ordering}}, time::Duration};
-+
-+static NEXT: AtomicUsize = AtomicUsize::new(0);
-+
-+struct Fixture { s: Session, root: PathBuf }
-+impl Fixture {
-+    fn new() -> Self {
-+        let root = PathBuf::from(std::env::var_os("CLIPLINE_TEST_ROOT").expect("set an owned test output root"))
-+            .join(format!("{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
-+        std::fs::create_dir_all(&root).unwrap();
-+        let mut s = Session::default();
-+        let mut cfg = AutosaveConfig::new(root.join("autosave"));
-+        cfg.journal_debounce = Duration::ZERO;
-+        s.start_autosave(cfg).unwrap();
-+        bin(&mut s, "Committed baseline");
-+        flush(&s);
-+        s.drain_events();
-+        Self { s, root }
-+    }
-+}
-+impl Drop for Fixture { fn drop(&mut self) { self.s.shutdown(); } }
-+fn bin(s: &mut Session, name: &str) { s.execute("file.newBin", json!({"name":name})).unwrap(); }
-+fn reject<T>() -> Result<T> { Err(EngineError::Other("injected failure".into())) }
-+fn flush(s: &Session) { s.persistence.as_ref().unwrap().flush(); }
-+fn recovered(s: &Session) -> String {
-+    flush(s);
-+    let path = s.persistence.as_ref().unwrap().session_dir.join("snapshot.fcproj");
-+    let mut recovery = Session::default();
-+    recovery.execute("file.open", json!({"path":path})).unwrap();
-+    recovery.project.to_json()
-+}
-+fn same_external(s: &Session, before: &Arc<filmcraft_project::Project>) {
-+    assert!(Arc::ptr_eq(&s.previews.live.project().unwrap(), before), "playback received a staged Arc");
-+    assert_eq!(recovered(s), before.to_json(), "worker persisted a staged project");
-+}
-+
-+#[test]
-+fn successful_group_publishes_only_final_snapshot_and_one_revision_event() {
-+    let mut f = Fixture::new();
-+    let before = f.s.previews.live.project().unwrap();
-+    let undo = f.s.history.undo.len();
-+    let journal = f.s.journal.len();
-+    f.s.edit_group("Linked change", |s| {
-+        bin(s, "Landscape");
-+        same_external(s, &before);
-+        s.sync_persistence(); // Even an explicit sync cannot publish an open group.
-+        same_external(s, &before);
-+        bin(s, "Portrait");
-+        same_external(s, &before);
-+        Ok(())
-+    }).unwrap();
-+    assert!(Arc::ptr_eq(&f.s.previews.live.project().unwrap(), &f.s.project));
-+    assert_eq!(recovered(&f.s), f.s.project.to_json());
-+    assert_eq!(f.s.history.undo.len(), undo + 1);
-+    assert_eq!(f.s.history.undo.last().unwrap().0, "Linked change");
-+    assert_eq!(f.s.journal.len(), journal + 2);
-+    assert_eq!(f.s.drain_events(), vec![Event::ProjectChanged { revision:f.s.revision }]);
-+}
-+
-+#[test]
-+fn failed_group_never_publishes_and_restores_observable_buffers() {
-+    let mut f = Fixture::new();
-+    f.s.toast("Existing event");
-+    let before = f.s.previews.live.project().unwrap();
-+    let (rev, saved, events, journal, undo, state) = (f.s.revision, f.s.saved_revision, f.s.events.clone(), f.s.journal.clone(), f.s.history.undo.len(), serde_json::to_value(&f.s.state).unwrap());
-+    let result: Result<()> = f.s.edit_group("Rejected", |s| {
-+        bin(s, "Rejected prefix");
-+        s.toast("Rejected toast");
-+        same_external(s, &before);
-+        reject()
-+    });
-+    assert!(result.is_err());
-+    assert!(Arc::ptr_eq(&f.s.project, &before));
-+    same_external(&f.s, &before);
-+    assert_eq!((f.s.revision, f.s.saved_revision), (rev, saved));
-+    assert_eq!(f.s.events, events);
-+    assert_eq!(f.s.journal, journal);
-+    assert_eq!(f.s.history.undo.len(), undo);
-+    assert_eq!(serde_json::to_value(&f.s.state).unwrap(), state);
-+    assert_eq!(f.s.is_dirty(), rev != saved);
-+}
-+
-+#[test]
-+fn panic_restores_observers_and_next_command_can_commit() {
-+    let mut f = Fixture::new();
-+    let before = f.s.previews.live.project().unwrap();
-+    let (revision, limit, journal, events) = (f.s.revision, f.s.history.limit, f.s.journal.clone(), f.s.events.clone());
-+    let p = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-+        let _: Result<()> = f.s.edit_group("Panicking group", |s| {
-+            bin(s, "Rejected panic prefix");
-+            same_external(s, &before);
-+            panic!("injected group panic")
-+        });
-+    }));
-+    assert!(p.is_err());
-+    same_external(&f.s, &before);
-+    assert_eq!(f.s.revision, revision);
-+    assert_eq!(f.s.history.limit, limit);
-+    assert_eq!(f.s.journal, journal);
-+    assert_eq!(f.s.events, events);
-+    bin(&mut f.s, "Valid next command");
-+    assert!(Arc::ptr_eq(&f.s.previews.live.project().unwrap(), &f.s.project));
-+    assert_eq!(recovered(&f.s), f.s.project.to_json());
-+}
-+
-+#[test]
-+fn nested_success_stays_staged_and_outer_failure_discards_everything() {
-+    let mut f = Fixture::new();
-+    let before = f.s.previews.live.project().unwrap();
-+    let journal = f.s.journal.clone();
-+    let result: Result<()> = f.s.edit_group("Outer", |s| {
-+        bin(s, "Outer prefix");
-+        s.edit_group("Inner", |s| { bin(s, "Inner success"); same_external(s, &before); Ok(()) })?;
-+        same_external(s, &before);
-+        reject()
-+    });
-+    assert!(result.is_err());
-+    same_external(&f.s, &before);
-+    assert_eq!(f.s.project.to_json(), before.to_json());
-+    assert_eq!(f.s.journal, journal);
-+}
-+
-+#[test]
-+fn nested_failure_can_be_caught_and_outer_commit_contains_only_valid_edits() {
-+    let mut f = Fixture::new();
-+    let before = f.s.previews.live.project().unwrap();
-+    let undo = f.s.history.undo.len();
-+    let journal = f.s.journal.len();
-+    f.s.edit_group("Outer success", |s| {
-+        bin(s, "Keep A");
-+        let outer_project = s.project.to_json();
-+        let inner: Result<()> = s.edit_group("Inner rejection", |s| { bin(s, "Discard B"); reject() });
-+        assert!(inner.is_err());
-+        assert_eq!(s.project.to_json(), outer_project);
-+        same_external(s, &before);
-+        bin(s, "Keep C");
-+        Ok(())
-+    }).unwrap();
-+    assert_eq!(f.s.history.undo.len(), undo + 1);
-+    assert_eq!(f.s.journal.len(), journal + 2);
-+    assert!(!f.s.project.to_json().contains("Discard B"));
-+    assert_eq!(recovered(&f.s), f.s.project.to_json());
-+    assert_eq!(f.s.events.iter().filter(|e| matches!(e, Event::ProjectChanged { .. })).count(), 1);
-+}
-+
-+#[test]
-+fn nested_panic_caught_by_outer_group_can_continue_without_publishing() {
-+    let mut f = Fixture::new();
-+    let before = f.s.previews.live.project().unwrap();
-+    f.s.edit_group("Recovered outer", |s| {
-+        bin(s, "Keep outer");
-+        let outer = s.project.to_json();
-+        let p = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-+            let _: Result<()> = s.edit_group("Inner panic", |s| { bin(s, "Discard panic"); panic!("injected") });
-+        }));
-+        assert!(p.is_err());
-+        assert_eq!(s.project.to_json(), outer);
-+        same_external(s, &before);
-+        bin(s, "Keep after panic");
-+        Ok(())
-+    }).unwrap();
-+    assert!(!f.s.project.to_json().contains("Discard panic"));
-+    assert_eq!(recovered(&f.s), f.s.project.to_json());
-+}
-+
-+#[test]
-+fn journal_overflow_failure_restores_evicted_prefix_exactly() {
-+    let mut f = Fixture::new();
-+    f.s.journal = (0..10_000).map(|n| (format!("existing.{n}"), json!({"n":n}))).collect();
-+    let before = f.s.journal.clone();
-+    let r: Result<()> = f.s.edit_group("Overflow", |s| {
-+        bin(s, "Triggers cap");
-+        assert_eq!(s.journal.len(), 9001);
-+        let inner: Result<()> = s.edit_group("Nested overflow failure", |s| { bin(s, "Inner"); reject() });
-+        assert!(inner.is_err());
-+        reject()
-+    });
-+    assert!(r.is_err());
-+    assert_eq!(f.s.journal, before);
-+}
-+
-+#[test]
-+fn previous_merged_gesture_cannot_absorb_first_group_edit() {
-+    let mut f = Fixture::new();
-+    f.s.edit_merged("Gesture", "same-key", |_, _| Ok(())).unwrap();
-+    let before = f.s.project.to_json();
-+    let undo = f.s.history.undo.len();
-+    f.s.edit_group("Grouped gesture", |s| s.edit_merged("Gesture", "same-key", |_, _| Ok(()))).unwrap();
-+    assert_eq!(f.s.history.undo.len(), undo + 1);
-+    assert_eq!(f.s.undo().as_deref(), Some("Grouped gesture"));
-+    assert_eq!(f.s.project.to_json(), before);
-+}
-+
-+#[test]
-+fn direct_history_undo_redo_publish_complete_group_snapshots() {
-+    let mut f = Fixture::new();
-+    let before = f.s.project.to_json();
-+    f.s.edit_group("Linked pair", |s| { bin(s, "Wide"); bin(s, "Tall"); Ok(()) }).unwrap();
-+    let after = f.s.project.to_json();
-+    assert_eq!(f.s.undo().as_deref(), Some("Linked pair"));
-+    assert_eq!(f.s.project.to_json(), before);
-+    assert_eq!(f.s.previews.live.project().unwrap().to_json(), before);
-+    assert_eq!(recovered(&f.s), before);
-+    assert_eq!(f.s.redo().as_deref(), Some("Linked pair"));
-+    assert_eq!(f.s.project.to_json(), after);
-+    assert_eq!(f.s.previews.live.project().unwrap().to_json(), after);
-+    assert_eq!(recovered(&f.s), after);
-+}
-+
-+#[test]
-+fn undo_redo_inside_failed_group_do_not_publish_and_history_is_restored() {
-+    let mut f = Fixture::new();
-+    bin(&mut f.s, "Second baseline");
-+    let before = f.s.previews.live.project().unwrap();
-+    let undo = f.s.history.undo.len();
-+    let r: Result<()> = f.s.edit_group("Rejected navigation", |s| {
-+        assert!(s.undo().is_some());
-+        same_external(s, &before);
-+        assert!(s.redo().is_some());
-+        same_external(s, &before);
-+        reject()
-+    });
-+    assert!(r.is_err());
-+    assert_eq!(f.s.history.undo.len(), undo);
-+    assert!(f.s.history.redo.is_empty());
-+    same_external(&f.s, &before);
-+}
-+
-+#[test]
-+fn successful_group_preserves_existing_events_and_committed_nonrevision_events() {
-+    let mut f = Fixture::new();
-+    f.s.toast("Existing");
-+    let existing = f.s.events.clone();
-+    f.s.edit_group("Events", |s| { bin(s, "One"); s.toast("Committed"); bin(s, "Two"); Ok(()) }).unwrap();
-+    assert_eq!(&f.s.events[..existing.len()], &existing);
-+    assert_eq!(f.s.events.iter().filter(|e| matches!(e, Event::ProjectChanged { .. })).count(), 1);
-+    assert!(f.s.events.contains(&Event::Toast { message:"Committed".into(), error:false }));
-+}
-+
-+#[test]
-+fn failed_group_keeps_original_merge_key() {
-+    let mut f = Fixture::new();
-+    f.s.history.merge_key = Some("prior-key".into());
-+    let r: Result<Value> = f.s.edit_group("Failed empty", |_| reject());
-+    assert!(r.is_err());
-+    assert_eq!(f.s.history.merge_key.as_deref(), Some("prior-key"));
-+    let _ = &f.root; // Every test preserves its recovery artifacts in the owned root.
-+}
-+
-+#[test]
-+fn source_monitor_history_tracks_only_the_committed_group() {
-+    let mut f = Fixture::new();
-+    let sentinel = filmcraft_project::ItemId(999_999_999);
-+    f.s.state.source_history = vec![sentinel];
-+    let r: Result<()> = f.s.edit_group("Rejected source history", |s| {
-+        bin(s, "Temporary edit");
-+        assert_eq!(s.state.source_history, vec![sentinel], "inner execute tracked staged history");
-+        reject()
-+    });
-+    assert!(r.is_err());
-+    assert_eq!(f.s.state.source_history, vec![sentinel]);
-+    f.s.edit_group("Committed source history", |s| {
-+        bin(s, "Committed edit");
-+        assert_eq!(s.state.source_history, vec![sentinel]);
-+        Ok(())
-+    }).unwrap();
-+    assert!(f.s.state.source_history.is_empty(), "outer commit must remove the dangling history item");
-+}
-+
-+#[test]
-+fn successful_nested_groups_publish_once_as_one_undo_step() {
-+    let mut f = Fixture::new();
-+    let before = f.s.previews.live.project().unwrap();
-+    let undo = f.s.history.undo.len();
-+    f.s.edit_group("Outer commit", |s| {
-+        bin(s, "Outer A");
-+        s.edit_group("Inner commit", |s| {
-+            bin(s, "Inner B");
-+            same_external(s, &before);
-+            Ok(())
-+        })?;
-+        same_external(s, &before);
-+        bin(s, "Outer C");
-+        Ok(())
-+    }).unwrap();
-+    assert_eq!(f.s.history.undo.len(), undo + 1);
-+    assert_eq!(f.s.history.undo.last().unwrap().0, "Outer commit");
-+    assert_eq!(f.s.previews.live.project().unwrap().to_json(), f.s.project.to_json());
-+    assert_eq!(recovered(&f.s), f.s.project.to_json());
-+    assert_eq!(f.s.drain_events(), vec![Event::ProjectChanged { revision:f.s.revision }]);
-+    assert_eq!(f.s.undo().as_deref(), Some("Outer commit"));
-+    assert_eq!(f.s.project.to_json(), before.to_json());
-+}
-+
-+#[test]
-+fn successful_empty_group_preserves_gesture_key_and_existing_events() {
-+    let mut f = Fixture::new();
-+    f.s.history.merge_key = Some("existing gesture".into());
-+    f.s.toast("Already queued");
-+    let before = f.s.project.to_json();
-+    let revision = f.s.revision;
-+    let events = f.s.events.clone();
-+    f.s.edit_group("Empty", |_| Ok(())).unwrap();
-+    assert_eq!(f.s.project.to_json(), before);
-+    assert_eq!(f.s.revision, revision);
-+    assert_eq!(f.s.events, events);
-+    assert_eq!(f.s.history.merge_key.as_deref(), Some("existing gesture"));
-+}
-+
-+#[test]
-+fn failure_from_saved_project_does_not_make_it_dirty_or_create_recovery() {
-+    let mut f = Fixture::new();
-+    let path = f.root.join("clean.fcproj");
-+    f.s.execute("file.saveAs", json!({"path":path})).unwrap();
-+    flush(&f.s);
-+    assert!(!f.s.is_dirty());
-+    let before = f.s.project.clone();
-+    let revision = f.s.revision;
-+    let recovery = f.s.persistence.as_ref().unwrap().session_dir.join("snapshot.fcproj");
-+    assert!(!recovery.exists());
-+    let r: Result<()> = f.s.edit_group("Rejected clean edit", |s| {
-+        bin(s, "Do not save");
-+        s.sync_persistence();
-+        flush(s);
-+        assert!(Arc::ptr_eq(&s.previews.live.project().unwrap(), &before));
-+        assert!(!recovery.exists());
-+        reject()
-+    });
-+    assert!(r.is_err());
-+    assert!(!f.s.is_dirty());
-+    assert_eq!(f.s.revision, revision);
-+    assert!(!recovery.exists());
-+    let mut reopened = Session::default();
-+    reopened.execute("file.open", json!({"path":path})).unwrap();
-+    assert_eq!(reopened.project.to_json(), before.to_json());
-+}
+diff --git a/crates/engine/src/project_manager.rs b/crates/engine/src/project_manager.rs
+--- a/crates/engine/src/project_manager.rs
++++ b/crates/engine/src/project_manager.rs
+@@ -81,6 +81,7 @@
+ 
+ /// Plan, estimate and (unless `dryRun`) run the Project Manager.
+ pub fn run(s: &mut Session, p: &Value) -> Result<Value> {
++    crate::linked_edits::validate_document(&s.project)?;
+     let dest = str_p(p, "destination").ok_or_else(|| bad("file.projectManager", "need `destination`"))?.to_string();
+     let consolidate = match str_p(p, "mode").unwrap_or("collect") {
+         "collect" => false,
+@@ -173,6 +174,7 @@
+         };
+         work.push(Work { item: id, src_path: path.clone(), out, range, proxy });
+     }
++    crate::linked_edits::validate_snapshot(&s.project, &proj)?;
+     let previews = s.path.as_deref().map(crate::previews::dir_for_project).filter(|d| include_previews && d.is_dir());
+     if let Some(d) = &previews {
+         let b = dir_size(d);
+@@ -312,6 +314,7 @@
+     if let Some((from, to)) = previews {
+         bytes += copy_dir(&from, &to).map_err(|e| format!("copying previews: {e}"))?;
+     }
++    crate::linked_edits::validate_document(&proj).map_err(|e| e.to_string())?;
+     let data = filmcraft_format::encode(&proj, false);
+     filmcraft_format::atomic_write(Path::new(project_path), &data).map_err(|e| format!("{project_path}: {e}"))?;
+     prog.done.fetch_add(1, Ordering::Relaxed);
+diff --git a/crates/engine/src/project_tools.rs b/crates/engine/src/project_tools.rs
+--- a/crates/engine/src/project_tools.rs
++++ b/crates/engine/src/project_tools.rs
+@@ -628,6 +628,7 @@
+ }
+ 
+ fn save_as_template(s: &mut Session, p: &Value) -> Result<Value> {
++    crate::linked_edits::validate_document(&s.project)?;
+     let name = str_p(p, "name").map(str::to_string).unwrap_or_else(|| s.project.name.clone());
+     let path = match str_p(p, "path") {
+         Some(x) => x.to_string(),
+@@ -791,6 +792,7 @@
+ }
+ 
+ fn export_selection(s: &mut Session, p: &Value) -> Result<Value> {
++    crate::linked_edits::validate_document(&s.project)?;
+     let path = str_p(p, "path").ok_or_else(|| bad("file.exportSelectionProject", "need `path`"))?.to_string();
+     let roots = match p.get("items").and_then(Value::as_array) {
+         Some(a) => a.iter().filter_map(|v| v.as_u64().map(ItemId)).collect(),
+@@ -807,6 +809,7 @@
+     let name = std::path::Path::new(&path).file_stem().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| sub.name.clone());
+     sub.name = name.clone();
+     sub.root.name = name;
++    crate::linked_edits::validate_snapshot(&s.project, &sub)?;
+     s.services.write_file(&path, &filmcraft_format::encode(&sub, false)).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+     Ok(json!({"path": path, "items": keep.iter().map(|i| i.0).collect::<Vec<_>>()}))
+ }
 diff --git a/crates/engine/tests/clipline_linked_commands.rs b/crates/engine/tests/clipline_linked_commands.rs
 new file mode 100644
 --- /dev/null
 +++ b/crates/engine/tests/clipline_linked_commands.rs
-@@ -0,0 +1,445 @@
+@@ -0,0 +1,597 @@
 +use std::collections::{BTreeMap,BTreeSet};
 +use filmcraft_engine::{Session,EngineError,Result};
 +use filmcraft_engine::project::{ClipId,ItemId,TrackItem};
@@ -1663,6 +1638,7 @@ new file mode 100644
 +fn manifest_value(s:&Session,owner:ItemId)->Value{serde_json::from_str(&s.project.item(owner).unwrap().metadata[KEY]).unwrap()}
 +fn sequences_value(m:&Value)->[ItemId;3]{[ItemId(m["sharedSequence"].as_u64().unwrap()),ItemId(m["landscapeSequence"].as_u64().unwrap()),ItemId(m["portraitSequence"].as_u64().unwrap())]}
 +fn role_ids(role:&Value)->[ClipId;3]{[ClipId(role["shared"].as_u64().unwrap()),ClipId(role["landscape"].as_u64().unwrap()),ClipId(role["portrait"].as_u64().unwrap())]}
++fn inject_manifest_value(s:&mut Session,owner:ItemId,m:&Value){Arc::make_mut(&mut s.project).item_mut(owner).unwrap().metadata.insert(KEY.into(),m.to_string());}
 +fn set_manifest_value(s:&mut Session,owner:ItemId,m:&Value){run(s,"metadata.set",json!({"item":owner.0,"field":KEY,"value":m.to_string()}));}
 +fn bundle_fixture()->(Session,ItemId){
 + let(mut s,owner)=fixture();let mut m=manifest_value(&s,owner);let seqs=sequences_value(&m);let unit=m["units"][0].clone();let mut cams=Vec::new();
@@ -1728,7 +1704,7 @@ new file mode 100644
 +#[test]
 +fn unknown_roles_policies_or_schema_mixtures_are_rejected_atomically(){
 + let(mut s,owner)=bundle_fixture();let baseline=manifest_value(&s,owner);let id=baseline["units"][0]["roles"][0]["portrait"].clone();
-+ for change in 0..6{let mut m=baseline.clone();match change{0=>m["units"][0]["roles"][1]["role"]=json!("overlay"),1=>m["units"][0]["roles"][1]["audio"]=json!("inherit"),2=>m["units"][0]["roles"][0]["audio"]=json!("none"),3=>m["units"][0]["roles"][1]["role"]=json!("gameplay"),4=>m["units"][0]["shared"]=m["units"][0]["roles"][0]["shared"].clone(),_=>m["units"][0]["roles"][1]["unknownPolicy"]=json!(true)}set_manifest_value(&mut s,owner,&m);assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));}
++ for change in 0..6{let mut m=baseline.clone();match change{0=>m["units"][0]["roles"][1]["role"]=json!("overlay"),1=>m["units"][0]["roles"][1]["audio"]=json!("inherit"),2=>m["units"][0]["roles"][0]["audio"]=json!("none"),3=>m["units"][0]["roles"][1]["role"]=json!("gameplay"),4=>m["units"][0]["shared"]=m["units"][0]["roles"][0]["shared"].clone(),_=>m["units"][0]["roles"][1]["unknownPolicy"]=json!(true)}inject_manifest_value(&mut s,owner,&m);assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));}
 +}
 +#[test]
 +fn diverged_or_locked_facecam_prevents_all_bundle_changes(){
@@ -1739,5 +1715,500 @@ new file mode 100644
 +}
 +#[test]
 +fn v1_cannot_silently_accept_an_unowned_bundle_field(){
-+ let(mut s,owner)=fixture();let mut m=manifest_value(&s,owner);let id=m["units"][0]["portrait"].clone();m["units"][0]["layers"]=json!([{"role":"facecam"}]);set_manifest_value(&mut s,owner,&m);assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));
++ let(mut s,owner)=fixture();let mut m=manifest_value(&s,owner);let id=m["units"][0]["portrait"].clone();m["units"][0]["layers"]=json!([{"role":"facecam"}]);assert_rejected(&mut s,"metadata.set",json!({"item":owner.0,"field":KEY,"value":m.to_string()}));inject_manifest_value(&mut s,owner,&m);assert_rejected(&mut s,"timeline.razor",json!({"clip":id,"time":3*TPS}));
++}
++
++
++#[derive(Default)]
++struct MemoryFiles(std::sync::Mutex<BTreeMap<String,Vec<u8>>>);
++impl filmcraft_engine::Services for MemoryFiles {
++ fn read_file(&self,path:&str)->std::io::Result<Vec<u8>>{self.0.lock().unwrap().get(path).cloned().ok_or_else(||std::io::Error::new(std::io::ErrorKind::NotFound,path.to_string()))}
++ fn write_file(&self,path:&str,data:&[u8])->std::io::Result<()>{self.0.lock().unwrap().insert(path.to_string(),data.to_vec());Ok(())}
++}
++fn validation(s:&mut Session)->Value{run(s,"clipline.validate",json!({}))}
++fn direct_state(s:&Session)->Value{json!({"project":snapshot(s),"state":serde_json::to_value(&s.state).unwrap(),"revision":s.revision,"historyUndo":s.history.undo.len(),"historyRedo":s.history.redo.len(),"journal":s.journal,"events":serde_json::to_value(&s.events).unwrap()})}
++#[test]
++fn document_validation_reports_native_roles_sources_and_current_revisions_without_times(){
++ let(mut s,owner)=bundle_fixture();let before=direct_state(&s);let revision=s.revision;
++ let r=run(&mut s,"clipline.validate",json!({"expectedRevision":revision,"expectedLinksRevisions":[{"owner":owner.0,"revision":0}]}));
++ assert_eq!(r["valid"],true);assert_eq!(r["revision"],revision);assert_eq!(r["owners"].as_array().unwrap().len(),1);
++ let o=&r["owners"][0];assert_eq!(o["owner"],owner.0);assert_eq!(o["linksRevision"],0);assert_eq!(o["units"][0]["roles"].as_array().unwrap().len(),2);
++ for role in o["units"][0]["roles"].as_array().unwrap(){assert!(role["sourceItem"].as_u64().is_some());assert!(role.get("duration").is_none());for key in["shared","landscape","portrait"]{assert!(role["clips"][key].as_u64().is_some());assert_eq!(role["nativeAudioClips"][key].as_array().unwrap().len(),if role["role"]=="gameplay"{1}else{0});}}
++ assert_eq!(direct_state(&s),before);
++}
++#[test]
++fn document_validation_rejects_stale_missing_duplicate_and_unknown_expected_owner_revisions(){
++ let(mut s,owner)=bundle_fixture();let revision=s.revision;
++ for p in[json!({"expectedRevision":revision+1}),json!({"expectedRevision":"0"}),json!({"expectedLinksRevisions":[]}),json!({"expectedLinksRevisions":[{"owner":owner.0,"revision":0},{"owner":owner.0,"revision":0}]}),json!({"expectedLinksRevisions":[{"owner":owner.0,"revision":1}]}),json!({"expectedLinksRevisions":[{"owner":owner.0+999,"revision":0}]}),json!({"expectedLinksRevisions":[{"owner":owner.0,"revision":0,"other":true}]}),json!({"expectedRevision":revision,"unknown":true})]{assert_rejected(&mut s,"clipline.validate",p);}
++}
++#[test]
++fn inactive_malformed_owner_prevents_all_explicit_save_and_export_snapshots_before_io(){
++ let(mut s,owner)=bundle_fixture();run(&mut s,"file.newSequence",json!({"name":"Independent","fps":60}));
++ Arc::make_mut(&mut s.project).item_mut(owner).unwrap().metadata.insert(KEY.into(),"{".into());
++ let files=Arc::new(MemoryFiles::default());s.services=files.clone();let path="C:/Users/mark/AppData/Local/clipline/evaluation/2026-10-18/baseline/linked-engine-integration/document-tests-output/must-not-write.fcproj";
++ let before_jobs=s.jobs.len();let before_queue=s.export_queue.items.len();
++ for id in["file.save","file.saveAs","file.saveCopy","file.saveAll","file.saveAsTemplate","file.exportSelectionProject","file.projectManager","file.exportMedia","export.quick","export.queue.add","file.exportInterchange","file.exportEdl","file.exportFcp7Xml","file.exportFcpxml","file.exportOtio","file.exportAaf","file.exportOmf"]{
++  assert_rejected(&mut s,id,json!({"path":path,"destination":path,"items":[owner.0],"wait":true}));
++  assert!(files.0.lock().unwrap().is_empty(),"{id} wrote a file");assert_eq!(s.jobs.len(),before_jobs);assert_eq!(s.export_queue.items.len(),before_queue);
++ }
++ assert_eq!(s.path,None);assert_rejected(&mut s,"clipline.validate",json!({}));
++}
++#[test]
++fn document_validation_rejects_individually_valid_manifests_that_double_bind_sequences(){
++ let(mut s,owner)=bundle_fixture();let m=manifest_value(&s,owner);let seqs=sequences_value(&m);let mut other=m.clone();
++ other["sharedSequence"]=json!(seqs[1].0);other["landscapeSequence"]=json!(seqs[0].0);
++ for role in other["units"][0]["roles"].as_array_mut().unwrap(){let a=role["shared"].clone();role["shared"]=role["landscape"].clone();role["landscape"]=a;}
++ inject_manifest_value(&mut s,seqs[1],&other);assert_rejected(&mut s,"clipline.validate",json!({}));
++ let files=Arc::new(MemoryFiles::default());s.services=files.clone();assert_rejected(&mut s,"file.saveCopy",json!({"path":"never.fcproj"}));assert!(files.0.lock().unwrap().is_empty());
++}
++#[test]
++fn locked_valid_linked_document_can_validate_and_save_but_cannot_edit_locked_peers(){
++ let(mut s,owner)=bundle_fixture();let m=manifest_value(&s,owner);let seqs=sequences_value(&m);
++ for seq in seqs{let q=Arc::make_mut(&mut s.project).sequence_mut(seq).unwrap();for t in &mut q.video_tracks{t.locked=true;}for t in &mut q.audio_tracks{t.locked=true;}}
++ assert_eq!(validation(&mut s)["valid"],true);let files=Arc::new(MemoryFiles::default());s.services=files.clone();
++ run(&mut s,"file.saveCopy",json!({"path":"locked-valid.fcproj"}));let bytes=files.0.lock().unwrap()["locked-valid.fcproj"].clone();let p=filmcraft_format::decode(&bytes).unwrap().project;assert!(p.item(owner).unwrap().metadata.contains_key(KEY));
++ assert_rejected(&mut s,"timeline.trim",json!({"clip":m["units"][0]["roles"][0]["portrait"],"edge":"out","deltaFrames":-1}));
++}
++#[test]
++fn selection_project_snapshot_cannot_omit_linked_peers_or_silently_detach(){
++ let(mut s,owner)=bundle_fixture();let m=manifest_value(&s,owner);let seqs=sequences_value(&m);let files=Arc::new(MemoryFiles::default());s.services=files.clone();
++ for seq in seqs{assert_rejected(&mut s,"file.exportSelectionProject",json!({"path":"partial.fcproj","items":[seq.0]}));assert!(files.0.lock().unwrap().is_empty());}
++ run(&mut s,"file.exportSelectionProject",json!({"path":"complete.fcproj","items":seqs.map(|x|x.0)}));let bytes=files.0.lock().unwrap()["complete.fcproj"].clone();let p=filmcraft_format::decode(&bytes).unwrap().project;for seq in seqs{assert!(p.sequence(seq).is_some());}assert!(p.item(owner).unwrap().metadata.contains_key(KEY));
++}
++#[test]
++fn valid_full_linked_project_can_queue_one_output_without_changing_active_sequence(){
++ let(mut s,owner)=bundle_fixture();let m=manifest_value(&s,owner);let active=s.state.active_sequence;
++ let r=run(&mut s,"export.queue.add",json!({"sequence":m["portraitSequence"],"path":"only-portrait.mp4","format":"h264"}));assert!(r.is_object());assert_eq!(s.export_queue.items.len(),1);assert_eq!(s.state.active_sequence,active);
++}
++#[test]
++fn unknown_third_role_and_broken_metadata_set_are_rejected_at_project_copy_commit(){
++ let(mut s,owner)=bundle_fixture();let mut m=manifest_value(&s,owner);let mut third=m["units"][0]["roles"][1].clone();third["role"]=json!("overlay");m["units"][0]["roles"].as_array_mut().unwrap().push(third);
++ for text in[m.to_string(),"{".to_string()]{assert_rejected(&mut s,"metadata.set",json!({"item":owner.0,"field":KEY,"value":text}));}
++}
++#[test]
++fn project_only_edit_and_merged_edit_rollback_before_history_state_or_revision_changes(){
++ let(mut s,owner)=bundle_fixture();let m=manifest_value(&s,owner);let seq=sequences_value(&m)[2];let id=role_ids(&m["units"][0]["roles"][1])[2];
++ let before=direct_state(&s);assert!(s.edit("Invalid direct edit",|p,st|{p.sequence_mut(seq).unwrap().find_item_mut(id).unwrap().1.duration=Tick(TPS);st.selection.clear();Ok(())}).is_err());assert_eq!(direct_state(&s),before);
++ s.edit_merged("Merged","merge-fixture",|p,_|{p.name="harmless project name".into();Ok(())}).unwrap();let before=direct_state(&s);
++ assert!(s.edit_merged("Merged","merge-fixture",|p,st|{p.sequence_mut(seq).unwrap().find_item_mut(id).unwrap().1.source_in=Tick(7*TPS);st.playheads.clear();Ok(())}).is_err());assert_eq!(direct_state(&s),before);
++}
++#[test]
++fn outer_edit_group_checks_final_document_and_rolls_back_a_failed_complete_group(){
++ let(mut s,owner)=bundle_fixture();let m=manifest_value(&s,owner);let seq=sequences_value(&m)[2];let id=role_ids(&m["units"][0]["roles"][1])[2];let before=direct_state(&s);
++ assert!(s.edit_group("Invalid group",|s|{s.edit("Temporary divergence",|p,st|{p.sequence_mut(seq).unwrap().find_item_mut(id).unwrap().1.duration=Tick(TPS);st.selection.clear();Ok(())})?;Ok(())}).is_err());assert_eq!(direct_state(&s),before);
++ s.edit_group("Repaired group",|s|{s.edit("Temporary divergence",|p,_|{p.sequence_mut(seq).unwrap().find_item_mut(id).unwrap().1.duration=Tick(TPS);Ok(())})?;s.edit_group("Nested repair",|s|s.edit("Restore",|p,_|{p.sequence_mut(seq).unwrap().find_item_mut(id).unwrap().1.duration=Tick(6*TPS);Ok(())}))}).unwrap();assert_eq!(validation(&mut s)["valid"],true);
++}
++#[test]
++fn removing_linked_owner_requires_explicit_detach_and_preserves_working_project(){
++ let(mut s,owner)=bundle_fixture();let before=direct_state(&s);assert!(s.edit("Remove ownership",|p,_|{p.item_mut(owner).unwrap().metadata.remove(KEY);Ok(())}).is_err());assert_eq!(direct_state(&s),before);
++}
++#[test]
++fn unlinked_projects_keep_native_project_edit_and_save_behavior(){
++ let mut s=Session::default();run(&mut s,"file.newProject",json!({"name":"Unlinked"}));let before=snapshot(&s);let r=validation(&mut s);assert_eq!(r["owners"],json!([]));assert_eq!(snapshot(&s),before);
++ s.edit("Unlinked edit",|p,_|{p.name="Independent edit".into();Ok(())}).unwrap();let files=Arc::new(MemoryFiles::default());s.services=files.clone();run(&mut s,"file.saveCopy",json!({"path":"unlinked.fcproj"}));assert!(files.0.lock().unwrap().contains_key("unlinked.fcproj"));
++}
++
++
++#[test]
++fn recovery_retains_invalid_working_data_without_overwriting_or_marking_current_project_clean(){
++ struct Stop(Session);impl Drop for Stop{fn drop(&mut self){self.0.shutdown();}}
++ let(mut session,owner)=bundle_fixture();
++ let root=std::path::PathBuf::from(std::env::var_os("CLIPLINE_TEST_ROOT").expect("set an owned test output root")).join(format!("recovery-boundary-{}",std::process::id()));
++ std::fs::create_dir_all(&root).unwrap();let project=root.join("current.fcproj");
++ run(&mut session,"file.saveAs",json!({"path":project}));let committed=std::fs::read(&project).unwrap();
++ let mut cfg=filmcraft_engine::autosave::AutosaveConfig::new(root.join("recovery"));cfg.journal_debounce=std::time::Duration::ZERO;session.start_autosave(cfg).unwrap();let mut prefs=session.prefs.clone();prefs.auto_save.save_current_project=true;prefs.auto_save.enabled=false;session.set_prefs(prefs).unwrap();assert!(session.prefs.auto_save.save_current_project);let mut stop=Stop(session);let s=&mut stop.0;
++ Arc::make_mut(&mut s.project).item_mut(owner).unwrap().metadata.insert(KEY.into(),"{".into());s.revision+=1;s.sync_persistence();s.persistence.as_ref().unwrap().flush();
++ assert_rejected(s,"file.save",json!({}));assert_eq!(std::fs::read(&project).unwrap(),committed);
++ let recovery=run(s,"file.autoSaveNow",json!({}));let path=std::path::PathBuf::from(recovery["path"].as_str().unwrap());assert!(path.exists());
++ let loaded=filmcraft_format::decode(&std::fs::read(&path).unwrap()).unwrap().project;assert_eq!(loaded.item(owner).unwrap().metadata[KEY],"{");
++ assert_eq!(std::fs::read(&project).unwrap(),committed);assert!(s.is_dirty());assert!(s.persistence.as_ref().unwrap().status.last_error.as_deref().unwrap().contains("current project was not saved"));
++ let mut reopened=Session::default();run(&mut reopened,"file.open",json!({"path":path}));assert_rejected(&mut reopened,"file.exportMedia",json!({"path":root.join("must-not-export.mp4"),"wait":true}));assert!(reopened.jobs.is_empty());assert!(!root.join("must-not-export.mp4").exists());
++}
++
++
++#[test]
++fn raw_native_save_and_queue_callbacks_validate_the_persistence_owner_without_execute_preflight(){
++ let(mut s,owner)=bundle_fixture();Arc::make_mut(&mut s.project).item_mut(owner).unwrap().metadata.insert(KEY.into(),"{".into());
++ let files=Arc::new(MemoryFiles::default());s.services=files.clone();let before=direct_state(&s);let jobs=s.jobs.len();let queue=s.export_queue.items.len();
++ for id in["file.saveCopy","export.queue.add"]{
++  let spec=filmcraft_engine::commands::find(id).unwrap();assert!((spec.run)(&mut s,&json!({"path":"must-not-write-raw.fcproj"})).is_err());assert_eq!(direct_state(&s),before);assert!(files.0.lock().unwrap().is_empty());assert_eq!(s.jobs.len(),jobs);assert_eq!(s.export_queue.items.len(),queue);
++ }
++}
++
++
++fn snapshot_params(s:&Session,owner:ItemId,path:&str)->Value{json!({"path":path,"expectedProjectPath":s.path,"expectedRevision":s.revision,"expectedLinksRevisions":[{"owner":owner.0,"revision":manifest_value(s,owner)["revision"]}]})}
++#[test]
++fn snapshot_requires_exact_working_identity_and_complete_cas_before_any_write(){
++ let(mut s,owner)=bundle_fixture();let files=Arc::new(MemoryFiles::default());s.services=files.clone();let valid=snapshot_params(&s,owner,"snapshot.fcproj");
++ for change in 0..12{let mut p=valid.clone();match change{
++  0=>{p.as_object_mut().unwrap().remove("path");},1=>{p.as_object_mut().unwrap().remove("expectedProjectPath");},2=>{p.as_object_mut().unwrap().remove("expectedRevision");},3=>{p.as_object_mut().unwrap().remove("expectedLinksRevisions");},
++  4=>p["expectedRevision"]=json!(s.revision+1),5=>p["expectedLinksRevisions"]=json!([]),6=>p["expectedLinksRevisions"][0]["revision"]=json!(999),7=>p["unexpected"]=json!(true),8=>p["path"]=json!(" "),9=>p["expectedProjectPath"]=json!("other-working.fcproj"),10=>p["expectedProjectPath"]=json!(false),_=>p["expectedLinksRevisions"][0]["owner"]=json!(owner.0+999)}
++  assert_rejected(&mut s,"clipline.saveSnapshot",p);assert!(files.0.lock().unwrap().is_empty());
++ }
++ let mut broken=manifest_value(&s,owner);broken["units"][0]["roles"][1]["role"]=json!("unknown");inject_manifest_value(&mut s,owner,&broken);assert_rejected(&mut s,"clipline.saveSnapshot",valid);assert!(files.0.lock().unwrap().is_empty());
++}
++#[test]
++fn snapshot_serializes_exact_captured_project_without_adopting_or_marking_working_copy_clean(){
++ let(mut s,owner)=bundle_fixture();let m=manifest_value(&s,owner);let files=Arc::new(MemoryFiles::default());s.services=files.clone();run(&mut s,"file.saveAs",json!({"path":"working-native.fcproj"}));
++ run(&mut s,"effects.setParam",json!({"clip":m["units"][0]["roles"][0]["portrait"],"effect":"motion","param":"scale","value":121.52777777777777}));assert!(s.is_dirty());let working_file=files.0.lock().unwrap()["working-native.fcproj"].clone();
++ let before=direct_state(&s);let working_path=s.path.clone();let dirty=s.is_dirty();let revision=s.revision;let p=snapshot_params(&s,owner,"unique-native-snapshot.fcproj");let mut switched=p.clone();switched["expectedProjectPath"]=json!("other-copy-same-linked-document.fcproj");assert_rejected(&mut s,"clipline.saveSnapshot",switched);assert!(!files.0.lock().unwrap().contains_key("unique-native-snapshot.fcproj"));assert_eq!(files.0.lock().unwrap()["working-native.fcproj"],working_file);let r=run(&mut s,"clipline.saveSnapshot",p);
++ assert_eq!(r["path"],"unique-native-snapshot.fcproj");assert_eq!(r["validation"]["valid"],true);assert_eq!(r["validation"]["revision"],revision);assert_eq!(r["validation"]["projectPath"],json!(working_path));assert_eq!(r["validation"]["owners"][0]["owner"],owner.0);
++ assert_eq!(direct_state(&s),before);assert_eq!(s.path,working_path);assert_eq!(s.is_dirty(),dirty);assert_eq!(files.0.lock().unwrap()["working-native.fcproj"],working_file);
++ let bytes=files.0.lock().unwrap()["unique-native-snapshot.fcproj"].clone();let saved=filmcraft_format::decode(&bytes).unwrap().project;assert_eq!(serde_json::to_value(saved).unwrap(),before["project"]);
++ run(&mut s,"effects.setParam",json!({"clip":m["units"][0]["roles"][0]["portrait"],"effect":"motion","param":"scale","value":155}));assert!(s.revision>revision);assert_eq!(files.0.lock().unwrap()["unique-native-snapshot.fcproj"],bytes);
++ let mut reopened=Session::default();reopened.services=files;run(&mut reopened,"file.open",json!({"path":"unique-native-snapshot.fcproj"}));assert_eq!(snapshot(&reopened),before["project"]);
++}
++#[test]
++fn snapshot_includes_inactive_owner_and_all_three_sequences_and_accepts_explicit_unlinked_inventory(){
++ let(mut s,owner)=bundle_fixture();run(&mut s,"file.newSequence",json!({"name":"Independent active","fps":60}));let files=Arc::new(MemoryFiles::default());s.services=files.clone();let p=snapshot_params(&s,owner,"inactive-snapshot.fcproj");let active=s.state.active_sequence;let r=run(&mut s,"clipline.saveSnapshot",p);assert_eq!(s.state.active_sequence,active);let row=&r["validation"]["owners"][0];assert_eq!(row["owner"],owner.0);for role in row["units"][0]["roles"].as_array().unwrap(){for key in["shared","landscape","portrait"]{assert!(role["clips"][key].as_u64().is_some());}}
++ let mut independent=Session::default();independent.services=files.clone();let revision=independent.revision;let r=run(&mut independent,"clipline.saveSnapshot",json!({"path":"unlinked-snapshot.fcproj","expectedProjectPath":null,"expectedRevision":revision,"expectedLinksRevisions":[]}));assert_eq!(r["validation"]["owners"],json!([]));assert_eq!(r["validation"]["projectPath"],Value::Null);assert_eq!(independent.path,None);
++}
++#[test]
++fn snapshot_does_not_write_an_intermediate_edit_group(){
++ let(mut s,owner)=bundle_fixture();let files=Arc::new(MemoryFiles::default());s.services=files.clone();let before=direct_state(&s);let p=snapshot_params(&s,owner,"staged-snapshot.fcproj");
++ s.edit_group("Must not publish intermediate state",|s|{assert!(s.execute("clipline.saveSnapshot",p).is_err());Ok(())}).unwrap();assert!(files.0.lock().unwrap().is_empty());assert_eq!(direct_state(&s),before);
++}
+diff --git a/crates/engine/tests/edit_group_publication.rs b/crates/engine/tests/edit_group_publication.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/engine/tests/edit_group_publication.rs
+@@ -0,0 +1,339 @@
++//! Regression coverage for external visibility, not only eventual project rollback.
++use filmcraft_engine::{EngineError, Event, Result, Session, autosave::AutosaveConfig};
++use serde_json::{Value, json};
++use std::{path::PathBuf, sync::{Arc, atomic::{AtomicUsize, Ordering}}, time::Duration};
++
++static NEXT: AtomicUsize = AtomicUsize::new(0);
++
++struct Fixture { s: Session, root: PathBuf }
++impl Fixture {
++    fn new() -> Self {
++        let root = PathBuf::from(std::env::var_os("CLIPLINE_TEST_ROOT").expect("set an owned test output root"))
++            .join(format!("{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
++        std::fs::create_dir_all(&root).unwrap();
++        let mut s = Session::default();
++        let mut cfg = AutosaveConfig::new(root.join("autosave"));
++        cfg.journal_debounce = Duration::ZERO;
++        s.start_autosave(cfg).unwrap();
++        bin(&mut s, "Committed baseline");
++        flush(&s);
++        s.drain_events();
++        Self { s, root }
++    }
++}
++impl Drop for Fixture { fn drop(&mut self) { self.s.shutdown(); } }
++fn bin(s: &mut Session, name: &str) { s.execute("file.newBin", json!({"name":name})).unwrap(); }
++fn reject<T>() -> Result<T> { Err(EngineError::Other("injected failure".into())) }
++fn flush(s: &Session) { s.persistence.as_ref().unwrap().flush(); }
++fn recovered(s: &Session) -> String {
++    flush(s);
++    let path = s.persistence.as_ref().unwrap().session_dir.join("snapshot.fcproj");
++    let mut recovery = Session::default();
++    recovery.execute("file.open", json!({"path":path})).unwrap();
++    recovery.project.to_json()
++}
++fn same_external(s: &Session, before: &Arc<filmcraft_project::Project>) {
++    assert!(Arc::ptr_eq(&s.previews.live.project().unwrap(), before), "playback received a staged Arc");
++    assert_eq!(recovered(s), before.to_json(), "worker persisted a staged project");
++}
++
++#[test]
++fn successful_group_publishes_only_final_snapshot_and_one_revision_event() {
++    let mut f = Fixture::new();
++    let before = f.s.previews.live.project().unwrap();
++    let undo = f.s.history.undo.len();
++    let journal = f.s.journal.len();
++    f.s.edit_group("Linked change", |s| {
++        bin(s, "Landscape");
++        same_external(s, &before);
++        s.sync_persistence(); // Even an explicit sync cannot publish an open group.
++        same_external(s, &before);
++        bin(s, "Portrait");
++        same_external(s, &before);
++        Ok(())
++    }).unwrap();
++    assert!(Arc::ptr_eq(&f.s.previews.live.project().unwrap(), &f.s.project));
++    assert_eq!(recovered(&f.s), f.s.project.to_json());
++    assert_eq!(f.s.history.undo.len(), undo + 1);
++    assert_eq!(f.s.history.undo.last().unwrap().0, "Linked change");
++    assert_eq!(f.s.journal.len(), journal + 2);
++    assert_eq!(f.s.drain_events(), vec![Event::ProjectChanged { revision:f.s.revision }]);
++}
++
++#[test]
++fn failed_group_never_publishes_and_restores_observable_buffers() {
++    let mut f = Fixture::new();
++    f.s.toast("Existing event");
++    let before = f.s.previews.live.project().unwrap();
++    let (rev, saved, events, journal, undo, state) = (f.s.revision, f.s.saved_revision, f.s.events.clone(), f.s.journal.clone(), f.s.history.undo.len(), serde_json::to_value(&f.s.state).unwrap());
++    let result: Result<()> = f.s.edit_group("Rejected", |s| {
++        bin(s, "Rejected prefix");
++        s.toast("Rejected toast");
++        same_external(s, &before);
++        reject()
++    });
++    assert!(result.is_err());
++    assert!(Arc::ptr_eq(&f.s.project, &before));
++    same_external(&f.s, &before);
++    assert_eq!((f.s.revision, f.s.saved_revision), (rev, saved));
++    assert_eq!(f.s.events, events);
++    assert_eq!(f.s.journal, journal);
++    assert_eq!(f.s.history.undo.len(), undo);
++    assert_eq!(serde_json::to_value(&f.s.state).unwrap(), state);
++    assert_eq!(f.s.is_dirty(), rev != saved);
++}
++
++#[test]
++fn panic_restores_observers_and_next_command_can_commit() {
++    let mut f = Fixture::new();
++    let before = f.s.previews.live.project().unwrap();
++    let (revision, limit, journal, events) = (f.s.revision, f.s.history.limit, f.s.journal.clone(), f.s.events.clone());
++    let p = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++        let _: Result<()> = f.s.edit_group("Panicking group", |s| {
++            bin(s, "Rejected panic prefix");
++            same_external(s, &before);
++            panic!("injected group panic")
++        });
++    }));
++    assert!(p.is_err());
++    same_external(&f.s, &before);
++    assert_eq!(f.s.revision, revision);
++    assert_eq!(f.s.history.limit, limit);
++    assert_eq!(f.s.journal, journal);
++    assert_eq!(f.s.events, events);
++    bin(&mut f.s, "Valid next command");
++    assert!(Arc::ptr_eq(&f.s.previews.live.project().unwrap(), &f.s.project));
++    assert_eq!(recovered(&f.s), f.s.project.to_json());
++}
++
++#[test]
++fn nested_success_stays_staged_and_outer_failure_discards_everything() {
++    let mut f = Fixture::new();
++    let before = f.s.previews.live.project().unwrap();
++    let journal = f.s.journal.clone();
++    let result: Result<()> = f.s.edit_group("Outer", |s| {
++        bin(s, "Outer prefix");
++        s.edit_group("Inner", |s| { bin(s, "Inner success"); same_external(s, &before); Ok(()) })?;
++        same_external(s, &before);
++        reject()
++    });
++    assert!(result.is_err());
++    same_external(&f.s, &before);
++    assert_eq!(f.s.project.to_json(), before.to_json());
++    assert_eq!(f.s.journal, journal);
++}
++
++#[test]
++fn nested_failure_can_be_caught_and_outer_commit_contains_only_valid_edits() {
++    let mut f = Fixture::new();
++    let before = f.s.previews.live.project().unwrap();
++    let undo = f.s.history.undo.len();
++    let journal = f.s.journal.len();
++    f.s.edit_group("Outer success", |s| {
++        bin(s, "Keep A");
++        let outer_project = s.project.to_json();
++        let inner: Result<()> = s.edit_group("Inner rejection", |s| { bin(s, "Discard B"); reject() });
++        assert!(inner.is_err());
++        assert_eq!(s.project.to_json(), outer_project);
++        same_external(s, &before);
++        bin(s, "Keep C");
++        Ok(())
++    }).unwrap();
++    assert_eq!(f.s.history.undo.len(), undo + 1);
++    assert_eq!(f.s.journal.len(), journal + 2);
++    assert!(!f.s.project.to_json().contains("Discard B"));
++    assert_eq!(recovered(&f.s), f.s.project.to_json());
++    assert_eq!(f.s.events.iter().filter(|e| matches!(e, Event::ProjectChanged { .. })).count(), 1);
++}
++
++#[test]
++fn nested_panic_caught_by_outer_group_can_continue_without_publishing() {
++    let mut f = Fixture::new();
++    let before = f.s.previews.live.project().unwrap();
++    f.s.edit_group("Recovered outer", |s| {
++        bin(s, "Keep outer");
++        let outer = s.project.to_json();
++        let p = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            let _: Result<()> = s.edit_group("Inner panic", |s| { bin(s, "Discard panic"); panic!("injected") });
++        }));
++        assert!(p.is_err());
++        assert_eq!(s.project.to_json(), outer);
++        same_external(s, &before);
++        bin(s, "Keep after panic");
++        Ok(())
++    }).unwrap();
++    assert!(!f.s.project.to_json().contains("Discard panic"));
++    assert_eq!(recovered(&f.s), f.s.project.to_json());
++}
++
++#[test]
++fn journal_overflow_failure_restores_evicted_prefix_exactly() {
++    let mut f = Fixture::new();
++    f.s.journal = (0..10_000).map(|n| (format!("existing.{n}"), json!({"n":n}))).collect();
++    let before = f.s.journal.clone();
++    let r: Result<()> = f.s.edit_group("Overflow", |s| {
++        bin(s, "Triggers cap");
++        assert_eq!(s.journal.len(), 9001);
++        let inner: Result<()> = s.edit_group("Nested overflow failure", |s| { bin(s, "Inner"); reject() });
++        assert!(inner.is_err());
++        reject()
++    });
++    assert!(r.is_err());
++    assert_eq!(f.s.journal, before);
++}
++
++#[test]
++fn previous_merged_gesture_cannot_absorb_first_group_edit() {
++    let mut f = Fixture::new();
++    f.s.edit_merged("Gesture", "same-key", |_, _| Ok(())).unwrap();
++    let before = f.s.project.to_json();
++    let undo = f.s.history.undo.len();
++    f.s.edit_group("Grouped gesture", |s| s.edit_merged("Gesture", "same-key", |_, _| Ok(()))).unwrap();
++    assert_eq!(f.s.history.undo.len(), undo + 1);
++    assert_eq!(f.s.undo().as_deref(), Some("Grouped gesture"));
++    assert_eq!(f.s.project.to_json(), before);
++}
++
++#[test]
++fn direct_history_undo_redo_publish_complete_group_snapshots() {
++    let mut f = Fixture::new();
++    let before = f.s.project.to_json();
++    f.s.edit_group("Linked pair", |s| { bin(s, "Wide"); bin(s, "Tall"); Ok(()) }).unwrap();
++    let after = f.s.project.to_json();
++    assert_eq!(f.s.undo().as_deref(), Some("Linked pair"));
++    assert_eq!(f.s.project.to_json(), before);
++    assert_eq!(f.s.previews.live.project().unwrap().to_json(), before);
++    assert_eq!(recovered(&f.s), before);
++    assert_eq!(f.s.redo().as_deref(), Some("Linked pair"));
++    assert_eq!(f.s.project.to_json(), after);
++    assert_eq!(f.s.previews.live.project().unwrap().to_json(), after);
++    assert_eq!(recovered(&f.s), after);
++}
++
++#[test]
++fn undo_redo_inside_failed_group_do_not_publish_and_history_is_restored() {
++    let mut f = Fixture::new();
++    bin(&mut f.s, "Second baseline");
++    let before = f.s.previews.live.project().unwrap();
++    let undo = f.s.history.undo.len();
++    let r: Result<()> = f.s.edit_group("Rejected navigation", |s| {
++        assert!(s.undo().is_some());
++        same_external(s, &before);
++        assert!(s.redo().is_some());
++        same_external(s, &before);
++        reject()
++    });
++    assert!(r.is_err());
++    assert_eq!(f.s.history.undo.len(), undo);
++    assert!(f.s.history.redo.is_empty());
++    same_external(&f.s, &before);
++}
++
++#[test]
++fn successful_group_preserves_existing_events_and_committed_nonrevision_events() {
++    let mut f = Fixture::new();
++    f.s.toast("Existing");
++    let existing = f.s.events.clone();
++    f.s.edit_group("Events", |s| { bin(s, "One"); s.toast("Committed"); bin(s, "Two"); Ok(()) }).unwrap();
++    assert_eq!(&f.s.events[..existing.len()], &existing);
++    assert_eq!(f.s.events.iter().filter(|e| matches!(e, Event::ProjectChanged { .. })).count(), 1);
++    assert!(f.s.events.contains(&Event::Toast { message:"Committed".into(), error:false }));
++}
++
++#[test]
++fn failed_group_keeps_original_merge_key() {
++    let mut f = Fixture::new();
++    f.s.history.merge_key = Some("prior-key".into());
++    let r: Result<Value> = f.s.edit_group("Failed empty", |_| reject());
++    assert!(r.is_err());
++    assert_eq!(f.s.history.merge_key.as_deref(), Some("prior-key"));
++    let _ = &f.root; // Every test preserves its recovery artifacts in the owned root.
++}
++
++#[test]
++fn source_monitor_history_tracks_only_the_committed_group() {
++    let mut f = Fixture::new();
++    let sentinel = filmcraft_project::ItemId(999_999_999);
++    f.s.state.source_history = vec![sentinel];
++    let r: Result<()> = f.s.edit_group("Rejected source history", |s| {
++        bin(s, "Temporary edit");
++        assert_eq!(s.state.source_history, vec![sentinel], "inner execute tracked staged history");
++        reject()
++    });
++    assert!(r.is_err());
++    assert_eq!(f.s.state.source_history, vec![sentinel]);
++    f.s.edit_group("Committed source history", |s| {
++        bin(s, "Committed edit");
++        assert_eq!(s.state.source_history, vec![sentinel]);
++        Ok(())
++    }).unwrap();
++    assert!(f.s.state.source_history.is_empty(), "outer commit must remove the dangling history item");
++}
++
++#[test]
++fn successful_nested_groups_publish_once_as_one_undo_step() {
++    let mut f = Fixture::new();
++    let before = f.s.previews.live.project().unwrap();
++    let undo = f.s.history.undo.len();
++    f.s.edit_group("Outer commit", |s| {
++        bin(s, "Outer A");
++        s.edit_group("Inner commit", |s| {
++            bin(s, "Inner B");
++            same_external(s, &before);
++            Ok(())
++        })?;
++        same_external(s, &before);
++        bin(s, "Outer C");
++        Ok(())
++    }).unwrap();
++    assert_eq!(f.s.history.undo.len(), undo + 1);
++    assert_eq!(f.s.history.undo.last().unwrap().0, "Outer commit");
++    assert_eq!(f.s.previews.live.project().unwrap().to_json(), f.s.project.to_json());
++    assert_eq!(recovered(&f.s), f.s.project.to_json());
++    assert_eq!(f.s.drain_events(), vec![Event::ProjectChanged { revision:f.s.revision }]);
++    assert_eq!(f.s.undo().as_deref(), Some("Outer commit"));
++    assert_eq!(f.s.project.to_json(), before.to_json());
++}
++
++#[test]
++fn successful_empty_group_preserves_gesture_key_and_existing_events() {
++    let mut f = Fixture::new();
++    f.s.history.merge_key = Some("existing gesture".into());
++    f.s.toast("Already queued");
++    let before = f.s.project.to_json();
++    let revision = f.s.revision;
++    let events = f.s.events.clone();
++    f.s.edit_group("Empty", |_| Ok(())).unwrap();
++    assert_eq!(f.s.project.to_json(), before);
++    assert_eq!(f.s.revision, revision);
++    assert_eq!(f.s.events, events);
++    assert_eq!(f.s.history.merge_key.as_deref(), Some("existing gesture"));
++}
++
++#[test]
++fn failure_from_saved_project_does_not_make_it_dirty_or_create_recovery() {
++    let mut f = Fixture::new();
++    let path = f.root.join("clean.fcproj");
++    f.s.execute("file.saveAs", json!({"path":path})).unwrap();
++    flush(&f.s);
++    assert!(!f.s.is_dirty());
++    let before = f.s.project.clone();
++    let revision = f.s.revision;
++    let recovery = f.s.persistence.as_ref().unwrap().session_dir.join("snapshot.fcproj");
++    assert!(!recovery.exists());
++    let r: Result<()> = f.s.edit_group("Rejected clean edit", |s| {
++        bin(s, "Do not save");
++        s.sync_persistence();
++        flush(s);
++        assert!(Arc::ptr_eq(&s.previews.live.project().unwrap(), &before));
++        assert!(!recovery.exists());
++        reject()
++    });
++    assert!(r.is_err());
++    assert!(!f.s.is_dirty());
++    assert_eq!(f.s.revision, revision);
++    assert!(!recovery.exists());
++    let mut reopened = Session::default();
++    reopened.execute("file.open", json!({"path":path})).unwrap();
++    assert_eq!(reopened.project.to_json(), before.to_json());
 +}

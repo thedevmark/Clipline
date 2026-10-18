@@ -7,16 +7,21 @@
   "archive_bytes": 21093176,
   "archive_sha256": "851a166241377875964251523594bb85c14171c740aa0d32b476ddeeb78d27e3",
   "patch_file": "clipline-native-edits.patch",
-  "patch_sha256": "e42ec1ed6a0717465b6414a48c3ab54b3001c5b6223b7c4571db883a9e210343",
+  "patch_sha256": "cd9e8af418f85c3c236f4881cc9538b9ead01f0f9413fe36d46a821880811f81",
   "patched_files_sha256": {
     "Cargo.lock": "37da28b37a2dbcd15cbf8c5156210ec0f6c717bcb544aa71ed693430214c0062",
     "crates/engine/Cargo.toml": "97f24e022bd9d096456ffbda434b5ebdede411843343af3afae408928d10034a",
-    "crates/engine/src/lib.rs": "cbf08f31bf286486cae84896ec719411c558e5e9f6dcc4392fe66b5f6d3f89b5",
-    "crates/engine/src/linked_edits.rs": "c4b154b8dbbf1b6643988a02d8869e588a8064f9f93103dfa5fb41b9399bc59f",
+    "crates/engine/src/autosave.rs": "f6a1669164882f96e5aa7e8e14823a93628d1ffe01b319e2c5f0f5c2d497e28b",
+    "crates/engine/src/commands.rs": "12cd2332878c4029f41954c94a669ed39843b8ef88599551881e668ff91d5a7f",
+    "crates/engine/src/export_tools.rs": "761189df9e5026b177f96b4c293bf274c395070b95517f95d793e441fc543bac",
+    "crates/engine/src/lib.rs": "523b0257171f36b65706f84398ad1292601b25f346f3bca4a74e0f57e5dbdbd6",
+    "crates/engine/src/linked_edits.rs": "6d5d7491c2c21e0b05d14f6abfbb49beefa73a2e9f21afb56da80f2f8981e80a",
     "crates/engine/src/linked_edits/tests.rs": "2c1b0233a39bac314d81765b5d27058c617bb3e81d1c3ae46e1d948eca6cdddc",
-    "crates/engine/tests/edit_group_publication.rs": "c0a747755ea3b8162a762fa1b4efd389d9685886ffddfdafa08f3824672899fb",
-    "crates/engine/tests/clipline_linked_commands.rs": "cc7e83d6e5a6d8b89c6354ab4997f588e97f2e56ba75d12c8970adade7f532c1"
+    "crates/engine/src/project_manager.rs": "295fa0aaa49dc4d2a422f176f83324a7d3247a449983fc6822919f565fa4884c",
+    "crates/engine/src/project_tools.rs": "2945d0399a06ca9a766ff9e376db66fcebf50470d21f71a1b222269053bf5a0c",
+    "crates/engine/tests/clipline_linked_commands.rs": "7875968d189ead58d8d92cac3a8394c84b066545822780f56cd78bbb51760e25",
+    "crates/engine/tests/edit_group_publication.rs": "c0a747755ea3b8162a762fa1b4efd389d9685886ffddfdafa08f3824672899fb"
   },
-  "scope": "Native schema1/schema2 linked gameplay/facecam razor and regular trim, exact float parsing and transactional publication. Full editor integration remains incomplete.",
+  "scope": "Native schema1/schema2 linked gameplay/facecam razor and regular trim, transactional publication, document-wide linked validation, guarded native save/export and revision/path/inventory-checked one-call snapshots. Full editor integration remains incomplete.",
   "archive_url_provenance": "Conventional tag archive reconstruction endpoint; original request URL was not retained. Verified archive ZIP comment equals upstream_commit."
 }
