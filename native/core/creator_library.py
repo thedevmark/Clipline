@@ -56,6 +56,13 @@ class KitRecord:
 
 
 @dataclass(frozen=True)
+class KitSummary:
+    id: str
+    version: int
+    name: str
+
+
+@dataclass(frozen=True)
 class Moment:
     id: str
     title: str
@@ -390,6 +397,32 @@ class CreatorLibrary:
 
     def kit(self, kit_id: str, version: int) -> dict:
         return json.loads(self.kit_record(kit_id, version).descriptor_json)
+
+    def list_kits(self, *, after: int = 0, limit: int = 50) -> dict:
+        """Page current Kit summaries without loading assets or native templates."""
+        if type(after) is not int or not 0 <= after <= 2**63 - 1 or type(limit) is not int or not 1 <= limit <= 200:
+            raise LibraryError("Invalid pagination: bounded SQLite cursor and 1<=limit<=200 required")
+        rows = self.connection.execute(
+            "SELECT k.rowid AS cursor,k.id,k.latest_version AS version,"
+            "json_extract(v.descriptor,'$.name') AS name FROM kits k "
+            "JOIN kit_versions v ON v.kit_id=k.id AND v.version=k.latest_version "
+            "WHERE k.rowid>? ORDER BY k.rowid LIMIT ?", (after, limit + 1)).fetchall()
+        page = rows[:limit]
+        return {"items": [KitSummary(row["id"], row["version"], row["name"]) for row in page],
+                "next_cursor": page[-1]["cursor"] if len(rows) > limit else None}
+
+    def list_kit_versions(self, kit_id: str, *, after: int = 0, limit: int = 50) -> dict:
+        """List immutable versions for explicit selection, never a latest alias."""
+        if type(after) is not int or not 0 <= after <= 2**63 - 1 or type(limit) is not int or not 1 <= limit <= 200:
+            raise LibraryError("Invalid pagination: bounded SQLite cursor and 1<=limit<=200 required")
+        if self.connection.execute("SELECT 1 FROM kits WHERE id=?", (kit_id,)).fetchone() is None:
+            raise LibraryError("Unknown Kit")
+        rows = self.connection.execute(
+            "SELECT version,json_extract(descriptor,'$.name') AS name FROM kit_versions "
+            "WHERE kit_id=? AND version>? ORDER BY version LIMIT ?", (kit_id, after, limit + 1)).fetchall()
+        page = rows[:limit]
+        return {"items": [KitSummary(kit_id, row["version"], row["name"]) for row in page],
+                "next_cursor": page[-1]["version"] if len(rows) > limit else None}
 
     def revise_kit(self, kit_id: str, descriptor: dict, *, expected_version: int) -> int:
         descriptor = _descriptor(descriptor)

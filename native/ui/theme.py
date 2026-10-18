@@ -107,6 +107,38 @@ QPushButton[primary="true"]:hover {{
   border-color: {ACCENT_DEEP};
   color: {INK_BRIGHT};
 }}
+QPushButton[primary="true"]:disabled {{
+  background-color: {BG_PANEL};
+  border-color: {BORDER};
+  color: {INK_DIM};
+}}
+
+QTableView {{
+  background-color: {BG_PANEL};
+  color: {INK_BRIGHT};
+  border: 1px solid {BORDER};
+  gridline-color: {BORDER};
+  selection-background-color: {ACCENT_DEEP};
+  selection-color: {ACCENT_INK};
+}}
+QTableView::item {{
+  padding: 0 8px;
+}}
+QHeaderView::section {{
+  background-color: {BG_PANEL};
+  color: {INK};
+  padding: 8px;
+  border: 0;
+  border-bottom: 1px solid {BORDER};
+}}
+QDateEdit {{
+  background-color: {BG_PANEL};
+  color: {INK_BRIGHT};
+  border: 1px solid {BORDER};
+  padding: 6px;
+  selection-background-color: {ACCENT};
+  selection-color: {ACCENT_INK};
+}}
 
 QLineEdit, QPlainTextEdit, QTextEdit {{
   background-color: {BG_PANEL};
