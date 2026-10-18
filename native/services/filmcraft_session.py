@@ -89,6 +89,14 @@ def in_job(tree, pid):
         return bool(result.value)
     finally:api.CloseHandle(handle)
 
+
+def _project_identity(value):
+    if (not isinstance(value,dict) or not isinstance(value.get("path"),str)
+            or len(value["path"])>32768 or type(value.get("revision")) is not int
+            or not 0<=value["revision"]<2**64 or type(value.get("dirty")) is not bool):
+        raise SessionError("The native project identity is invalid")
+    return {key:value[key] for key in ("path","revision","dirty")}
+
 class SessionBridge(FilmcraftBridge):
     def __init__(self, owner):
         super().__init__(owner.port, timeout=10)
@@ -169,20 +177,35 @@ class NativeSession:
                             remaining=deadline-time.monotonic()
                             if remaining<=0:raise SessionError("Native editor readiness deadline expired")
                             bridge=FilmcraftBridge(self.port,timeout=min(remaining,.5))
-                            validation=bridge.execute("clipline.validate")
+                            project_before=_project_identity(bridge.execute("project.inspect"))
+                            remaining=deadline-time.monotonic()
+                            if remaining<=0:raise SessionError("Native editor readiness deadline expired")
+                            bridge=FilmcraftBridge(self.port,timeout=min(remaining,.5))
+                            validation=bridge.execute("clipline.validate",{"expectedRevision":project_before["revision"]})
+                            remaining=deadline-time.monotonic()
+                            if remaining<=0:raise SessionError("Native editor readiness deadline expired")
+                            bridge=FilmcraftBridge(self.port,timeout=min(remaining,.5))
+                            project_after=_project_identity(bridge.execute("project.inspect"))
+                            write_once(self.directory/("readiness-identity-"+str(uuid.uuid4())+".json"),{
+                                "project_before":project_before,"project_after":project_after,
+                                "validation":{"valid":validation.get("valid") if isinstance(validation,dict) else None,
+                                              "revision":validation.get("revision") if isinstance(validation,dict) else None}})
                         except EditorUnavailable:pass
                         except OutcomeUnknown as exc:
                             # Read-only readiness calls may be repeated; no mutation is retried.
                             write_once(self.directory/("readiness-unknown-"+str(uuid.uuid4())+".json"),
                                 {"request_id":exc.request_id,"method":exc.method,"reason":str(exc)})
                         else:
-                            if not isinstance(validation,dict) or validation.get("valid") is not True or validation.get("projectPath")!=str(path):
+                            if (not isinstance(validation,dict) or validation.get("valid") is not True
+                                    or type(validation.get("revision")) is not int
+                                    or validation["revision"]!=project_before["revision"]
+                                    or project_before["path"]!=str(path) or project_after!=project_before):
                                 raise SessionError("The native editor opened a different or invalid project")
                             if listener_pids(self.port)!={self.child_pid} or not in_job(self.tree,self.child_pid):
                                 raise SessionError("Native control listener ownership changed during readiness")
                             if digest(path)!=self.initial_hash:raise SessionError("The working file changed during startup; retained for reconciliation")
                             write_once(self.directory/"ready.json",{"schema":1,"pid":self.child_pid,"gate_pid":self.process.pid,
-                                "scope_id":self.tree.scope_id,"port":self.port,"validation":validation,
+                                "scope_id":self.tree.scope_id,"port":self.port,"project":project_after,"validation":validation,
                                 "ui":{"window":ui["window"]},"control_authentication":"none",
                                 "limitations":["listener check/connect race","no later-call authentication"]})
                             self._bridge=SessionBridge(self)

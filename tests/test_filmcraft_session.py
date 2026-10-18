@@ -40,7 +40,10 @@ class OwnerTests(unittest.TestCase):
         receipt=s.stop();self.assertEqual(receipt["scope"]["disposition"],"stopped")
         self.assertEqual(receipt["scope"]["active_processes"],0);self.assertTrue(receipt["streams_closed"])
         self.assertEqual((s.directory/"data/retained-recovery.fixture").read_bytes(),b"unsaved fixture data")
-        self.assertEqual(json.loads((s.directory/"ready.json").read_text())["control_authentication"],"none")
+        ready=json.loads((s.directory/"ready.json").read_text())
+        self.assertEqual(ready["control_authentication"],"none")
+        self.assertNotIn("projectPath",ready["validation"])
+        self.assertEqual(ready["project"]["path"],str(self.working.path))
         self.assert_preserved()
         with self.assertRaises(n.SessionError):_=s.bridge
         with self.assertRaises(n.SessionError):cached.execute("project.inspect")
@@ -182,6 +185,25 @@ class OwnerTests(unittest.TestCase):
                 with self.assertRaisesRegex(n.SessionError,"prior uncertain"):self.launch()
                 self.assert_preserved()
 
+
+
+    def test_native_revision_change_during_readiness_refuses_before_exposing_bridge(self):
+        with self.assertRaisesRegex(n.SessionError,"stale or invalid expectedRevision") as caught:
+            self.launch("changing")
+        self.assertFalse((caught.exception.directory/"ready.json").exists())
+        self.assertEqual(json.loads((caught.exception.directory/"stop.json").read_text())["scope"]["active_processes"],0)
+        self.assert_preserved()
+
+    def test_same_revision_save_as_during_readiness_refuses_changed_path(self):
+        with self.assertRaisesRegex(n.SessionError,"different or invalid") as caught:
+            self.launch("saveas")
+        self.assertFalse((caught.exception.directory/"ready.json").exists())
+        observations=list(caught.exception.directory.glob("readiness-identity-*.json"))
+        self.assertEqual(len(observations),1)
+        evidence=json.loads(observations[0].read_text())
+        self.assertEqual(evidence["project_before"]["revision"],evidence["project_after"]["revision"])
+        self.assertNotEqual(evidence["project_before"]["path"],evidence["project_after"]["path"])
+        self.assert_preserved()
 
 if __name__=="__main__":
     print("Retained protocol evidence: "+str(EVIDENCE),flush=True)
