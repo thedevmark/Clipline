@@ -246,7 +246,7 @@ class LibraryTests(unittest.TestCase):
         self.assertTrue(self.source.exists())
 
     def test_unknown_schema_and_unversioned_foreign_database_are_rejected(self):
-        for name, sql in [("future.sqlite", "PRAGMA user_version=2"), ("foreign.sqlite", "CREATE TABLE foreign_data(id)")]:
+        for name, sql in [("future.sqlite", "PRAGMA user_version=99"), ("foreign.sqlite", "CREATE TABLE foreign_data(id)")]:
             path = self.folder / name
             with closing(sqlite3.connect(path)) as connection:
                 connection.execute(sql); connection.commit()
@@ -258,7 +258,7 @@ class LibraryTests(unittest.TestCase):
             with CreatorLibrary(target) as library:
                 return library.connection.execute("PRAGMA user_version").fetchone()[0]
         with ThreadPoolExecutor(max_workers=4) as pool:
-            self.assertEqual(list(pool.map(open_library, range(4))), [1, 1, 1, 1])
+            self.assertEqual(list(pool.map(open_library, range(4))), [2, 2, 2, 2])
 
     def test_second_connection_cannot_publish_a_stale_kit_version(self):
         with CreatorLibrary(self.path) as second:

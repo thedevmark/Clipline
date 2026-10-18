@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Literal, Optional
 
 from native.services import twitch_auth
+from native.core.twitch_inbox import TwitchClip, TwitchClipPage, parse_timestamp
 
 HELIX = "https://api.twitch.tv/helix"
 
@@ -85,6 +86,43 @@ def list_vods(user_id: str, first: int = 20) -> list[TwitchItem]:
         )
         for v in data.get("data", [])
     ]
+
+
+def clips_page(broadcaster_id: str, first: int = 100, *, after: str | None = None,
+               started_at: str | None = None, ended_at: str | None = None) -> TwitchClipPage:
+    """Read one Helix metadata page; source media and temporary download URLs stay separate.
+
+    Helix orders channel clips by views, not creation time. Callers use explicit
+    date windows and pagination rather than treating the first page as a stream inbox.
+    """
+    if not isinstance(broadcaster_id, str) or not broadcaster_id or len(broadcaster_id) > 512:
+        raise ValueError("A broadcaster ID is required")
+    if type(first) is not int or not 1 <= first <= 100:
+        raise ValueError("Twitch clip page size must be between 1 and 100")
+    params = {"broadcaster_id": broadcaster_id, "first": first}
+    for key, value in (("after", after), ("started_at", started_at), ("ended_at", ended_at)):
+        if value is not None:
+            if not isinstance(value, str) or not value or len(value) > 2048:
+                raise ValueError(f"Invalid Twitch {key}")
+            params[key] = value
+    start = parse_timestamp(started_at) if started_at is not None else None
+    end = parse_timestamp(ended_at) if ended_at is not None else None
+    if start is not None and end is not None and end <= start:
+        raise ValueError("Twitch end time must be after the start time")
+    data = _get("clips", params)
+    if not isinstance(data, dict):
+        raise ValueError("Invalid Twitch clips response")
+    entries, pagination = data.get("data"), data.get("pagination", {})
+    if not isinstance(entries, list) or len(entries) > first or not isinstance(pagination, dict):
+        raise ValueError("Invalid Twitch clips page")
+    cursor = pagination.get("cursor")
+    if cursor is not None and (not isinstance(cursor, str) or len(cursor) > 2048):
+        raise ValueError("Invalid Twitch pagination cursor")
+    cursor = cursor or None
+    clips = tuple(TwitchClip.from_helix(c) for c in entries)
+    if any(c.broadcaster_id != broadcaster_id for c in clips):
+        raise ValueError("Twitch returned a clip for another broadcaster")
+    return TwitchClipPage(clips, cursor)
 
 
 def list_clips(broadcaster_id: str, first: int = 20) -> list[TwitchItem]:

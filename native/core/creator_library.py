@@ -6,7 +6,7 @@ semantic keys such as ``caption.font_size``; each value is one merge unit.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 import math
@@ -15,6 +15,8 @@ from pathlib import Path
 import sqlite3
 import uuid
 from typing import Any
+
+from native.core.twitch_inbox import TwitchClip, timestamp_identity
 
 
 class LibraryError(ValueError):
@@ -98,6 +100,15 @@ WHEN NOT EXISTS (
 )
 BEGIN SELECT RAISE(ABORT,'Kit asset bindings must match the immutable descriptor'); END;
 PRAGMA user_version=1;
+"""
+
+
+_TWITCH_SCHEMA = """
+CREATE TABLE twitch_clips (
+ sequence INTEGER PRIMARY KEY AUTOINCREMENT, clip_id TEXT NOT NULL UNIQUE,
+ metadata TEXT NOT NULL
+);
+PRAGMA user_version=2;
 """
 
 
@@ -213,7 +224,15 @@ class CreatorLibrary:
                     if sqlite3.complete_statement(statement):
                         self.connection.execute(statement)
                         statement = ""
-            elif version != 1:
+                version = 1
+            if version == 1:
+                statement = ""
+                for line in _TWITCH_SCHEMA.splitlines(keepends=True):
+                    statement += line
+                    if sqlite3.complete_statement(statement):
+                        self.connection.execute(statement)
+                        statement = ""
+            elif version != 2:
                 raise LibraryError(f"Unsupported library schema version {version}")
             self.connection.execute("COMMIT")
         except Exception:
@@ -241,6 +260,39 @@ class CreatorLibrary:
             self.connection.execute("ROLLBACK")
             raise
 
+    def record_twitch_clips(self, clips: tuple[TwitchClip, ...] | list[TwitchClip]) -> None:
+        """Upsert one bounded metadata page; never open or download source media."""
+        if not isinstance(clips, (list, tuple)) or len(clips) > 100:
+            raise LibraryError("A Twitch page must contain at most 100 clips")
+        records = []
+        for clip in clips:
+            if type(clip) is not TwitchClip:
+                raise LibraryError("A validated TwitchClip is required")
+            descriptor = asdict(clip)
+            TwitchClip(**descriptor)
+            records.append((clip, _json(descriptor)))
+        with self._write():
+            for clip, metadata in records:
+                current = self.connection.execute("SELECT metadata FROM twitch_clips WHERE clip_id=?", (clip.id,)).fetchone()
+                if current:
+                    previous = TwitchClip(**json.loads(current["metadata"]))
+                    if ((previous.broadcaster_id, previous.creator_id, timestamp_identity(previous.created_at)) !=
+                            (clip.broadcaster_id, clip.creator_id, timestamp_identity(clip.created_at))):
+                        raise RevisionConflict("Twitch clip identity changed; the existing page is preserved")
+                self.connection.execute(
+                    "INSERT INTO twitch_clips(clip_id,metadata) VALUES (?,?) "
+                    "ON CONFLICT(clip_id) DO UPDATE SET metadata=excluded.metadata", (clip.id, metadata))
+
+    def list_twitch_clips(self, *, after: int = 0, limit: int = 50) -> dict:
+        if type(after) is not int or not 0 <= after <= 2**63 - 1 or type(limit) is not int or not 1 <= limit <= 200:
+            raise LibraryError("Invalid pagination: bounded SQLite cursor and 1<=limit<=200 required")
+        rows = self.connection.execute(
+            "SELECT sequence,metadata FROM twitch_clips WHERE sequence>? ORDER BY sequence LIMIT ?",
+            (after, limit + 1)).fetchall()
+        page = rows[:limit]
+        return {"items": [TwitchClip(**json.loads(row["metadata"])) for row in page],
+                "next_cursor": page[-1]["sequence"] if len(rows) > limit else None}
+
     def asset(self, asset_id: str) -> Asset:
         row = self.connection.execute("SELECT id,sha256,path,bytes FROM assets WHERE id=?", (asset_id,)).fetchone()
         if row is None:
@@ -263,8 +315,8 @@ class CreatorLibrary:
         return self.asset(asset_id)
 
     def list_assets(self, *, after: int = 0, limit: int = 50) -> dict:
-        if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 200:
-            raise LibraryError("Invalid pagination: cursor>=0 and 1<=limit<=200 required")
+        if type(after) is not int or not 0 <= after <= 2**63 - 1 or type(limit) is not int or not 1 <= limit <= 200:
+            raise LibraryError("Invalid pagination: bounded SQLite cursor and 1<=limit<=200 required")
         rows = self.connection.execute("SELECT rowid AS cursor,id,sha256,path,bytes FROM assets WHERE rowid>? ORDER BY rowid LIMIT ?", (after, limit + 1)).fetchall()
         more = len(rows) > limit; page = rows[:limit]
         return {"items": [Asset(row["id"], row["sha256"], row["path"], row["bytes"]) for row in page],
@@ -340,8 +392,8 @@ class CreatorLibrary:
         return self._moment(row)
 
     def list_moments(self, *, after: int = 0, limit: int = 50) -> dict:
-        if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 200:
-            raise LibraryError("Invalid pagination: cursor>=0 and 1<=limit<=200 required")
+        if type(after) is not int or not 0 <= after <= 2**63 - 1 or type(limit) is not int or not 1 <= limit <= 200:
+            raise LibraryError("Invalid pagination: bounded SQLite cursor and 1<=limit<=200 required")
         rows = self.connection.execute("SELECT * FROM moments WHERE sequence>? ORDER BY sequence LIMIT ?", (after, limit + 1)).fetchall()
         more = len(rows) > limit; page = rows[:limit]
         return {"items": [self._moment(row) for row in page], "next_cursor": page[-1]["sequence"] if more else None}

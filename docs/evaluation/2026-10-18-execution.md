@@ -11,7 +11,7 @@ Updated: 2026-10-18. State: W0 executing. Product implementation is now authoriz
 - Local-only large/private artifacts: `%LOCALAPPDATA%/clipline/evaluation/2026-10-18/`.
 - Runtime evidence belongs beside pinned candidate builds and fixtures. Do not commit real source media, credentials, signed URLs, or private Premiere projects.
 
-Local implementation commits (not pushed): `33847a1` source-preserving landscape exports; `9d0ed3d` shared assets/versioned Creator Kits; `b698571` committed native generations. The copied Homebase work remains unstaged and byte-identical to the original checkout. Parent and independent checks are recorded below.
+Local implementation commits (not pushed): `21942a3` pinned Filmcraft source/combined native corrections; `33847a1` source-preserving landscape exports; `9d0ed3d` shared assets/versioned Creator Kits; `b698571` committed native generations. The copied Homebase work remains unstaged and byte-identical to the original checkout. Parent and independent checks are recorded below.
 
 ## Team and write boundaries
 
@@ -30,7 +30,7 @@ Agents inherit the session model. The exact model identifier is not exposed in t
 | --- | --- | --- |
 | W0: baseline and engine proof | Running; executable trials and Windows native proof complete | Filmcraft advances to integration; editor widget/cancellation/resource gates remain. Premiere functional template baseline complete; matched workflow benchmark remains |
 | W1: Creator Library / Kit | Persistence slice integrated; incomplete | Shared identity, versioned Kits, conflict handling and bounded metadata pages pass tests. Native generations, jobs, retention, migration and UI remain |
-| W2: Twitch intake | Pending W1 | Source provenance, actual account import, paging/deduplication, context |
+| W2: Twitch intake | Metadata persistence/API slice integrated; incomplete | Stable provenance, bounded pages and deduplication pass. Native inbox UI, durable preparation, downloads and connected account remain |
 | W3: editor / linked outputs | Pending W0/W1 | Native document authority, manual override preservation, performance |
 | W4: caption quality | Pending transcript and engine contracts | Managed local workers, corrections, measured repair effort |
 | W5: creative recipes | Policy ready; implementation pending | Hooks, subtitles, transitions, music/SFX, CTA |
@@ -53,6 +53,22 @@ The controller is still executing the full goal. The native corrections below pa
 
 Next controller action: complete source preparation review and the streamed real-media native round trip, then implement multi-layer Kit bundles and build/wire the native editor. Do not claim a complete GUI, autosave integration or W3 completion from engine-only tests.
 
+### Real footage through the corrected native engine
+
+The unchanged v1 engine imported the 27,801,100-byte real-2 Twitch source through the native random-access reader. Whole-source reads were forbidden; none occurred. The reader consumed 125,480 bytes in calls no larger than 65,536 bytes, plus 2,097,152 bytes of native identity ranges. This is bounded import behavior for this source, not a large-VOD peak-memory result. Shared split/trim, undo/redo and native save/reopen passed.
+
+Both published Windows renderer outputs decoded completely: 1920x1080 and 1080x1920, square pixels, 60/1, 210 video frames and 3.5 video seconds. Stereo 48 kHz AAC lasted 3.52 seconds including padding. The source-window audio comparison reported correlation 0.9997648513 and zero best shift at 8 kHz; this is limited alignment evidence. The controller inspected the frames: landscape preserves the source frame and embedded camera; portrait crops gameplay and lacks a separate camera. Receipts: baseline/linked-engine-integration/real-v1/. A separate schema2 bundle source is now under test for gameplay plus facecam; v1 remains frozen.
+
+### Twitch metadata persistence slice
+
+The library now migrates schema1 to schema2 transactionally and stores bounded, deduplicated clip metadata separately from moments/media. Stable clip identity retains broadcaster, creator and exact creation instant; a conflicting refresh rolls back the whole page. Title, views and nullable VOD availability remain refreshable. Decimal durations must be exactly representable in source microseconds. Library cursors are bounded to SQLite's signed integer range.
+
+The new `twitch_api.clips_page` retains complete clip provenance, explicit date windows and the opaque provider cursor. The existing `list_clips` UI behavior and thumbnails remain unchanged. Tests cover migration, 257 clips across bounded pages, duplicate refresh, immutable identity conflicts (including duplicates in a new page), equivalent timezone representations, exact fractional timestamps, malformed input and forbidden media reads. Final controller check: **42 passed, 37 subtests passed** across the Twitch and Creator Library suites. Independent review reproduced three defects, verified their corrections and found no material remaining issue. Local review/probes: `baseline/twitch-metadata-review.md` and its neighboring receipts.
+
+The read-only existing-account check stopped with `TwitchAuthError: Not connected to Twitch.` It changed no scopes/settings and downloaded no media. Receipt: `twitch-inbox/live-metadata-result.json`. The native inbox UI, preparation scheduling and connected-account acceptance remain unfinished; this slice does not close W2.
+
+The [Twitch reference](https://dev.twitch.tv/docs/api/reference/#get-clips) confirms view-count ordering, up to100 results per page, date filters, approximately1000 results per query, and nullable VOD offsets. Future inbox sync must paginate date windows rather than label the first page “latest.” The separate [download endpoint](https://dev.twitch.tv/docs/api/reference/#get-clips-download) requires clip-management scope and returns temporary URLs. This change does not request that scope or persist those URLs.
+
 ### Pinned source preparation
 
 `vendor/filmcraft/pin.json` now binds the verified upstream archive, combined patch and all six changed-file hashes. `scripts/engine/prepare_filmcraft.py` prepares only a fresh destination and leaves diagnostic failures intact. The first actual attempt exposed missing new-file mode headers; the second exposed inherited Windows Git autocrlf conversion. Both failures remain retained. The corrected third attempt applied cleanly, with all six file hashes identical to the Windows-tested frozen source. New-file, Unicode and exact-byte tests now pass: nine tests and seven subtests. Git attributes retain LF patch bytes. Independent source-package review approved the current boundary without P0/P1/P2 findings. Its independent hashes confirm archive, patch and all six changed files. The ZIP comment equals the pinned upstream commit; the archive endpoint is reconstructed rather than a retained original request.
@@ -64,7 +80,7 @@ Local raw tests: `drift/gui-transaction-patch/results/windows-native-external/at
 | Requirement | Current implementation evidence |
 | --- | --- |
 | R01 Twitch stream-to-post direction | Master plan; runtime not complete |
-| R02 clip-first / context / local sources | Existing source inspected; connected-account evaluation pending |
+| R02 clip-first / context / local sources | Metadata persistence, explicit API pages/date windows and nullable VOD context pass. Live check found no saved account. Downloads/native inbox remain |
 | R03 linked landscape/portrait | Native Filmcraft grouped split/trim, undo, rollback, metadata and crop/keyframe preservation pass on Windows. General editor integration remains open |
 | R04 capable open-source editor | Filmcraft chosen for integration after executable Windows proof and Mark's clarification. Reuse its capable native editor; integration is unfinished |
 | R05 alternative foundation coverage | Filmcraft/Drift runtime complete; Concat/MLT screened with documented automation/distribution gaps; OpenCut watch |
