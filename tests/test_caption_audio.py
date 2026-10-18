@@ -45,6 +45,18 @@ class AudioTests(unittest.TestCase):
         return receipt
     def test_interpreter_must_be_explicit(self):
         with self.assertRaises(TypeError):m.CaptionAudioPreparer(self.ffmpeg,self.ffprobe)
+    def test_attachment_failure_closes_tool_pipes_without_claiming_stopped(self):
+        opened=[];popen=m.subprocess.Popen
+        def launch(*args,**kwargs):
+            process=popen(*args,**kwargs);opened.append(process);return process
+        with patch.object(m.subprocess,"Popen",side_effect=launch),patch.object(m,"ProcessTree",side_effect=OSError("injected attachment failure")):
+            result=self.run_job()
+        receipt=self.assert_failed(result,"PREPARATION_FAILED")
+        self.assertEqual(len(opened),1)
+        self.assertIsNotNone(opened[0].poll())
+        self.assertTrue(all(pipe.closed for pipe in (opened[0].stdin,opened[0].stdout,opened[0].stderr)))
+        self.assertEqual(receipt["commands"][0]["process_scope"]["disposition"],"unknown")
+        self.assertTrue(receipt["commands"][0]["streams_closed"])
     def test_frozen_parent_uses_configured_python_not_gui_executable(self):
         original=m.subprocess.Popen
         with patch.object(m.sys,"executable",str(self.path/"clipline.exe")),patch.object(m.sys,"frozen",True,create=True),patch.object(m.subprocess,"Popen",wraps=original) as launch:

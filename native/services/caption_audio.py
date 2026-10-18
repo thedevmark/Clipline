@@ -136,13 +136,14 @@ class CaptionAudioPreparer:
             if (before.st_size,before.st_mtime_ns,before.st_ino)!=(after.st_size,after.st_mtime_ns,after.st_ino):raise PreparationError("SOURCE_CHANGED","File changed during verification")
             return h.hexdigest()
         def run(argv,label,clock=None):
-            checkpoint();record={"label":label,"argv":argv};commands.append(record)
+            checkpoint();record={"label":label,"argv":argv,"process_scope":{"disposition":"never_started"}};commands.append(record)
             stdout=directory/(label+".stdout");stderr=directory/(label+".stderr")
             command=[str(self.python),"-u","-B","-S",str(self.gate)]
             process=tree=None;threads=[];errors=[];buffers=[bytearray(),bytearray()]
             try:
                 env=os.environ.copy();env.update(TEMP=str(directory),TMP=str(directory),PYTHONDONTWRITEBYTECODE="1")
                 process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,start_new_session=os.name!="nt",creationflags=subprocess.CREATE_NO_WINDOW if os.name=="nt" else 0)
+                record["process_scope"]={"disposition":"unknown"}
                 tree=ProcessTree(process)
                 def drain(pipe,path,limit,index):
                     try:
@@ -175,14 +176,21 @@ class CaptionAudioPreparer:
                 if process.returncode:raise PreparationError("TOOL_FAILED","Native tool returned a nonzero exit code")
                 return bytes(buffers[0])
             finally:
-                if tree:tree.stop()
+                if tree:record["process_scope"]=tree.stop()
                 elif process and process.poll() is None:process.kill()
                 if process:
                     try:process.wait(5)
                     except subprocess.TimeoutExpired:raise PreparationError("CLEANUP_FAILED","Owned tool did not terminate")
                     record["exit_code"]=process.returncode
-                for thread in threads:thread.join(2)
                 if tree:tree.close()
+                for thread in threads:thread.join(2)
+                if not any(thread.is_alive() for thread in threads) and process:
+                    for pipe in (process.stdin,process.stdout,process.stderr):
+                        if pipe is not None:pipe.close()
+                record["streams_closed"]=not any(thread.is_alive() for thread in threads) and (
+                    process is None or all(pipe is None or pipe.closed for pipe in (process.stdin,process.stdout,process.stderr)))
+                if not record["streams_closed"] or tree and os.name=="nt" and record["process_scope"]["disposition"]!="stopped":
+                    raise PreparationError("CLEANUP_FAILED","Owned tool scope or streams did not settle")
         try:
             if type(timeout) not in (int,float) or not math.isfinite(timeout) or not 0<timeout<=300:raise PreparationError("INVALID_TIMEOUT","Deadline must be finite and in (0,300]")
             if not isinstance(selection,dict):raise PreparationError("INVALID_INPUT","Selection object required")

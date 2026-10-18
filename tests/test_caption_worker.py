@@ -1,5 +1,6 @@
 import copy,hashlib,json,os,subprocess,sys,tempfile,threading,time,unittest,uuid,wave
 from pathlib import Path
+from unittest.mock import patch
 R=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(R/"native/services"))
 from caption_worker.client import CaptionClient
@@ -27,6 +28,10 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual((result.state,result.error_code),("complete",None))
         h=json.loads(result.hypothesis_path.read_text(encoding="utf-8"));self.assertEqual(h["words"],[])
         receipt=json.loads((result.directory/"receipt.json").read_text());self.assertEqual(receipt["hashes"]["hypothesis"],hashlib.sha256(result.hypothesis_path.read_bytes()).hexdigest())
+        if os.name=="nt":
+            self.assertEqual(receipt["process_scope"]["disposition"],"stopped")
+            self.assertEqual(receipt["process_scope"]["active_processes"],0)
+            self.assertTrue(receipt["streams_closed"])
         with self.assertRaises(FileExistsError):self.run_mode("success")
     def test_malformed_stdout_is_rejected(self):self.assertEqual(self.run_mode("malformed",timeout=4).error_code,"MALFORMED_PROTOCOL")
     def test_truncated_stdout_is_rejected(self):self.assertEqual(self.run_mode("truncated",timeout=4).error_code,"TRUNCATED_PROTOCOL")
@@ -40,6 +45,19 @@ class WorkerTests(unittest.TestCase):
         r=self.run_mode("unread",timeout=0.4);self.assertEqual(r.error_code,"TIMEOUT")
     def test_worker_crash_is_not_complete(self):
         r=self.run_mode("crash",timeout=4);self.assertEqual((r.state,r.error_code),("failed","WORKER_CRASH"))
+    def test_attachment_failure_closes_actual_pipes_without_claiming_stopped_scope(self):
+        opened=[];popen=subprocess.Popen
+        def launch(*args,**kwargs):
+            process=popen(*args,**kwargs);opened.append(process);return process
+        with patch("caption_worker.client.subprocess.Popen",side_effect=launch), patch("caption_worker.client.ProcessTree",side_effect=OSError("injected attachment failure")):
+            result=self.run_mode("success",timeout=4)
+        self.assertEqual(result.state,"failed")
+        self.assertEqual(len(opened),1)
+        self.assertIsNotNone(opened[0].poll())
+        self.assertTrue(all(pipe.closed for pipe in (opened[0].stdin,opened[0].stdout,opened[0].stderr)))
+        receipt=json.loads((result.directory/"receipt.json").read_text())
+        self.assertEqual(receipt["process_scope"]["disposition"],"unknown")
+        self.assertTrue(receipt["streams_closed"])
     def test_crash_after_hypothesis_preserves_partial_evidence(self):
         r=self.run_mode("partial",timeout=4);self.assertEqual((r.state,r.error_code),("partial","WORKER_CRASH"));self.assertTrue(r.hypothesis_path.exists());self.assertIsNone(r.alignment_path)
     def test_missing_terminal_is_not_complete(self):self.assertEqual(self.run_mode("missing_terminal",timeout=4).error_code,"MISSING_TERMINAL")
@@ -68,6 +86,9 @@ class WorkerTests(unittest.TestCase):
         finally:
             cancel.set();t.join(10)
         self.assertFalse(t.is_alive());self.assertEqual(holder[0].state,"cancelled")
+        if os.name=="nt":
+            scope=json.loads((holder[0].directory/"receipt.json").read_text())["process_scope"]
+            self.assertEqual((scope["disposition"],scope["active_processes"]),("stopped",0))
         if os.name=="nt":
             import ctypes
             k=ctypes.WinDLL("kernel32",use_last_error=True);k.OpenProcess.restype=ctypes.c_void_p;k.OpenProcess.argtypes=[ctypes.c_uint32,ctypes.c_int,ctypes.c_uint32]

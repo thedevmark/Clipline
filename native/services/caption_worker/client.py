@@ -74,6 +74,7 @@ class CaptionClient:
         hypothesis_words={}
         hashes={}
         process=tree=None
+        process_scope={"disposition":"never_started"}
         threads=[]
         events=queue.Queue(maxsize=8)
         violation=queue.Queue(maxsize=1)
@@ -116,6 +117,7 @@ class CaptionClient:
                 env=os.environ.copy();env.update(TEMP=str(temporary),TMP=str(temporary),TMPDIR=str(temporary),PYTHONDONTWRITEBYTECODE="1")
                 process=subprocess.Popen(self.command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,
                     start_new_session=os.name!="nt",creationflags=subprocess.CREATE_NO_WINDOW if os.name=="nt" else 0)
+                process_scope={"disposition":"unknown"}
                 tree=ProcessTree(process)
                 lifecycle("running")
                 for pipe,name,limit,parse in [(process.stdout,"stdout.jsonl",MAX_WIRE,True),(process.stderr,"stderr.log",MAX_LOG,False)]:
@@ -204,19 +206,30 @@ class CaptionClient:
             write_once(directory/"parent-error.json",{"type":type(e).__name__,"message":str(e)[:1000]})
         finally:
             if tree:
-                tree.stop()
+                process_scope=tree.stop()
+                if os.name=="nt" and process_scope["disposition"]!="stopped":error="PROCESS_CLEANUP_FAILED"
             elif process and process.poll() is None:
+                process_scope={"disposition":"unknown"}
                 process.kill()
             if process:
                 try: process.wait(timeout=5)
                 except subprocess.TimeoutExpired: error="PROCESS_CLEANUP_FAILED"
-            for t in threads: t.join(timeout=2)
             if tree: tree.close()
+            for t in threads: t.join(timeout=2)
+            if any(t.is_alive() for t in threads):error="PROCESS_CLEANUP_FAILED"
+            elif process:
+                for pipe in (process.stdin,process.stdout,process.stderr):
+                    if pipe is not None:
+                        try:pipe.close()
+                        except OSError:error="PROCESS_CLEANUP_FAILED"
+        streams_closed=all(not t.is_alive() for t in threads) and (
+            process is None or all(pipe is None or pipe.closed for pipe in (process.stdin,process.stdout,process.stderr)))
         if error and state!="cancelled": state="partial" if hypothesis else "failed"
         lifecycle(state)
         requested_id=request.get("run_id") if isinstance(request,dict) else None
         write_once(directory/"receipt.json",{"schema_version":1,"run_id":safe_run,"requested_run_id":requested_id if isinstance(requested_id,str) else None,"state":state,"error_code":error,
             "created_utc":created,"finished_utc":datetime.now(timezone.utc).isoformat(),
             "hashes":hashes,"worker_exit_code":process.returncode if process else None,
+            "process_scope":process_scope,"streams_closed":streams_closed,
             "elapsed_seconds_uncontrolled":time.monotonic()-started,"accepted_corrections_modified":False})
         return RunResult(state,error,directory,hypothesis,alignment)
