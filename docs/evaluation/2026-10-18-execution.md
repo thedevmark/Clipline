@@ -1,0 +1,126 @@
+# Clipline implementation evidence and handoff
+
+Updated: 2026-10-18. State: W0 executing. Product implementation is now authorized by Mark's instruction to execute the full master plan with agents. Public release, publishing, and paid model use remain separate boundaries.
+
+## Ownership and preserved baseline
+
+- Product checkout: `C:/Users/mark/.codex/worktrees/clipline-rebuild/clipline`.
+- Branch: `codex/clipline-rebuild`; base: `4b0822c0f36cb6335660ec83580fa836518e40d7`.
+- Original checkout: `D:/Documents/GitHub/clipline`; preserve its dirty files and `.zcode/`.
+- Copied input snapshot: the three dirty Homebase UI/state files, `homebase_delivery.py`, its test, the master plan, technical spec, and hook/CTA playbook. Copying these establishes the implementation baseline, not authorship or release verification.
+- Local-only large/private artifacts: `%LOCALAPPDATA%/clipline/evaluation/2026-10-18/`.
+- Runtime evidence belongs beside pinned candidate builds and fixtures. Do not commit real source media, credentials, signed URLs, or private Premiere projects.
+
+Local implementation commits (not pushed): `33847a1` source-preserving landscape exports; `9d0ed3d` shared assets/versioned Creator Kits; `b698571` committed native generations. The copied Homebase work remains unstaged and byte-identical to the original checkout. Parent and independent checks are recorded below.
+
+## Team and write boundaries
+
+| Agent | Role | Write boundary |
+| --- | --- | --- |
+| `/root` | Controller, shared fixtures/harness, product integration, acceptance ledger | Product checkout and shared local evaluation manifests |
+| `/root/creator_kit_architecture` | Filmcraft executable evaluation | Local evaluation `filmcraft/` only |
+| `/root/caption_decision_review` | Drift executable evaluation and reserve screening | Local evaluation `drift/` only |
+| `/root/creative_workflow_review` | Premiere/current-product baseline and real-media inventory | Local evaluation `baseline/` and owned Premiere UI only |
+
+Agents inherit the session model. The exact model identifier is not exposed in their tool results. Parent integrates files after inspecting artifacts; there is one writer in the product checkout.
+
+## Work-package ledger
+
+| Package | State | Evidence / next gate |
+| --- | --- | --- |
+| W0: baseline and engine proof | Running; executable trials and Windows native proof complete | Filmcraft advances to integration; editor widget/cancellation/resource gates remain. Premiere copy now open, functional baseline running |
+| W1: Creator Library / Kit | Persistence slice integrated; incomplete | Shared identity, versioned Kits, conflict handling and bounded metadata pages pass tests. Native generations, jobs, retention, migration and UI remain |
+| W2: Twitch intake | Pending W1 | Source provenance, actual account import, paging/deduplication, context |
+| W3: editor / linked outputs | Pending W0/W1 | Native document authority, manual override preservation, performance |
+| W4: caption quality | Pending transcript and engine contracts | Managed local workers, corrections, measured repair effort |
+| W5: creative recipes | Policy ready; implementation pending | Hooks, subtitles, transitions, music/SFX, CTA |
+| W6: optional Jev | Evaluation design ready; no API access used | Opt-in data/cost boundary; local product does not depend on it |
+| W7: outputs / Homebase / results | Pending W3-W5 | Immutable jobs, verified exports, idempotent delivery, real analytics |
+| W8: migration / release candidate | Pending | Clean Windows package, rollback, matched workflow benchmark |
+
+## Cumulative acceptance ledger
+
+| Requirement | Current implementation evidence |
+| --- | --- |
+| R01 Twitch stream-to-post direction | Master plan; runtime not complete |
+| R02 clip-first / context / local sources | Existing source inspected; connected-account evaluation pending |
+| R03 linked landscape/portrait | Native Filmcraft grouped split/trim, undo, rollback, metadata and crop/keyframe preservation pass on Windows. General editor integration remains open |
+| R04 capable open-source editor | Filmcraft chosen for integration after executable Windows proof and Mark's clarification. Reuse its capable native editor; integration is unfinished |
+| R05 alternative foundation coverage | Filmcraft/Drift runtime complete; Concat/MLT screened with documented automation/distribution gaps; OpenCut watch |
+| R06 rebuild-versus-extend | Selective core rebuild accepted as implementation direction; engine choice pending |
+| R07 lag / small projects | 10,000 moment metadata test uses bounded keyset pages without media access. UI latency and Premiere comparison remain unmeasured |
+| R08 Creator Kit / asset reuse | SQLite asset/Kit/moment core integrated; Filmcraft native template instantiated and rebound to another source. No Creator Kit UI yet |
+| R09 fewer caption repairs | Actual baseline corpus and manual repairs unmeasured |
+| R10 WhisperX / useful caption reuse | Isolated CPU ASR+WhisperX alignment and cached-assets replay pass; quality default, correction persistence and managed packaging remain |
+| R11 Jev / clipping decisions | Primary-source research; no paid requests or outbound media |
+| R12 hook document / measured winners | Playbook exists; no fabricated performance rows |
+| R13 editable subtitles | Candidate native SRT/title/caption renders tested; Filmcraft sampled preview/export checked. Full styled-word parity remains open |
+| R14 transitions / creative assets | Filmcraft centered dissolve sampled endpoints/midpoint and unchanged frame count pass. Drift transition command/render exercised. Full recipe set remains open |
+| R15 CTAs | Playbook policy; editable application pending |
+| R16 reuse / suitable open source | Source reuse map and executable foundation evaluation |
+| R17 exports / Homebase / learning | Copied unfinished Homebase contract as baseline; runtime verification pending |
+| R18 orchestration | Isolated branch, three bounded agent units, one integration owner, evidence ledger |
+
+Carry forward technical-spec A01-A20. A command-line import/export cannot close UI, caption accuracy, human repair-time, linked-edit transaction, or live publishing checks.
+
+## Baseline and measurement rules
+
+Synthetic fixtures verify media behavior only. They contain test patterns, colored edge/facecam regions, and tones; no real speech. They cannot establish gaming quality, ASR accuracy, or creator preference. Real media stays local, with fingerprints and probe receipts.
+
+Concurrent functional tests record automation wall time with uncontrolled resource contention. They are not exclusive performance benchmarks or Mark's hands-on editing times. Schedule an uncontended run before judging latency, playback, or comparative throughput.
+
+Do not overwrite original Premiere projects. Use an evaluation copy or a new project. Warm/cold cache conditions, versions, project scope, media fingerprints, output specification, UI automation versus observed human time, and failures must accompany each baseline result.
+
+## Initial checks and failures
+
+- `python -m pytest -q` failed before collection because an unrelated globally installed xonsh pytest plugin requires a Windows console. This is an environment failure, not a passing test or a demonstrated product failure. Retry with plugin autoload disabled for this process only.
+- Four reproducible fixture files and probes were generated successfully: 1080p60 with audio, 1080p60000/1001 with audio, 1080x1920 without audio, and 4K60 with audio. A separate authored SRT is a rendering fixture, not a transcript.
+- Candidate trials, baseline receipts, test outcomes, and the foundation ADR are added only after outputs are inspected.
+
+## Observed results: first execution checkpoint
+
+### Executable foundation trials
+
+Filmcraft v0.9.0 (`4a69a038d32761f604b3c7e4845b21fb40b3cbe4`) and Drift v0.8.0 (`e4a500c38002e73a161ebcc24b2cad5cf4fe2c8e`) portable Windows downloads match both publisher checksums and GitHub asset digests. Local reports and raw receipts are in `filmcraft/` and `drift/` beneath the evidence root. This pins what ran; it does not certify dependencies or release licensing.
+
+Filmcraft passed native import/edit/save/reopen, razor/undo/redo, dual exports, source crop layers, editable captions/titles/SRT, explicit caption burn-in, template source replacement, fingerprint-verified Unicode relink, NTSC output, silent input, UHD preview and real gameplay exports. A centered dissolve retained 240 frames; sampled red/midpoint/blue values confirmed the blend. Its CLI batch is not one undo action. Native `Session::edit_group` and supported sequence metadata are now being tested as the shared edit gateway. A separate GUI integration and crash-recovery proof still matter.
+
+Drift passed headless Windows commands, native persistence and layered gameplay/facecam renders. Its failed compound command retained the successful prefix; `undo_to` restored it. SRT import initially extended a four-second sequence to thirty seconds until duration was explicit. Changing the canvas alone left subtitle geometry wrong. The explicit `60000/1001` string and denominator field failed schema validation; numeric 59.94 produced exact packet spacing in the tested export, with unusual average-rate metadata. These are integration obligations, not issues to hide behind a successful export.
+
+Concat v0.2.7 has Windows packages, but its documented release automation does not match a shipped MCP claim; native GUI Remote settings or a source build are required. MLT v7.42.0 release screening found source distribution rather than a ready Windows GitHub binary. Neither reserve was executed. No full production adapter is selected.
+
+Mark then clarified that Filmcraft supplies the Premiere-style editor. Filmcraft is now the chosen integration direction; Drift remains reserve. Work now concentrates on Clipline's Twitch workflow and the real native integration boundaries, rather than more generic editor comparisons. Mark can provide Premiere workflow context; reported time estimates remain distinct from instrumented measurements.
+
+### Premiere and existing Clipline
+
+Premiere 25.1.0 is installed. A private evaluation copy of the existing project preserves the original fingerprint. The original has 78 unique referenced paths, all present. XML element counts describe structure; they are not a count of user-visible projects or proof of lag. Windows automation initially failed dialog activation. Mark opened the copy, and the agent restored the minimized window through its observed Maximize control. The existing `_TEMPLATE Copy 22` portrait gameplay/facecam/text composition played with visible audio activity. Its bounded export completed: H.264 2160x3840, 60000/1001, 1081 frames, 18.034683 seconds, AAC stereo 48 kHz. The evaluation copy was saved; the original fingerprint remains unchanged. This project/source differs from the shared gameplay fixture, so it is a functional template baseline, not a matched comparison. Open time, manual caption repair and uncontended playback metrics remain unknown.
+
+Mark's reported routine baseline is **two hours per one minute of finished clip**. This is his workflow estimate, not an instrumented editing/export duration. The breakdown among hands-on edits, waiting, captions and rebuilding templates remains unknown. The initial engineering target is **ten minutes per finished minute** for a routine clip with an established Kit, including preparation and both outputs. Record end-to-end and hands-on time separately; do not exclude caption repairs or setup failures to reach the target. Measure one-time Kit onboarding separately. Ten minutes is a target, not a demonstrated result.
+
+Current Clipline's whisper.cpp `base.en-q5_1` completed the 34.916-second real gameplay source with a two-thread evaluation wrapper. It produced 23 word records in 10.878 seconds including extraction. This is an uncontrolled automation duration. The transcript has no reviewed reference, so accuracy and repair savings remain unknown. Different recognition runs produced different wording. A stronger local caption evaluation is now assigned.
+
+The bounded caption trial has now completed on matching 0..18-second real gameplay audio. Current whisper.cpp and cached faster-whisper small hypotheses were retained. An isolated Python 3.12 / WhisperX 3.8.6 / CPU Torch profile ran faster-whisper ASR plus English forced alignment; cached-assets replay passed. All 13 aligned word records have in-span bounds with interpolation disabled. No listening reference exists, so recognition/timing accuracy and repair savings remain unmeasured. This trial does not qualify large-v3, CUDA, diarization, or WhisperX's complete default ASR CLI. Python 3.14 is unsupported by this profile. PyAV 19 file-path decoding conflicted with faster-whisper 1.2.1; prepared FFmpeg-to-NumPy PCM avoided that path without vendor patches. The optional installed package payload measured about 2.02 GB plus 377.7 MB alignment weights. Pin and qualify a managed optional profile before shipping. The [caption evidence contract](caption-evidence-contract.md) records W4 ownership; local raw results are in `drift/caption-evaluation/`.
+
+The legacy Clipline render baseline reproduced two defects: landscape applied a portrait crop first, discarding both source-edge signatures; both formats had non-square sample aspect ratios. The baseline receipts remain unchanged in `current-clipline-v2/`, including the stronger final audit that rejects pixel geometry.
+
+The product fix fits the complete original display frame into landscape and normalizes square pixels before subtitle rendering. A rendered regression failed for all three styles before the fix and passes after it. Fresh six-second 1080p60 exports in `current-clipline-fixed/` pass dimensions, square pixels, video duration, frame count, expected audio and full decoding. Landscape retains both five-color source-edge signatures. Portrait retains the intentional crop. These tests do not establish uniform cadence, A/V synchronization or whole-timeline visual parity.
+
+### Integrated persistence slice
+
+`native/core/creator_library.py` owns stable asset UUIDs keyed by SHA256, verified explicit relocation, immutable Kit versions and bindings, pinned moment references, semantic property overrides, explicit three-way update conflicts and revision guards. It copies no source media. The parent reviewed the returned prototype and strengthened the SQL binding guard to reject extra historical roles. Metadata listing uses keyset pagination and cannot load media. The 10,000-moment test reads 73 bounded pages with media opens forbidden; this is correctness evidence, not an editor latency benchmark.
+
+Parent-run combined check after ProjectStore integration: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q` — **105 passed, 821 subtests passed**. After adding an anamorphic landscape regression, the affected export/store tests passed: **8 passed, 13 subtests passed**. These checks include copied baseline Homebase tests in the combined run; they do not prove live delivery. The product currently exposes no library UI. Durable jobs, backups, retention, migration and engine wiring are unfinished.
+
+`native/core/project_store.py` now publishes immutable native documents through one atomic current pointer on Windows. Actual child-process interruption, competing writer, stale publication and corrupt-document tests pass. Parent also stored the real Filmcraft FCProj, reloaded identical bytes, and independently reopened/rendered it through the Windows release. Publication revisions advance independently of undoable native metadata and engine session counters. This proves process-interruption behavior, not power-loss durability or a wired autosave path.
+
+See the [foundation evaluation](2026-10-18-foundation-evaluation.md) for the current decision and evidence. Filmcraft's native transaction proof now runs as a real Windows EXE. Parent independently replayed shared split, stale rejection and undo. The proof's fixed-unit assumptions and snapshot boundary require refinement before product integration. The agent is preparing that bounded package; no raw native widget bypass is accepted as a complete linked editor.
+
+Independent review closed the fixture and export findings. Six independently rendered landscape/portrait cases and one anamorphic case passed; twelve selected persistence/store tests also passed. Receipt: `baseline/final-review-receipt.md`. The native editor integration review then identified a different issue: `Session::execute` publishes persistence/LiveMix after each nested command even within `edit_group`. Rollback restores the document but not those external observations. A concrete repro and minimal engine-owner correction are the next gate; the proof's unarmed autosave must not hide that production obligation.
+
+### Next dependency gates
+
+1. Integrate a reviewed Filmcraft gateway package after removing/restricting fixed proof assumptions. Identify the native editor command interception owner and test cancellation/retry/resource behavior.
+2. Finish independent review of the export repair and integrated Creator Library core; fix material findings.
+3. Finish the opened Premiere template baseline, then run matched measurements under exclusive resource conditions. Preserve unknown human-time and caption-accuracy fields.
+4. Wire the chosen native engine and matching-generation persistence before connecting moment editing to the new library. Complete W1 jobs/retention/recovery, then W2 intake and W3 editor.
+5. Carry R01–R18 and technical A01–A20 through W4–W8. Local caption preparation can proceed independently; Jev remains optional and unused.
