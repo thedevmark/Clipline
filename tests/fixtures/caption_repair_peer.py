@@ -33,6 +33,8 @@ while True:
         error = None
         if command == 'project.inspect':
             reply = {'path': data['working'], 'revision': state['revision'], 'dirty': True, 'root': {}}
+        elif command == 'metadata.get' and state['pin'] is None:
+            reply = {'item': 5, 'metadata': {}}
         elif command == 'metadata.get':
             reply = {
                 'item': 5,

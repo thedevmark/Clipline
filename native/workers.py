@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, Signal, Slot, Qt, QCoreApplication
 
 
 class WorkerJob(QObject):
@@ -45,12 +45,68 @@ class WorkerJob(QObject):
         self.finished.emit(result)
 
 
+class _JobCallbacks(QObject):
+    """Deliver worker events through an unambiguous QObject on the GUI thread."""
+
+    def __init__(self, owner, thread, job, callbacks):
+        super().__init__()
+        self.owner = owner
+        self.thread_owner = thread
+        self.job = job
+        self.callbacks = callbacks
+        self.terminal_delivered = False
+        self.thread_complete = False
+
+    @Slot(str)
+    def deliver_progress(self, value):
+        callback = self.callbacks['progress']
+        if not self.terminal_delivered and callback is not None:
+            callback(value)
+
+    @Slot(float)
+    def deliver_progress_pct(self, value):
+        callback = self.callbacks['progress_pct']
+        if not self.terminal_delivered and callback is not None:
+            callback(value)
+
+    def _terminal(self, name, value):
+        if self.terminal_delivered:
+            return
+        try:
+            callback = self.callbacks[name]
+            if callback is not None:
+                callback(value)
+        finally:
+            self.terminal_delivered = True
+            self.owner._drop(self.thread_owner, self.job)
+
+    @Slot(object)
+    def deliver_finished(self, value):
+        self._terminal('finished', value)
+
+    @Slot(str)
+    def deliver_error(self, value):
+        self._terminal('error', value)
+
+    @Slot()
+    def thread_finished(self):
+        self.thread_complete = True
+        self.owner._drop(self.thread_owner, self.job)
+
+
 class JobRunner:
-    """Owns running QThread/WorkerJob pairs for the life of the app."""
+    """Own worker pairs and GUI callback relays until delivery and thread exit."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._jobs: List[tuple[QThread, WorkerJob]] = []
+        self._callbacks: dict[QThread, _JobCallbacks] = {}
+
+    @staticmethod
+    def _require_gui_thread():
+        application = QCoreApplication.instance()
+        if application is None or QThread.currentThread() != application.thread():
+            raise RuntimeError('JobRunner requires the Qt application thread')
 
     def run(
         self,
@@ -62,41 +118,60 @@ class JobRunner:
         on_error: Optional[Callable[[str], None]] = None,
         **kwargs,
     ) -> WorkerJob:
+        self._require_gui_thread()
         job = WorkerJob(fn, *args, **kwargs)
         thread = QThread()
+        relay = _JobCallbacks(self, thread, job, {
+            'progress': on_progress,
+            'progress_pct': on_progress_pct,
+            'finished': on_finished,
+            'error': on_error,
+        })
         job.moveToThread(thread)
         thread.started.connect(job.run)
-
-        if on_progress is not None:
-            job.progress.connect(on_progress)
-        if on_progress_pct is not None:
-            job.progress_pct.connect(on_progress_pct)
-        if on_finished is not None:
-            job.finished.connect(on_finished)
-        if on_error is not None:
-            job.errored.connect(on_error)
-
-        job.finished.connect(thread.quit)
-        job.errored.connect(thread.quit)
-        thread.finished.connect(lambda: self._drop(thread, job))
-
+        queued = Qt.ConnectionType.QueuedConnection
+        job.progress.connect(relay.deliver_progress, queued)
+        job.progress_pct.connect(relay.deliver_progress_pct, queued)
+        job.finished.connect(relay.deliver_finished, queued)
+        job.errored.connect(relay.deliver_error, queued)
+        # QThread.quit is thread-safe. Exit cannot depend on the GUI loop
+        # remaining active after a terminal callback calls application.quit().
+        direct = Qt.ConnectionType.DirectConnection
+        job.finished.connect(thread.quit, direct)
+        job.errored.connect(thread.quit, direct)
+        thread.finished.connect(job.deleteLater)
+        thread.finished.connect(relay.thread_finished, queued)
         with self._lock:
             self._jobs.append((thread, job))
+            self._callbacks[thread] = relay
         thread.start()
         return job
 
     def _drop(self, thread: QThread, job: WorkerJob) -> None:
         with self._lock:
+            relay = self._callbacks.get(thread)
+            if relay is None or not relay.terminal_delivered or not relay.thread_complete:
+                return
             self._jobs = [pair for pair in self._jobs if pair[0] is not thread]
+            del self._callbacks[thread]
         thread.deleteLater()
-        job.deleteLater()
+        relay.deleteLater()
 
     def wait_all(self, timeout_ms: int = 60_000) -> None:
-        """Block until every running job finishes. Used by ``--selftest``."""
+        """Wait finitely; retain pairs whose terminal delivery remains unsettled."""
+        self._require_gui_thread()
+        if type(timeout_ms) is not int or not 0 <= timeout_ms <= 2**31 - 1:
+            raise ValueError('timeout_ms must be a finite nonnegative integer')
         with self._lock:
             running = list(self._jobs)
-        for thread, _ in running:
-            thread.wait(timeout_ms)
+        for thread, job in running:
+            if thread.wait(timeout_ms):
+                with self._lock:
+                    relay = self._callbacks.get(thread)
+                if relay is not None:
+                    relay.thread_complete = True
+                    self._drop(thread, job)
+
 
 
 def ffmpeg_export(
