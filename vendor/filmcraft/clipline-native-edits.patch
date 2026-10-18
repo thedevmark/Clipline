@@ -1,9 +1,11 @@
 diff --git a/Cargo.lock b/Cargo.lock
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -1935,6 +1935,7 @@
+@@ -1934,7 +1934,9 @@
+  "log",
   "serde",
   "serde_json",
++ "sha2",
   "thiserror 2.0.21",
 + "uuid",
   "web-time",
@@ -12,7 +14,7 @@ diff --git a/Cargo.lock b/Cargo.lock
 diff --git a/crates/engine/Cargo.toml b/crates/engine/Cargo.toml
 --- a/crates/engine/Cargo.toml
 +++ b/crates/engine/Cargo.toml
-@@ -39,11 +39,12 @@
+@@ -39,11 +39,13 @@
  filmcraft-speech = { workspace = true }
  filmcraft-tts = { workspace = true }
  serde = { workspace = true }
@@ -23,9 +25,536 @@ diff --git a/crates/engine/Cargo.toml b/crates/engine/Cargo.toml
  craft-docpath = { workspace = true }
  web-time = "1"
 +uuid = { version = "=1.26.1", features = ["v4", "js"] }
++sha2 = "=0.10.9"
  
  [dev-dependencies]
  filmcraft-testkit = { workspace = true }
+diff --git a/crates/engine/src/accepted_captions.rs b/crates/engine/src/accepted_captions.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/engine/src/accepted_captions.rs
+@@ -0,0 +1,521 @@
++//! Accepted CreatorLibrary words projected by native clip timing into linked caption tracks.
++use std::collections::{BTreeMap, BTreeSet};
++use filmcraft_edit::transcript::{CaptionRules, SeqWord, caption_blocks};
++use filmcraft_project::{Caption, ClipId, ItemId, MediaIdentity, Project};
++use filmcraft_time::{Tick, TICKS_PER_SECOND};
++use serde::{Deserialize, Serialize};
++use serde_json::{Value, json};
++use sha2::{Digest, Sha256};
++use crate::{EngineError, Result, Session, linked_edits};
++
++const KEY: &str = "clipline.acceptedCaptions.v1";
++const PREFIX: &str = "clipline-cue-";
++const MAX_INPUT: usize = 2 * 1024 * 1024;
++const MAX_METADATA: usize = 8 * 1024 * 1024;
++const MAX_WORDS: usize = 5000;
++const MAX_OCCURRENCES: usize = 512;
++const MAX_PINS: usize = 256;
++const MAX_SESSION_PINS: usize = 4096;
++
++fn bad(message: impl Into<String>) -> EngineError {
++    EngineError::BadParams { cmd: "clipline.acceptCaptions".into(), msg: message.into() }
++}
++fn encoded<T: Serialize>(value: &T) -> Result<String> {
++    serde_json::to_string(value).map_err(|e| bad(e.to_string()))
++}
++fn digest<T: Serialize>(value: &T) -> Result<String> {
++    // Value maps use sorted keys, making this independent of Rust struct field order.
++    let value = serde_json::to_value(value).map_err(|e| bad(e.to_string()))?;
++    Ok(format!("{:x}", Sha256::digest(encoded(&value)?.as_bytes())))
++}
++fn uuid(value: &str) -> Result<()> {
++    if uuid::Uuid::parse_str(value).ok().is_none_or(|v| v.to_string() != value) {
++        return Err(bad("canonical UUID required"));
++    }
++    Ok(())
++}
++fn sha(value: &str) -> bool { value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) }
++fn object(value: &Value, maximum: usize) -> Result<()> {
++    if !value.is_object() || encoded(value)?.len() > maximum { return Err(bad("bounded provenance object required")); }
++    Ok(())
++}
++fn us(value: i64) -> Result<Tick> {
++    if value < 0 { return Err(bad("negative source microseconds")); }
++    let ticks = value.checked_mul(TICKS_PER_SECOND / 1_000_000).ok_or_else(|| bad("source microseconds exceed native Tick range"))?;
++    if ticks >= Tick::MAX.0 { return Err(bad("source microseconds exceed supported native range")); }
++    Ok(Tick(ticks))
++}
++pub(crate) fn preflight(s:&Session,id:&str)->Result<()> {
++    if id=="clipline.acceptCaptions" && (s.trim_play.active() || s.edit_group_depth!=0) {
++        return Err(bad("acceptance requires a completed native edit state"));
++    }
++    if id=="clipline.acceptCaptions" {linked_edits::validate_document(&s.project)?;}
++    Ok(())
++}
++
++#[derive(Clone, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Timing { start_us: Option<i64>, end_us: Option<i64>, status: String }
++#[derive(Clone, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Word {
++    id: String, text: String, timing: Timing, timing_provenance: Value,
++    text_origin: String, parent_word_ids: Vec<String>, machine_refs: Vec<Value>,
++}
++#[derive(Clone, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Accepted {
++    transcript_id: String, revision: u64, parent_revision: Option<u64>,
++    words: Vec<Word>, created_utc: String,
++}
++#[derive(Clone, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct ProjectionInput { accepted: Accepted, identity: Value }
++#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
++#[serde(deny_unknown_fields)]
++struct Pin { transcript_id: String, revision: u64, payload_sha256: String }
++#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
++#[serde(deny_unknown_fields, rename_all = "camelCase")]
++struct Source { source_item: u64, resolved_media_item: u64, stored_media_identity: MediaIdentity }
++#[derive(Clone, Serialize, Deserialize)]
++#[serde(deny_unknown_fields, rename_all = "camelCase")]
++struct Rules {
++    max_chars: usize, lines: usize, min_duration_us: i64, max_duration_us: i64,
++    gap_frames: i64, break_pause_us: i64,
++}
++impl Rules {
++    fn native(&self) -> Result<CaptionRules> {
++        if !(1..=512).contains(&self.max_chars) || !(1..=4).contains(&self.lines)
++            || !(0..=10_000_000).contains(&self.min_duration_us)
++            || !(1..=60_000_000).contains(&self.max_duration_us)
++            || self.min_duration_us > self.max_duration_us || !(0..=60).contains(&self.gap_frames)
++            || !(0..=10_000_000).contains(&self.break_pause_us) {
++            return Err(bad("caption rules exceed supported bounds"));
++        }
++        Ok(CaptionRules { max_chars:self.max_chars, lines:self.lines,
++            min_duration:us(self.min_duration_us)?, max_duration:us(self.max_duration_us)?,
++            gap_frames:self.gap_frames, break_pause:us(self.break_pause_us)? })
++    }
++}
++#[derive(Clone, Serialize, Deserialize)]
++#[serde(deny_unknown_fields, rename_all = "camelCase")]
++struct Track { sequence: u64, track: u64, rules: Rules, default_settings: String }
++#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
++#[serde(deny_unknown_fields, rename_all = "camelCase")]
++struct Cue {
++    sequence: u64, track: u64, native_id: u64, cue_id: String, word_ids: Vec<String>,
++    start: Tick, duration: Tick, text: String,
++}
++#[derive(Clone, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Metadata {
++    schema: u32, owner: u64, pin: Pin, input: ProjectionInput, source: Source,
++    tracks: Vec<Track>, cues: Vec<Cue>, pins: Vec<Pin>,
++}
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields, rename_all = "camelCase")]
++struct Request {
++    owner: u64, expected_project_path: Option<String>, expected_revision: u64,
++    expected_links_revisions: Value, expected_accepted_revision: Option<Pin>,
++    projection_input: ProjectionInput, source: Source, tracks: Vec<Track>,
++}
++
++fn read(project: &Project, owner: ItemId) -> Result<Option<Metadata>> {
++    let Some(text) = project.item(owner).and_then(|i| i.metadata.get(KEY)) else { return Ok(None) };
++    if text.len() > MAX_METADATA { return Err(bad("accepted caption metadata exceeds size bound")); }
++    serde_json::from_str(text).map(Some).map_err(|e| bad(format!("invalid accepted caption metadata: {e}")))
++}
++fn validate_input(input: &ProjectionInput) -> Result<()> {
++    if encoded(input)?.len() > MAX_INPUT { return Err(bad("accepted input exceeds size bound")); }
++    let accepted = &input.accepted;
++    uuid(&accepted.transcript_id)?;
++    if accepted.revision == 0 || accepted.parent_revision.is_some_and(|r| r >= accepted.revision)
++        || accepted.created_utc.is_empty() || accepted.created_utc.len() > 128 || accepted.words.len() > MAX_WORDS {
++        return Err(bad("invalid pinned transcript revision"));
++    }
++    let identity = input.identity.as_object().ok_or_else(|| bad("source identity required"))?;
++    if identity.len() != 3 || !identity.contains_key("source") || !identity.contains_key("audio") || !identity.contains_key("range") {
++        return Err(bad("identity requires source/audio/range"));
++    }
++    object(&input.identity, 65536)?;
++    let source = &input.identity["source"];
++    uuid(source["asset_id"].as_str().ok_or_else(|| bad("source asset UUID required"))?)?;
++    if !source["sha256"].as_str().is_some_and(sha) { return Err(bad("original source SHA provenance required")); }
++    let audio = &input.identity["audio"];
++    if !audio["pcm_sha256"].as_str().is_some_and(sha) || !audio["wav_sha256"].as_str().is_some_and(sha)
++        || audio["sample_zero_source_us"].as_i64().is_none_or(|v| v < 0) {
++        return Err(bad("canonical extraction identity required"));
++    }
++    let range = &input.identity["range"];
++    let lo = us(range["start_us"].as_i64().ok_or_else(|| bad("source range start required"))?)?;
++    let hi = us(range["end_us"].as_i64().ok_or_else(|| bad("source range end required"))?)?;
++    if lo >= hi { return Err(bad("invalid source range")); }
++    let bounded_integer=|v:&Value,min:i64,max:i64|v.as_i64().filter(|v|*v>=min && *v<=max).ok_or_else(||bad("invalid canonical audio identity"));
++    let rate=bounded_integer(&audio["sample_rate"],1,384000)?;
++    let count=bounded_integer(&audio["sample_count"],1,i64::MAX)?;
++    bounded_integer(&audio["channels"],1,32)?;
++    bounded_integer(&audio["sample_width"],1,8)?;
++    let zero=bounded_integer(&audio["sample_zero_source_us"],0,i64::MAX)?;
++    let range_start=range["start_us"].as_i64().ok_or_else(||bad("source start required"))?;
++    let range_end=range["end_us"].as_i64().ok_or_else(||bad("source end required"))?;
++    if range_start<zero || i128::from(range_end-zero)*i128::from(rate)>i128::from(count)*1_000_000 {
++        return Err(bad("source range exceeds canonical prepared sample clock"));
++    }
++    let extraction=&audio["extraction"];
++    if extraction["source_sha256"]!=source["sha256"]
++        || extraction["tool_version"].as_str().is_none_or(str::is_empty)
++        || extraction["argv"].as_array().is_none_or(|a|a.is_empty() || a.len()>256 || a.iter().any(|v|v.as_str().is_none_or(|s|s.len()>4096))) {
++        return Err(bad("bound extraction provenance required"));
++    }
++    let mut previous = lo;
++    let mut ids = BTreeSet::new();
++    for word in &accepted.words {
++        uuid(&word.id)?;
++        if !ids.insert(&word.id) || word.text.is_empty() || word.text.chars().count() > 512
++            || word.text.chars().any(|c| c.is_whitespace() || c.is_control()) {
++            return Err(bad("invalid or duplicate accepted word"));
++        }
++        if !matches!(word.timing.status.as_str(), "aligned" | "manually_timed" | "inherited") {
++            return Err(bad("missing, unresolved or interpolated words require explicit timing review"));
++        }
++        let a = us(word.timing.start_us.ok_or_else(|| bad("accepted word has no source start"))?)?;
++        let b = us(word.timing.end_us.ok_or_else(|| bad("accepted word has no source end"))?)?;
++        if a < previous || a < lo || b <= a || b > hi { return Err(bad("accepted words must be ordered inside source range")); }
++        previous = b;
++        object(&word.timing_provenance,4096)?;
++        if word.timing_provenance.as_object().is_none_or(|v| v.is_empty())
++            || !matches!(word.text_origin.as_str(), "machine_accepted" | "human")
++            || word.parent_word_ids.len() > MAX_WORDS || word.machine_refs.len() > 64 {
++            return Err(bad("invalid canonical word provenance"));
++        }
++        let mut parents = BTreeSet::new();
++        for parent in &word.parent_word_ids {
++            uuid(parent)?;
++            if parent == &word.id || !parents.insert(parent) { return Err(bad("invalid parent word identity")); }
++        }
++        for reference in &word.machine_refs { object(reference,4096)?; }
++    }
++    Ok(())
++}
++
++fn escape(text: &str) -> String {
++    text.replace('&',"&amp;").replace('<',"&lt;").replace('>',"&gt;").replace('{',"&#123;")
++}
++
++/// Build content from native gameplay source intervals. Clip/unit IDs never enter cue identity.
++fn projected(project: &Project, m: &Metadata) -> Result<Vec<Cue>> {
++    let (sequences, clips) = linked_edits::caption_bindings(project,ItemId(m.owner))?;
++    if clips.len() > MAX_OCCURRENCES || m.tracks.len() != 3 { return Err(bad("caption occurrence/track bound exceeded")); }
++    let mut track_ids = BTreeSet::new();
++    for sequence in sequences {
++        let tracks: Vec<_> = m.tracks.iter().filter(|t| t.sequence == sequence.0).collect();
++        if tracks.len() != 1 || !track_ids.insert(tracks[0].track) { return Err(bad("one distinct managed track per linked sequence required")); }
++        tracks[0].rules.native()?;
++        if tracks[0].default_settings.len() > 1024 || tracks[0].default_settings.chars().any(|c| c.is_control()) {
++            return Err(bad("bounded caption settings required"));
++        }
++        if project.sequence(sequence).is_none_or(|q| !q.caption_tracks.iter().any(|t| t.id.0 == tracks[0].track)) {
++            return Err(bad("managed caption track missing"));
++        }
++    }
++    let (resolved, media, _) = project.resolve_media(ItemId(m.source.source_item)).ok_or_else(|| bad("accepted source cannot resolve"))?;
++    if resolved.0 != m.source.resolved_media_item || media.identity != Some(m.source.stored_media_identity)
++        || !project.source_streams(ItemId(m.source.source_item)).1 {
++        return Err(bad("accepted native source/import identity differs"));
++    }
++    let primary=media.info.audio().ok_or_else(||bad("native source audio missing"))?;
++    let channels=primary.channels;
++    let expected_channels:Vec<Value>=(0..channels).map(|i|json!(i)).collect();
++    let selected=&m.input.identity["audio"]["extraction"]["selected_stream"];
++    let global=m.input.identity["source"]["audio_stream_index"].as_u64().filter(|i|*i<=64);
++    let selected_rate=selected["sample_rate"].as_u64().or_else(||selected["sample_rate"].as_str().and_then(|s|s.parse::<u64>().ok()));
++    // Native MediaInfo has audio ordinals, not global container IDs. With a single native
++    // audio stream, the canonical selected-stream probe maps that stream to primary ordinal0.
++    // The caller owns fresh source/probe verification; stored import identity is not a full SHA.
++    if media.info.audio_streams.len()!=1 || channels==0 || channels>32 || global.is_none()
++        || selected["index"].as_u64()!=global || selected["codec_type"]!="audio"
++        || selected["channels"].as_u64()!=Some(u64::from(channels)) || selected_rate!=Some(u64::from(primary.sample_rate))
++        || m.input.identity["source"]["channels"]!=json!(expected_channels) {
++        return Err(bad("prototype requires an unambiguous canonical selected stream matching sole native audio and all source channels"));
++    }
++    let accepted_end=us(m.input.identity["range"]["end_us"].as_i64().ok_or_else(||bad("source range end missing"))?)?;
++    if media.info.duration.0<=0 || accepted_end>media.info.duration {return Err(bad("accepted source range exceeds native media duration"));}
++    // markskill: one nonoverlapping source occurrence set; ceiling:512 clips, one source per owner;
++    // revisit when repeated overlapping dialogue or a second accepted source is required.
++    let mut spans = Vec::new();
++    for peers in &clips {
++        let c = &peers[0];
++        let (id, _, subclip) = project.resolve_media(c.item).ok_or_else(|| bad("gameplay source cannot resolve"))?;
++        if id != resolved || !c.enabled || !project.source_streams(c.item).1 {
++            return Err(bad("caption owner requires enabled gameplay with the pinned source audio"));
++        }
++        let end = c.source_in.0.checked_add(c.duration.0).ok_or_else(|| bad("native source interval overflow"))?;
++        if subclip.is_some_and(|r| c.source_in < r.start || Tick(end) > r.end()) {
++            return Err(bad("native gameplay exceeds Subclip source bounds"));
++        }
++        if spans.iter().any(|&(a,b)| c.source_in.0 < b && a < end) {
++            return Err(bad("ambiguous repeated overlapping source occurrence"));
++        }
++        spans.push((c.source_in.0,end));
++        for (peer,seq) in peers.iter().zip(sequences) {
++            let q = project.sequence(seq).ok_or_else(|| bad("linked sequence missing"))?;
++            let audio: Vec<_> = q.audio_tracks.iter().flat_map(|t| t.items.iter().map(move |c|(t,c)))
++                .filter(|(_,a)| peer.link.is_some() && a.link == peer.link).collect();
++            if audio.is_empty() || audio.iter().any(|(t,a)| !t.enabled || t.muted || !a.enabled
++                || (q.audio_tracks.iter().any(|tr|tr.solo) && !t.solo)) {
++                return Err(bad("inherited gameplay audio must be enabled"));
++            }
++        }
++    }
++    let mut out = Vec::new();
++    for binding in &m.tracks {
++        let seq_id = ItemId(binding.sequence);
++        let peer = sequences.iter().position(|s| *s == seq_id).ok_or_else(|| bad("unexpected caption sequence"))?;
++        let rate = project.sequence(seq_id).ok_or_else(|| bad("sequence missing"))?.settings.frame_rate;
++        let rules = binding.rules.native()?;
++        for peers in &clips {
++            let c = &peers[peer];
++            let mut words = Vec::new();
++            let mut word_ids = Vec::new();
++            for (index, word) in m.input.accepted.words.iter().enumerate() {
++                let a = us(word.timing.start_us.ok_or_else(|| bad("missing accepted start"))?)?;
++                let b = us(word.timing.end_us.ok_or_else(|| bad("missing accepted end"))?)?;
++                let mid = a.0.checked_add((b.0-a.0)/2).ok_or_else(|| bad("source midpoint overflow"))?;
++                if mid < c.source_in.0 || mid >= c.source_in.0+c.duration.0 { continue; }
++                let map = |t:Tick| -> Result<Tick> {
++                    let v = c.start.0.checked_add(t.0.checked_sub(c.source_in.0).ok_or_else(||bad("source mapping overflow"))?)
++                        .ok_or_else(||bad("native source mapping overflow"))?;
++                    Ok(Tick(v).max(c.start).min(c.end()))
++                };
++                // Caption grouping does not read confidence. Zero is an unmeasured sentinel,
++                // not an ASR score; accepted source evidence remains unchanged in metadata.
++                words.push(SeqWord { text:word.text.clone(), start:map(a)?, end:map(b)?, clip:c.id, item:c.item,
++                    index,track:0,speaker:None,confidence:0.0 });
++                word_ids.push(word.id.clone());
++            }
++            for block in caption_blocks(&words,&rules,rate) {
++                let source_limit=|key:&str|->Result<Tick>{
++                    let source=us(m.input.identity["range"][key].as_i64().ok_or_else(||bad("accepted source range missing"))?)?;
++                    let time=c.start.0.checked_add(source.0.checked_sub(c.source_in.0).ok_or_else(||bad("source limit overflow"))?)
++                        .ok_or_else(||bad("source limit overflow"))?;
++                    Ok(Tick(time).max(c.start).min(c.end()))
++                };
++                let start = block.start.max(source_limit("start_us")?);
++                let end = block.end.min(source_limit("end_us")?);
++                if end <= start { return Err(bad("caption grouping produced an empty native occurrence")); }
++                let members = word_ids.get(block.words).ok_or_else(||bad("caption membership escaped source words"))?.to_vec();
++                let occurrence = c.start.0.checked_sub(c.source_in.0).ok_or_else(||bad("occurrence origin overflow"))?;
++                let cue_id = format!("{PREFIX}{}",digest(&json!(["v1",m.input.accepted.transcript_id,seq_id.0,resolved.0,occurrence,members]))?);
++                let text = escape(&block.text);
++                if filmcraft_project::plain_text(&text) != block.text { return Err(bad("caption plain text cannot roundtrip")); }
++                out.push(Cue { sequence:seq_id.0,track:binding.track,native_id:0,cue_id,word_ids:members,start,duration:end-start,text });
++            }
++        }
++    }
++    out.sort_by_key(|c|(c.sequence,c.start));
++    let mut ids = BTreeSet::new();
++    let mut ends = BTreeMap::new();
++    for cue in &out {
++        if !ids.insert(&cue.cue_id) || ends.get(&cue.sequence).is_some_and(|e| *e > cue.start) {
++            return Err(bad("caption identities or projected ranges overlap"));
++        }
++        ends.insert(cue.sequence,cue.start+cue.duration);
++    }
++    Ok(out)
++}
++
++fn validate_metadata(project: &Project, m: &Metadata) -> Result<()> {
++    if m.schema != 1 || m.pins.len() > MAX_PINS { return Err(bad("invalid accepted caption schema/history")); }
++    validate_input(&m.input)?;
++    let expected_pin = Pin { transcript_id:m.input.accepted.transcript_id.clone(),revision:m.input.accepted.revision,payload_sha256:digest(&m.input)? };
++    if m.pin != expected_pin || !m.pins.contains(&m.pin) { return Err(bad("accepted payload hash differs")); }
++    let mut pins = BTreeSet::new();
++    for pin in &m.pins {
++        uuid(&pin.transcript_id)?;
++        if pin.revision == 0 || !sha(&pin.payload_sha256) || !pins.insert((&pin.transcript_id,pin.revision)) {
++            return Err(bad("invalid immutable transcript pin"));
++        }
++    }
++    let expected = projected(project,m)?;
++    if expected.len() != m.cues.len() { return Err(bad("managed caption membership differs")); }
++    let mut native_ids = BTreeSet::new();
++    for (expected,receipt) in expected.iter().zip(&m.cues) {
++        let mut actual = receipt.clone(); actual.native_id = 0;
++        if actual != *expected || receipt.native_id == 0 || !native_ids.insert(receipt.native_id) {
++            return Err(bad("managed caption receipt differs"));
++        }
++        let track = project.sequence(ItemId(receipt.sequence)).and_then(|q|q.caption_tracks.iter().find(|t|t.id.0==receipt.track))
++            .ok_or_else(||bad("managed caption track missing"))?;
++        let matches: Vec<_> = track.captions.iter().filter(|c|c.id.0==receipt.native_id).collect();
++        if matches.len()!=1 { return Err(bad("managed caption missing or double bound")); }
++        let c=matches[0];
++        if c.start!=receipt.start || c.duration!=receipt.duration || c.text!=receipt.text || c.speaker.is_some()
++            || c.cue_id.as_deref()!=Some(receipt.cue_id.as_str()) || c.settings.len()>1024 {
++            return Err(bad("manual managed-caption edit requires explicit accepted-word correction"));
++        }
++    }
++    for binding in &m.tracks {
++        let q=project.sequence(ItemId(binding.sequence)).ok_or_else(||bad("managed sequence missing"))?;
++        let track=q.caption_tracks.iter().find(|t|t.id.0==binding.track).ok_or_else(||bad("managed track missing"))?;
++        for c in &track.captions {
++            if c.cue_id.as_deref().is_some_and(|id|id.starts_with(PREFIX)) && !native_ids.contains(&c.id.0) {
++                return Err(bad("untracked managed caption"));
++            }
++            if !native_ids.contains(&c.id.0) && m.cues.iter().filter(|r|r.sequence==binding.sequence)
++                .any(|r|c.start<r.start+r.duration && r.start<c.end()) {
++                return Err(bad("unmanaged caption overlaps accepted projection"));
++            }
++        }
++        q.check().map_err(bad)?;
++    }
++    Ok(())
++}
++pub(crate) fn validate_document(project:&Project)->Result<()> {
++    let mut count=0;
++    let mut bindings=BTreeSet::new();
++    for item in project.items.values().filter(|i|i.metadata.contains_key(KEY)) {
++        count+=1;if count>8 {return Err(bad("accepted owner limit exceeded"));}
++        let m=read(project,item.id)?.ok_or_else(||bad("accepted metadata missing"))?;
++        if m.owner!=item.id.0 {return Err(bad("accepted owner differs"));}
++        for track in &m.tracks {if !bindings.insert((track.sequence,track.track)){return Err(bad("managed track double bound"));}}
++        validate_metadata(project,&m)?;
++    }
++    Ok(())
++}
++pub(crate) fn validate_transition(before:&Project,after:&Project,accepting:bool)->Result<()> {
++    for item in before.items.values().filter(|i|i.metadata.contains_key(KEY)) {
++        if after.item(item.id).is_none_or(|i|!i.metadata.contains_key(KEY)) {
++            return Err(bad("accepted caption ownership requires explicit detach"));
++        }
++    }
++    if !accepting {
++        for item in after.items.values().filter(|i|i.metadata.contains_key(KEY)) {
++            let old=read(before,item.id)?.ok_or_else(||bad("use the native acceptance command to create managed captions"))?;
++            let new=read(after,item.id)?.ok_or_else(||bad("accepted metadata missing"))?;
++            if old.pin!=new.pin || encoded(&old.input)?!=encoded(&new.input)? || old.source!=new.source
++                || encoded(&old.tracks)?!=encoded(&new.tracks)? || old.pins!=new.pins {
++                return Err(bad("accepted source words require explicit native acceptance"));
++            }
++        }
++    }
++    Ok(())
++}
++
++fn install(project:&mut Project,m:&mut Metadata,old:Option<&Metadata>)->Result<()> {
++    let mut cues=projected(project,m)?;
++    for binding in &m.tracks {
++        let q=project.sequence(ItemId(binding.sequence)).ok_or_else(||bad("managed sequence missing"))?;
++        let track=q.caption_tracks.iter().find(|t|t.id.0==binding.track).ok_or_else(||bad("managed track missing"))?;
++        if track.locked {return Err(bad("managed caption track is locked"));}
++    }
++    let mut retained=BTreeMap::new();
++    let mut settings=BTreeMap::new();
++    let mut old_ids=BTreeSet::new();
++    if let Some(old)=old {
++        for r in &old.cues {
++            let c=project.sequence(ItemId(r.sequence)).and_then(|q|q.caption_tracks.iter().find(|t|t.id.0==r.track))
++                .and_then(|t|t.captions.iter().find(|c|c.id.0==r.native_id)).ok_or_else(||bad("prior managed caption missing"))?;
++            retained.insert(r.cue_id.clone(),c.clone());old_ids.insert(c.id);
++            for word in &r.word_ids {settings.insert((r.sequence,word.clone()),c.settings.clone());}
++        }
++    }
++    let mut created=BTreeMap::<u64,Vec<Caption>>::new();
++    for cue in &mut cues {
++        let binding=m.tracks.iter().find(|t|t.sequence==cue.sequence).ok_or_else(||bad("caption binding missing"))?;
++        let mut setting=binding.default_settings.clone();
++        let mut selected=BTreeSet::new();
++        for id in &cue.word_ids {
++            if let Some(value)=settings.get(&(cue.sequence,id.clone())) {selected.insert(value.clone());}
++            if let Some(word)=m.input.accepted.words.iter().find(|w|&w.id==id) {
++                for parent in &word.parent_word_ids {
++                    if let Some(value)=settings.get(&(cue.sequence,parent.clone())) {selected.insert(value.clone());}
++                }
++            }
++        }
++        if selected.is_empty() {
++            if let Some(old)=old {
++                for prior in old.cues.iter().filter(|r|r.sequence==cue.sequence && r.start<cue.start+cue.duration && cue.start<r.start+r.duration) {
++                    if let Some(value)=retained.get(&prior.cue_id) {selected.insert(value.settings.clone());}
++                }
++            }
++        }
++        if selected.len()>1 {return Err(bad("caption regrouping has conflicting native settings"));}
++        if let Some(value)=selected.into_iter().next(){setting=value;}
++        let id=retained.get(&cue.cue_id).map(|c|c.id).unwrap_or_else(||ClipId(project.alloc_id()));
++        cue.native_id=id.0;
++        created.entry(cue.sequence).or_default().push(Caption {id,start:cue.start,duration:cue.duration,text:cue.text.clone(),
++            speaker:None,cue_id:Some(cue.cue_id.clone()),settings:setting});
++    }
++    for binding in &m.tracks {
++        let q=project.sequence_mut(ItemId(binding.sequence)).ok_or_else(||bad("managed sequence missing"))?;
++        let track=q.caption_tracks.iter_mut().find(|t|t.id.0==binding.track).ok_or_else(||bad("managed track missing"))?;
++        track.captions.retain(|c|!old_ids.contains(&c.id));
++        track.captions.extend(created.remove(&binding.sequence).unwrap_or_default());
++        track.captions.sort_by_key(|c|c.start);
++    }
++    m.cues=cues;
++    let text=encoded(m)?;
++    if text.len()>MAX_METADATA{return Err(bad("accepted caption metadata exceeds size bound"));}
++    project.items.get_mut(&ItemId(m.owner)).ok_or_else(||bad("accepted owner missing"))?.metadata.insert(KEY.into(),text);
++    validate_metadata(project,m)
++}
++
++pub(crate) fn regenerate(s:&mut Session,owner:ItemId)->Result<()> {
++    let Some(mut m)=read(&s.project,owner)? else{return Ok(())};
++    let old=m.clone();
++    s.edit("Regenerate accepted captions",|p,_|install(p,&mut m,Some(&old)))
++}
++
++pub(crate) fn accept(s:&mut Session,p:&Value)->Result<Value> {
++    let object=p.as_object().ok_or_else(||bad("acceptance object required"))?;
++    for key in ["expectedProjectPath","expectedAcceptedRevision"] {
++        if !object.contains_key(key){return Err(bad(format!("explicit {key} required")));}
++    }
++    if encoded(p)?.len()>MAX_INPUT+131072{return Err(bad("acceptance command exceeds size bound"));}
++    let request:Request=serde_json::from_value(p.clone()).map_err(|e|bad(e.to_string()))?;
++    if s.path!=request.expected_project_path{return Err(bad("working project path changed"));}
++    preflight(s,"clipline.acceptCaptions")?;
++    linked_edits::validate_command(s,&json!({"expectedRevision":request.expected_revision,"expectedLinksRevisions":request.expected_links_revisions}))?;
++    validate_input(&request.projection_input)?;
++    let owner=ItemId(request.owner);
++    let old=read(&s.project,owner)?;
++    if old.as_ref().map(|m|&m.pin)!=request.expected_accepted_revision.as_ref(){return Err(bad("stale accepted revision/payload"));}
++    let pin=Pin {transcript_id:request.projection_input.accepted.transcript_id.clone(),revision:request.projection_input.accepted.revision,
++        payload_sha256:digest(&request.projection_input)?};
++    let mut pins=old.as_ref().map(|m|m.pins.clone()).unwrap_or_default();
++    if pins.iter().any(|p|p.transcript_id==pin.transcript_id && p.revision==pin.revision && p!=&pin){return Err(bad("immutable transcript revision payload changed"));}
++    if let Some(old)=&old {
++        if old.source!=request.source || encoded(&old.tracks)?!=encoded(&request.tracks)? {return Err(bad("managed source/track bindings cannot change implicitly"));}
++        for word in &request.projection_input.accepted.words {
++            if let Some(prior)=old.input.accepted.words.iter().find(|w|w.id==word.id) {
++                if word.text!=prior.text || word.parent_word_ids!=prior.parent_word_ids || word.text_origin!=prior.text_origin
++                    || word.machine_refs!=prior.machine_refs {return Err(bad("only retime may preserve a canonical accepted word ID"));}
++            }
++        }
++    }
++    if !pins.contains(&pin){pins.push(pin.clone());}
++    if pins.len()>MAX_PINS{return Err(bad("accepted pin history limit exceeded"));}
++    let mut new_observations=0;
++    for observed in &pins {
++        let key=(observed.transcript_id.clone(),observed.revision);
++        match s.accepted_caption_pins.get(&key) {
++            Some(hash) if hash!=&observed.payload_sha256=>return Err(bad("transcript revision conflicts with successful session acceptance")),
++            None=>new_observations+=1,_=>{}
++        }
++    }
++    if s.accepted_caption_pins.len()+new_observations>MAX_SESSION_PINS{return Err(bad("session accepted-pin observation limit exceeded"));}
++    let observations=pins.clone();
++    let mut m=Metadata {schema:1,owner:request.owner,pin:pin.clone(),input:request.projection_input,source:request.source,
++        tracks:request.tracks,cues:Vec::new(),pins};
++    if s.accepted_caption_accepting {return Err(bad("nested accepted-caption command unsupported"));}
++    s.accepted_caption_accepting=true;
++    let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
++        s.edit_group("Accept linked source words",|s|s.edit("Project accepted captions",|p,_|install(p,&mut m,old.as_ref())))));
++    s.accepted_caption_accepting=false;
++    match result {Ok(result)=>result?,Err(panic)=>std::panic::resume_unwind(panic)};
++    for observed in observations {
++        s.accepted_caption_pins.insert((observed.transcript_id,observed.revision),observed.payload_sha256);
++    }
++    Ok(json!({"owner":owner.0,"accepted":pin,"captions":m.cues.len(),"revision":s.revision,
++        "sourceIdentityCheck":"native stored import identity only; original source SHA is retained provenance, not a fresh media rehash"}))
++}
 diff --git a/crates/engine/src/autosave.rs b/crates/engine/src/autosave.rs
 --- a/crates/engine/src/autosave.rs
 +++ b/crates/engine/src/autosave.rs
@@ -52,7 +581,7 @@ diff --git a/crates/engine/src/autosave.rs b/crates/engine/src/autosave.rs
 diff --git a/crates/engine/src/commands.rs b/crates/engine/src/commands.rs
 --- a/crates/engine/src/commands.rs
 +++ b/crates/engine/src/commands.rs
-@@ -3382,6 +3382,14 @@
+@@ -3382,6 +3382,15 @@
                      .collect(),
              ))
          }),
@@ -63,11 +592,12 @@ diff --git a/crates/engine/src/commands.rs b/crates/engine/src/commands.rs
 +            params: r#"{"path":str,"expectedProjectPath":str|null,"expectedRevision":int,"expectedLinksRevisions":[{"owner":id,"revision":int}]}"#,
 +            enabled: always, run: save_linked_snapshot, journal: false,
 +        },
++        cmd!("clipline.acceptCaptions", "Accept Linked Captions", [], None, r#"{"owner":id,"expectedProjectPath":str|null,"expectedRevision":int,"expectedLinksRevisions":array,"expectedAcceptedRevision":object|null,"projectionInput":object,"source":object,"tracks":array}"#, always, crate::accepted_captions::accept),
 +        query!("clipline.validate", "Validate Linked Document", r#"{"expectedRevision":int?,"expectedLinksRevisions":[{"owner":id,"revision":int}]}"#, crate::linked_edits::validate_command),
          query!("project.inspect", "Inspect Project", "{}", |s, _| Ok(crate::commands::inspect_project(s))),
          query!("sequence.inspect", "Inspect Sequence", r#"{"item":id?}"#, |s, p| {
              let id = item_p(p, "item").or(s.state.active_sequence).ok_or(EngineError::NoSequence)?;
-@@ -4312,7 +4320,35 @@
+@@ -4312,7 +4321,35 @@
      p.name = name;
  }
  
@@ -141,32 +671,52 @@ diff --git a/crates/engine/src/export_tools.rs b/crates/engine/src/export_tools.
 diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
 --- a/crates/engine/src/lib.rs
 +++ b/crates/engine/src/lib.rs
-@@ -25,6 +25,7 @@
+@@ -25,6 +25,8 @@
  pub mod interchange;
  pub mod keyboard;
  mod keyframe_move;
 +mod linked_edits;
++mod accepted_captions;
  mod marker_export;
  pub mod masks;
  pub mod media_browser;
-@@ -443,6 +444,8 @@
+@@ -443,6 +445,13 @@
      pub browser: media_browser::BrowserState,
      /// Nesting depth of [`Session::execute`] (commands that run other commands).
      exec_depth: u32,
 +    /// Nested undoable groups stage snapshots until the outer group commits.
 +    edit_group_depth: u32,
++    accepted_caption_accepting: bool,
++    // Successful acceptance observations survive undo; CreatorLibrary owns cross-process identity.
++    accepted_caption_pins: std::collections::BTreeMap<(String, u64), String>,
++    // Retaining an immutable validated Arc makes safe copy-on-write mutations change identity.
++    last_valid_live_project: Arc<Project>,
      /// Each media file's size and modification time when last seen (Settings ▸ Media ▸
      /// Automatically refresh growing files, [`media_watch`]).
      pub media_stamps: std::collections::HashMap<String, media_watch::Stamp>,
-@@ -538,6 +541,7 @@
+@@ -495,8 +504,9 @@
+ 
+ impl Session {
+     pub fn new(services: Arc<dyn Services>) -> Self {
++        let project = Arc::new(Project::new("Untitled"));
+         Self {
+-            project: Arc::new(Project::new("Untitled")),
++            project: project.clone(),
+             history: History { limit: 200, ..Default::default() },
+             revision: 1,
+             saved_revision: 1,
+@@ -538,6 +548,10 @@
              log: Default::default(),
              browser: Default::default(),
              exec_depth: 0,
 +            edit_group_depth: 0,
++            accepted_caption_accepting: false,
++            accepted_caption_pins: Default::default(),
++            last_valid_live_project: project,
              media_stamps: Default::default(),
              media_scan: None,
          }
-@@ -605,6 +609,9 @@
+@@ -605,6 +619,9 @@
      /// Tell the worker about the current project state if it changed (cheap: an `Arc` clone and a
      /// channel send; serialization happens on the worker). Called after every command.
      pub fn sync_persistence(&mut self) {
@@ -176,16 +726,17 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
          let dirty = self.is_dirty();
          let Some(p) = self.persistence.as_mut() else { return };
          let cur = autosave::Sent { revision: self.revision, saved_revision: self.saved_revision, path: self.path.clone() };
-@@ -692,6 +699,8 @@
+@@ -692,6 +709,9 @@
      /// Run a command by id.
      pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
          let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
++        accepted_captions::preflight(self, id)?;
 +        linked_edits::preflight_snapshot(self, id)?;
 +        let linked_plan = linked_edits::prepare(self, id, &params)?;
          if self.exec_depth == 0 && spec.journal && self.trim_play.active() {
              self.settle_trim_playback(id);
          }
-@@ -706,10 +715,15 @@
+@@ -706,10 +726,15 @@
          // Last-resort guard: a panic in a command (a bug that escaped the never-crash rules)
          // becomes an error for the caller (UI, CLI, control channel, MCP) instead of taking the
          // session and its unsaved project down. The panic hook has logged where it happened.
@@ -203,7 +754,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
              source_monitor::track_history(self);
          }
          // source graphics: an edited instance updates the shared layers and the other instances
-@@ -721,9 +735,7 @@
+@@ -721,9 +746,7 @@
          {
              self.log.push(panels::Level::Error, id, e.to_string());
          }
@@ -214,7 +765,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
          if r.is_ok() && spec.journal {
              self.journal.push((id.to_string(), params));
              if self.journal.len() > 10_000 {
-@@ -731,6 +743,14 @@
+@@ -731,6 +754,14 @@
              }
          }
          r
@@ -229,23 +780,23 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
      }
  
      /// Another command arrives while trim-mode playback runs: a dynamic trim is committed first
-@@ -838,6 +858,7 @@
+@@ -838,6 +869,7 @@
          let mut st = self.state.clone();
          let r = f(&mut p, &mut st)?;
          self.refuse_self_nesting(&p)?;
-+        if self.edit_group_depth == 0 { linked_edits::validate_transition(&self.project, &p)?; }
++        if self.edit_group_depth == 0 { linked_edits::validate_transition(&self.project, &p, self.accepted_caption_accepting)?; }
          let old = std::mem::replace(&mut self.project, Arc::new(p));
          self.history.undo.push((label.to_string(), old));
          if self.history.undo.len() > self.history.limit {
-@@ -864,6 +885,7 @@
+@@ -864,6 +896,7 @@
          let mut st = self.state.clone();
          let r = f(&mut p, &mut st)?;
          self.refuse_self_nesting(&p)?;
-+        if self.edit_group_depth == 0 { linked_edits::validate_transition(&self.project, &p)?; }
++        if self.edit_group_depth == 0 { linked_edits::validate_transition(&self.project, &p, self.accepted_caption_accepting)?; }
          self.project = Arc::new(p);
          self.state = st;
          self.drop_stale_gap();
-@@ -871,43 +893,79 @@
+@@ -871,43 +904,95 @@
          Ok(r)
      }
  
@@ -258,7 +809,23 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
 +            return;
 +        }
 +        self.sync_persistence();
-+        self.previews.live.publish_project(self.project.clone());
++        self.last_valid_live_project = self.playback_project();
++        // Recovery retains invalid working data; playback only sees validated immutable data.
++        self.previews.live.publish_project(self.last_valid_live_project.clone());
++    }
++
++    /// A validated immutable playback input, including for provider/fallback construction.
++    /// A changed working Arc can be raw recovery data; do not expose it to live audio.
++    pub fn playback_project(&self) -> Arc<Project> {
++        if self.exec_depth != 0 || self.edit_group_depth != 0 {
++            return self.last_valid_live_project.clone();
++        }
++        if Arc::ptr_eq(&self.project, &self.last_valid_live_project)
++            || linked_edits::validate_document(&self.project).is_ok() {
++            self.project.clone()
++        } else {
++            self.last_valid_live_project.clone()
++        }
 +    }
 +
 +    /// Run several undoable project edits as one undo step labelled `label`. Failure (including
@@ -303,7 +870,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
 +        self.edit_group_depth += 1;
 +        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
 +            let value = f(self)?;
-+            if self.edit_group_depth == 1 { linked_edits::validate_transition(&project, &self.project)?; }
++            if self.edit_group_depth == 1 { linked_edits::validate_transition(&project, &self.project, self.accepted_caption_accepting)?; }
 +            Ok::<R, EngineError>(value)
 +        }));
 +        self.edit_group_depth -= 1;
@@ -357,7 +924,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
              }
          }
      }
-@@ -988,6 +1046,7 @@
+@@ -988,6 +1073,7 @@
          self.history.redo.push((label.clone(), cur));
          self.fix_state();
          self.bump();
@@ -365,7 +932,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
          Some(label)
      }
  
-@@ -998,6 +1057,7 @@
+@@ -998,6 +1084,7 @@
          self.history.undo.push((label.clone(), cur));
          self.fix_state();
          self.bump();
@@ -377,11 +944,11 @@ diff --git a/crates/engine/src/linked_edits.rs b/crates/engine/src/linked_edits.
 new file mode 100644
 --- /dev/null
 +++ b/crates/engine/src/linked_edits.rs
-@@ -0,0 +1,521 @@
+@@ -0,0 +1,543 @@
 +//! Clipline links bind native clips; all time calculations remain in the native edit engine.
 +use std::collections::{BTreeMap, BTreeSet};
 +use filmcraft_edit::{Edge, TrimMode};
-+use filmcraft_project::{ClipId, ItemId, Project, TrackItem, TrackKind};
++use filmcraft_project::{ClipId, ItemId, MediaRef, Project, TrackItem, TrackKind};
 +use filmcraft_time::Tick;
 +use serde::{Deserialize, Serialize};
 +use serde_json::{Value, json};
@@ -617,11 +1184,29 @@ new file mode 100644
 +}
 +
 +pub(crate) fn validate_document(project: &Project) -> Result<()> {
-+    document_links(project).map(|_| ())
++    document_links(project)?;
++    crate::accepted_captions::validate_document(project)
++}
++
++/// Caption projection consumes the validated native gameplay bindings, never facecam audio.
++pub(crate) fn caption_bindings(project: &Project, owner: ItemId) -> Result<([ItemId; 3], Vec<[TrackItem; 3]>)> {
++    let links = document_links(project)?.into_iter().find(|(id, _)| *id == owner)
++        .map(|(_, links)| links).ok_or_else(|| bad("caption owner has no linked manifest"))?;
++    let seqs = links.sequences();
++    let mut clips = Vec::new();
++    for unit in &links.units {
++        let roles = unit.bindings(links.schema)?;
++        let gameplay = roles.iter().find(|r| r.role == "gameplay" && r.audio == AudioPolicy::Inherit)
++            .ok_or_else(|| bad("captions require inherited gameplay audio"))?;
++        clips.push([clip_in(project, seqs[0], gameplay.clips[0])?.clone(),
++            clip_in(project, seqs[1], gameplay.clips[1])?.clone(), clip_in(project, seqs[2], gameplay.clips[2])?.clone()]);
++    }
++    Ok((seqs, clips))
 +}
 +
 +/// Project-only edits stage a copy, so refusal occurs before history/state/publication changes.
-+pub(crate) fn validate_transition(before: &Project, after: &Project) -> Result<()> {
++pub(crate) fn validate_transition(before: &Project, after: &Project, accepting_captions: bool) -> Result<()> {
++    crate::accepted_captions::validate_transition(before, after, accepting_captions)?;
 +    for item in before.items.values().filter(|i| i.metadata.contains_key(KEY)) {
 +        if after.item(item.id).is_none_or(|i| !i.metadata.contains_key(KEY)) {
 +            return Err(bad("removing linked ownership requires an explicit detach operation"));
@@ -643,6 +1228,7 @@ new file mode 100644
 +}
 +
 +pub(crate) fn validate_command(s: &mut Session, params: &Value) -> Result<Value> {
++    validate_document(&s.project)?;
 +    let object = params.as_object().ok_or_else(|| bad("validation parameters must be an object"))?;
 +    if object.keys().any(|k| k != "expectedRevision" && k != "expectedLinksRevisions") {
 +        return Err(bad("unknown validation parameter"));
@@ -684,6 +1270,7 @@ new file mode 100644
 +                }
 +                roles.push(json!({"role":role.role,"audio":if role.audio == AudioPolicy::Inherit {"inherit"} else {"none"},
 +                    "sourceItem":root.item.0,"resolvedMediaItem":resolved.map(|(id, _, _)|id.0),
++                    "resolvedMediaPath":resolved.and_then(|(_,m,_)|match &m.media {MediaRef::File{path}=>Some(path.as_str()),_=>None}),
 +                    "storedMediaIdentity":resolved.and_then(|(_, m, _)|m.identity),
 +                    "clips":{"shared":role.clips[0].0,"landscape":role.clips[1].0,"portrait":role.clips[2].0},
 +                    "nativeAudioClips":{"shared":native_audio[0],"landscape":native_audio[1],"portrait":native_audio[2]}}));
@@ -699,7 +1286,7 @@ new file mode 100644
 +
 +/// Recovery/autosave retain working data, including invalid imported documents for repair.
 +pub(crate) fn preflight_snapshot(s: &Session, id: &str) -> Result<()> {
-+    if matches!(id, "file.save" | "file.saveAs" | "file.saveCopy" | "file.saveAll" | "file.saveAsTemplate"
++    if matches!(id, "clipline.saveSnapshot" | "clipline.validate" | "file.save" | "file.saveAs" | "file.saveCopy" | "file.saveAll" | "file.saveAsTemplate"
 +        | "file.exportSelectionProject" | "file.projectManager" | "file.exportMedia" | "export.quick" | "export.queue.add"
 +        | "file.exportInterchange" | "file.exportEdl" | "file.exportFcp7Xml" | "file.exportFcpxml" | "file.exportOtio"
 +        | "file.exportAaf" | "file.exportOmf") {
@@ -818,6 +1405,7 @@ new file mode 100644
 +
 +impl Plan {
 +    pub(crate) fn apply(mut self, s: &mut Session) -> Result<Value> {
++        crate::accepted_captions::validate_document(&s.project)?;
 +        s.edit_group("Clipline shared edit", |s| {
 +            let ui = s.state.clone();
 +            s.state.linked_selection = true;
@@ -887,6 +1475,7 @@ new file mode 100644
 +            let text = serde_json::to_string(&self.links).map_err(|e| bad(e.to_string()))?;
 +            if text.len() > MAX_METADATA { return Err(bad("linked metadata exceeds size limit")); }
 +            s.execute_linked_native("metadata.set", &json!({"item":self.owner.0,"field":KEY,"value":text}))?;
++            crate::accepted_captions::regenerate(s, self.owner)?;
 +            s.state = ui;
 +            s.drop_stale_gap();
 +            Ok(match self.operation {
@@ -1212,6 +1801,18 @@ new file mode 100644
 +    assert_rejected(&mut s,"timeline.razor",json!({"clip":m.units[0].portrait,"time":3*TPS}));
 +    assert_rejected(&mut s,"timeline.trim",json!({"clip":m.units[0].portrait,"edge":"out","deltaFrames":-30}));
 +}
+diff --git a/crates/engine/src/mixer.rs b/crates/engine/src/mixer.rs
+--- a/crates/engine/src/mixer.rs
++++ b/crates/engine/src/mixer.rs
+@@ -413,7 +413,7 @@
+         Ok(())
+     });
+     s.previews.live.clear_all();
+-    s.previews.live.publish_project(s.project.clone());
++    s.publish_committed_project();
+     result?;
+     Ok(json!({"recording": false, "lanes": written.len(), "keyframes": keyframes, "written": written}))
+ }
 diff --git a/crates/engine/src/project_manager.rs b/crates/engine/src/project_manager.rs
 --- a/crates/engine/src/project_manager.rs
 +++ b/crates/engine/src/project_manager.rs
@@ -1266,6 +1867,277 @@ diff --git a/crates/engine/src/project_tools.rs b/crates/engine/src/project_tool
      s.services.write_file(&path, &filmcraft_format::encode(&sub, false)).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
      Ok(json!({"path": path, "items": keep.iter().map(|i| i.0).collect::<Vec<_>>()}))
  }
+diff --git a/crates/engine/tests/clipline_caption_projection.rs b/crates/engine/tests/clipline_caption_projection.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/engine/tests/clipline_caption_projection.rs
+@@ -0,0 +1,266 @@
++//! Public native command coverage; all media/import identities here are synthetic fixtures.
++use filmcraft_engine::Session;
++use filmcraft_engine::project::{ItemId,MediaIdentity,ItemKind,MediaRef};
++use filmcraft_engine::time::{Tick,TICKS_PER_SECOND as TPS};
++use serde_json::{Value,json};
++use std::{sync::Arc,path::PathBuf};
++const LINKS:&str="clipline.links.v1";
++const CAPTIONS:&str="clipline.acceptedCaptions.v1";
++fn run(s:&mut Session,id:&str,p:Value)->Value{s.execute(id,p).unwrap()}
++fn snapshot(s:&Session)->Value{serde_json::to_value(&*s.project).unwrap()}
++fn metadata(s:&Session,owner:ItemId,key:&str)->Value{serde_json::from_str(&s.project.item(owner).unwrap().metadata[key]).unwrap()}
++fn seqs(s:&Session,owner:ItemId)->[u64;3]{let m=metadata(s,owner,LINKS);[m["sharedSequence"].as_u64().unwrap(),m["landscapeSequence"].as_u64().unwrap(),m["portraitSequence"].as_u64().unwrap()]}
++fn reject(s:&mut Session,id:&str,p:Value){
++ let before=snapshot(s);let ui=serde_json::to_value(&s.state).unwrap();let rev=s.revision;let journal=s.journal.clone();let history=(s.history.undo.len(),s.history.redo.len());
++ let live=s.previews.live.project().unwrap();let events=s.events.clone();
++ assert!(s.execute(id,p).is_err());assert_eq!(snapshot(s),before);assert_eq!(s.revision,rev);assert_eq!(s.journal,journal);
++ assert_eq!((s.history.undo.len(),s.history.redo.len()),history);assert_eq!(serde_json::to_value(&s.state).unwrap(),ui);assert_eq!(s.events,events);
++ assert!(Arc::ptr_eq(&live,&s.previews.live.project().unwrap()));
++}
++fn fixture()->(Session,ItemId,Value){
++ let mut s=Session::default();run(&mut s,"file.newProject",json!({"name":"Accepted fixture"}));
++ run(&mut s,"file.newOfflineFile",json!({"name":"Fixture","seconds":20,"fps":60,"video":true,"audio":true,"width":1920,"height":1080}));
++ let media=s.project.items.values().find(|i|i.as_media().is_some()).unwrap().id;
++ s.edit("Fixture import identity",|p,_|{p.item_mut(media).unwrap().as_media_mut().unwrap().identity=Some(MediaIdentity{size:1234,fingerprint:42});Ok(())}).unwrap();
++ let mut sequences=Vec::new();let mut videos=Vec::new();let mut cams=Vec::new();let mut tracks=Vec::new();
++ for (i,(name,w,h)) in [("Shared",1920,1080),("Landscape",1920,1080),("Portrait",1080,1920)].into_iter().enumerate(){
++  let q=run(&mut s,"file.newSequence",json!({"name":name,"width":w,"height":h,"fps":60,"video":2,"audio":2}))["sequence"].as_u64().unwrap();
++  run(&mut s,"timeline.place",json!({"item":media.0,"track":"V1","audioTrack":"A1","time":TPS,"sourceIn":2*TPS,"duration":6*TPS}));
++  videos.push(s.active_sequence().unwrap().video_tracks[0].items[0].id.0);
++  run(&mut s,"timeline.place",json!({"item":media.0,"track":"V2","audio":false,"time":TPS,"sourceIn":2*TPS,"duration":6*TPS}));
++  cams.push(s.active_sequence().unwrap().video_tracks[1].items[0].id.0);
++  let track=run(&mut s,"captions.newTrack",json!({"name":"Creator captions"}))["track"].as_u64().unwrap();
++  run(&mut s,"captions.setStyle",json!({"track":track,"size":40+i*5,"margin":0.1+i as f64*0.02}));
++  run(&mut s,"captions.add",json!({"track":track,"time":0,"durationSeconds":0.5,"text":"Unmanaged intro"}));
++  tracks.push(json!({"sequence":q,"track":track,"defaultSettings":"line:90% align:center","rules":{"maxChars":20,"lines":1,"minDurationUs":0,"maxDurationUs":2_000_000,"gapFrames":0,"breakPauseUs":200_000}}));
++  sequences.push(q);
++ }
++ let owner=ItemId(sequences[0]);
++ let m=json!({"schema":2,"revision":0,"sharedSequence":sequences[0],"landscapeSequence":sequences[1],"portraitSequence":sequences[2],"units":[{"id":"fixture-root","parent":null,"roles":[
++ {"role":"gameplay","audio":"inherit","shared":videos[0],"landscape":videos[1],"portrait":videos[2]},
++ {"role":"facecam","audio":"none","shared":cams[0],"landscape":cams[1],"portrait":cams[2]}]}]});
++ run(&mut s,"metadata.set",json!({"item":owner.0,"field":LINKS,"value":m.to_string()}));
++ let words:Vec<_>=[("<b>",2_100_000,2_300_000),("{\\an8}",3_900_000,4_100_000),("&amp;",5_100_000,5_300_000),("😀",7_700_000,7_900_000)].into_iter().enumerate().map(|(i,(text,a,b))|
++ json!({"id":format!("00000000-0000-4000-8000-{:012}",i+1),"text":text,"timing":{"start_us":a,"end_us":b,"status":"aligned"},"timing_provenance":{"kind":"alignment_proposal","proposal_id":"fixture"},"text_origin":"machine_accepted","parent_word_ids":[],"machine_refs":[]})).collect();
++ let channels=s.project.item(media).unwrap().as_media().unwrap().info.audio().unwrap().channels;
++ let source_rate=s.project.item(media).unwrap().as_media().unwrap().info.audio().unwrap().sample_rate;
++ let hash="a".repeat(64);
++ let input=json!({"accepted":{"transcript_id":"10000000-0000-4000-8000-000000000001","revision":1,"parent_revision":null,"created_utc":"2026-10-18T00:00:00+00:00","words":words},
++ "identity":{"source":{"asset_id":"20000000-0000-4000-8000-000000000001","sha256":hash,"audio_stream_index":1,"channels":(0..channels).collect::<Vec<_>>(),"mix":"mixed"},
++ "audio":{"pcm_sha256":"b".repeat(64),"wav_sha256":"c".repeat(64),"sample_rate":48000,"sample_count":960000,"channels":channels,"sample_width":2,"sample_zero_source_us":0,"extraction":{"source_sha256":"a".repeat(64),"argv":["ffmpeg","fixture"],"tool_version":"fixture","selected_stream":{"index":1,"codec_type":"audio","sample_rate":source_rate.to_string(),"channels":channels}}},"range":{"start_us":0,"end_us":20_000_000}}});
++ let p=json!({"owner":owner.0,"expectedProjectPath":s.path,"expectedRevision":s.revision,"expectedLinksRevisions":[{"owner":owner.0,"revision":0}],"expectedAcceptedRevision":null,"projectionInput":input,
++ "source":{"sourceItem":media.0,"resolvedMediaItem":media.0,"storedMediaIdentity":{"size":1234,"fingerprint":"000000000000002a"}},"tracks":tracks});
++ (s,owner,p)
++}
++fn refresh(s:&Session,owner:ItemId,p:&mut Value){
++ p["expectedRevision"]=json!(s.revision);p["expectedProjectPath"]=json!(s.path);p["expectedLinksRevisions"]=json!([{"owner":owner.0,"revision":metadata(s,owner,LINKS)["revision"]}]);
++ p["expectedAcceptedRevision"]=s.project.item(owner).unwrap().metadata.get(CAPTIONS).map(|_|metadata(s,owner,CAPTIONS)["pin"].clone()).unwrap_or(Value::Null);
++}
++fn caption_ids(s:&Session,owner:ItemId)->Vec<String>{metadata(s,owner,CAPTIONS)["cues"].as_array().unwrap().iter().map(|c|c["cueId"].as_str().unwrap().into()).collect()}
++fn output_root()->PathBuf{let p=PathBuf::from(std::env::var_os("CLIPLINE_TEST_ROOT").expect("owned test output root"));std::fs::create_dir_all(&p).unwrap();p}
++
++#[test]
++fn accepts_all_three_with_literal_plain_text_native_styles_unmanaged_cues_and_one_undo(){
++ let(mut s,owner,p)=fixture();let before=snapshot(&s);let n=s.history.undo.len();let state=serde_json::to_value(&s.state).unwrap();
++ let r=run(&mut s,"clipline.acceptCaptions",p);assert_eq!(r["captions"],12);assert_eq!(s.history.undo.len(),n+1);assert_eq!(serde_json::to_value(&s.state).unwrap(),state);
++ for(seq,size)in seqs(&s,owner).into_iter().zip([40.,45.,50.]){let t=&s.project.sequence(ItemId(seq)).unwrap().caption_tracks[0];assert_eq!(t.style.size,size);assert_eq!(t.captions.len(),5);
++  assert_eq!(t.captions[0].text,"Unmanaged intro");assert_eq!(t.captions[1].plain_lines(),vec!["<b>"]);assert_eq!(t.captions[2].plain_lines(),vec!["{\\an8}"]);assert_eq!(t.captions[3].plain_lines(),vec!["&amp;"]);
++  assert_eq!(t.captions[4].plain_lines(),vec!["😀"]);assert!(t.captions[1..].iter().all(|c|c.settings=="line:90% align:center"));}
++ assert!(s.project.transcripts.is_empty());let accepted=snapshot(&s);run(&mut s,"edit.undo",json!({}));assert_eq!(snapshot(&s),before);run(&mut s,"edit.redo",json!({}));assert_eq!(snapshot(&s),accepted);
++ let opened=filmcraft_format::decode(&filmcraft_format::encode(&s.project,false)).unwrap();assert_eq!(opened.project,*s.project);
++}
++#[test]
++fn split_trim_midpoint_clamp_removes_unheard_words_and_restores_exact_undo(){
++ let(mut s,owner,p)=fixture();run(&mut s,"clipline.acceptCaptions",p);let original=snapshot(&s);let old_ids=caption_ids(&s,owner);
++ let portrait=seqs(&s,owner)[2];let clip=metadata(&s,owner,LINKS)["units"][0]["roles"][1]["portrait"].as_u64().unwrap();
++ run(&mut s,"timeline.razor",json!({"clip":clip,"time":3*TPS}));
++ let m=metadata(&s,owner,CAPTIONS);assert_eq!(m["cues"].as_array().unwrap().len(),12);assert_eq!(caption_ids(&s,owner),old_ids);
++ for cue in m["cues"].as_array().unwrap().iter().filter(|c|c["wordIds"][0]=="00000000-0000-4000-8000-000000000002"){
++  assert_eq!(cue["start"],3*TPS);assert_eq!(cue["duration"],TPS/10);}
++ let right=metadata(&s,owner,LINKS)["units"][1]["roles"][0]["portrait"].as_u64().unwrap();
++ let split=snapshot(&s);let n=s.history.undo.len();run(&mut s,"timeline.trim",json!({"clip":right,"edge":"out","deltaFrames":-30}));assert_eq!(s.history.undo.len(),n+1);
++ assert_eq!(metadata(&s,owner,CAPTIONS)["cues"].as_array().unwrap().len(),9);
++ for c in &s.project.sequence(ItemId(portrait)).unwrap().caption_tracks[0].captions{assert!(c.end()<=Tick(13*TPS/2));}
++ let trimmed=snapshot(&s);run(&mut s,"edit.undo",json!({}));assert_eq!(snapshot(&s),split);run(&mut s,"edit.undo",json!({}));assert_eq!(snapshot(&s),original);
++ run(&mut s,"edit.redo",json!({}));run(&mut s,"edit.redo",json!({}));assert_eq!(snapshot(&s),trimmed);
++}
++#[test]
++fn stale_path_native_owner_acceptance_and_unknown_fields_reject_without_mutation(){
++ let(mut s,owner,p)=fixture();
++ for (field,value) in [("expectedProjectPath",json!("another.fcproj")),("expectedRevision",json!(0)),("expectedLinksRevisions",json!([])),("extra",json!(true))]{let mut bad=p.clone();bad[field]=value;reject(&mut s,"clipline.acceptCaptions",bad);}
++ run(&mut s,"clipline.acceptCaptions",p.clone());let mut stale=p.clone();refresh(&s,owner,&mut stale);stale["expectedAcceptedRevision"]=Value::Null;reject(&mut s,"clipline.acceptCaptions",stale);
++}
++#[test]
++fn unresolved_interpolated_missing_overflow_and_duplicate_words_reject(){
++ for mode in ["unresolved","interpolated","missing","overflow","duplicate","order","markup_unknown"]{
++  let(mut s,_,mut p)=fixture();match mode{
++   "overflow"=>p["projectionInput"]["accepted"]["words"][0]["timing"]["end_us"]=json!(i64::MAX),
++   "duplicate"=>p["projectionInput"]["accepted"]["words"][1]["id"]=p["projectionInput"]["accepted"]["words"][0]["id"].clone(),
++   "order"=>p["projectionInput"]["accepted"]["words"][1]["timing"]["start_us"]=json!(2_200_000),
++   "markup_unknown"=>p["projectionInput"]["accepted"]["words"][0]["text"]=json!("two words"),
++   _=>p["projectionInput"]["accepted"]["words"][0]["timing"]["status"]=json!(mode)};
++  reject(&mut s,"clipline.acceptCaptions",p);
++ }
++}
++#[test]
++fn same_transcript_revision_cannot_change_content_or_identity_and_only_retime_keeps_word_id(){
++ let(mut s,owner,mut p)=fixture();run(&mut s,"clipline.acceptCaptions",p.clone());refresh(&s,owner,&mut p);
++ let mut changed=p.clone();changed["projectionInput"]["identity"]["source"]["sha256"]=json!("d".repeat(64));changed["projectionInput"]["identity"]["audio"]["extraction"]["source_sha256"]=json!("d".repeat(64));reject(&mut s,"clipline.acceptCaptions",changed);
++ let mut changed=p.clone();changed["projectionInput"]["accepted"]["words"][0]["text"]=json!("changed");reject(&mut s,"clipline.acceptCaptions",changed.clone());
++ changed["projectionInput"]["accepted"]["revision"]=json!(2);changed["projectionInput"]["accepted"]["parent_revision"]=json!(1);reject(&mut s,"clipline.acceptCaptions",changed.clone());
++ changed["projectionInput"]["accepted"]["words"][0]["id"]=json!("00000000-0000-4000-8000-000000000099");changed["projectionInput"]["accepted"]["words"][0]["parent_word_ids"]=json!(["00000000-0000-4000-8000-000000000001"]);
++ changed["projectionInput"]["accepted"]["words"][0]["text_origin"]=json!("human");run(&mut s,"clipline.acceptCaptions",changed);assert_eq!(metadata(&s,owner,CAPTIONS)["pin"]["revision"],2);
++ refresh(&s,owner,&mut p);p["projectionInput"]["accepted"]=metadata(&s,owner,CAPTIONS)["input"]["accepted"].clone();p["projectionInput"]["accepted"]["revision"]=json!(3);p["projectionInput"]["accepted"]["parent_revision"]=json!(2);
++ let id=p["projectionInput"]["accepted"]["words"][0]["id"].clone();p["projectionInput"]["accepted"]["words"][0]["timing"]["start_us"]=json!(2_150_000);run(&mut s,"clipline.acceptCaptions",p);assert_eq!(metadata(&s,owner,CAPTIONS)["input"]["accepted"]["words"][0]["id"],id);
++}
++#[test]
++fn native_manual_text_time_split_delete_and_metadata_replacement_reject(){
++ let(mut s,owner,p)=fixture();run(&mut s,"clipline.acceptCaptions",p);let m=metadata(&s,owner,CAPTIONS);let c=m["cues"].as_array().unwrap().iter().find(|c|c["sequence"]==seqs(&s,owner)[2]).unwrap();let id=c["nativeId"].clone();let start=c["start"].as_i64().unwrap();
++ reject(&mut s,"captions.setText",json!({"caption":id,"text":"manual replacement"}));reject(&mut s,"captions.setTimes",json!({"caption":id,"startTime":start+TPS/60}));
++ reject(&mut s,"captions.split",json!({"caption":id,"time":start+TPS/10}));reject(&mut s,"captions.delete",json!({"captions":[id]}));
++ let mut forged=m;forged["input"]["accepted"]["words"][0]["text"]=json!("forged");reject(&mut s,"metadata.set",json!({"item":owner.0,"field":CAPTIONS,"value":forged.to_string()}));
++}
++#[test]
++fn late_peer_overlap_rolls_back_all_native_data_and_live_observers(){
++ let(mut s,_,p)=fixture();let track=p["tracks"][2]["track"].as_u64().unwrap();run(&mut s,"captions.add",json!({"track":track,"time":2*TPS,"durationSeconds":1,"text":"Unmanaged conflict"}));
++ let mut p=p;let owner=ItemId(p["owner"].as_u64().unwrap());refresh(&s,owner,&mut p);reject(&mut s,"clipline.acceptCaptions",p);
++ assert!(s.project.items.values().all(|i|!i.metadata.contains_key(CAPTIONS)));
++}
++#[test]
++fn locked_tracks_block_acceptance_and_linked_regeneration_without_unlocking(){
++ let(mut s,owner,mut p)=fixture();let track=p["tracks"][2]["track"].clone();run(&mut s,"captions.setTrack",json!({"track":track,"locked":true}));refresh(&s,owner,&mut p);reject(&mut s,"clipline.acceptCaptions",p.clone());
++ run(&mut s,"captions.setTrack",json!({"track":track,"locked":false}));refresh(&s,owner,&mut p);run(&mut s,"clipline.acceptCaptions",p);
++ run(&mut s,"captions.setTrack",json!({"track":track,"locked":true}));let m=metadata(&s,owner,LINKS);reject(&mut s,"timeline.razor",json!({"clip":m["units"][0]["roles"][0]["portrait"],"time":3*TPS}));
++ run(&mut s,"clipline.validate",json!({}));
++}
++#[test]
++fn unmanaged_intro_and_native_cue_settings_styles_survive_regeneration(){
++ let(mut s,owner,p)=fixture();run(&mut s,"clipline.acceptCaptions",p);let sequences=seqs(&s,owner);
++ s.edit("Native presentation settings",|p,_|{for seq in sequences{let t=&mut p.sequence_mut(ItemId(seq)).unwrap().caption_tracks[0];t.style.size+=1.;for c in t.captions.iter_mut().filter(|c|c.cue_id.is_some()){c.settings="line:80%".into();}}Ok(())}).unwrap();
++ let m=metadata(&s,owner,LINKS);run(&mut s,"timeline.razor",json!({"clip":m["units"][0]["roles"][0]["portrait"],"time":3*TPS}));
++ for(seq,size)in sequences.into_iter().zip([41.,46.,51.]){let t=&s.project.sequence(ItemId(seq)).unwrap().caption_tracks[0];assert_eq!(t.style.size,size);assert_eq!(t.captions[0].text,"Unmanaged intro");assert_eq!(t.captions[4].plain_lines(),vec!["😀"]);assert!(t.captions[1..].iter().all(|c|c.settings=="line:80%"));}
++}
++#[test]
++fn subclip_resolves_parent_source_identity_without_duplicate_facecam_words(){
++ let(mut s,owner,mut p)=fixture();let media=ItemId(p["source"]["sourceItem"].as_u64().unwrap());
++ let sub=s.edit("Fixture Subclip",|p,_|{let mut item=p.item(media).unwrap().clone();let id=ItemId(p.alloc_id());item.id=id;item.kind=ItemKind::Subclip{parent:media,range:filmcraft_engine::time::TimeRange::new(Tick(TPS),Tick(10*TPS)),restrict_trims:true};p.items.insert(id,item);
++  for seq in seqs_from_project(p,owner){for t in p.sequence_mut(ItemId(seq)).unwrap().all_tracks_mut(){for c in &mut t.items{c.item=id;}}}Ok(id)}).unwrap();
++ p["source"]["sourceItem"]=json!(sub.0);refresh(&s,owner,&mut p);let r=run(&mut s,"clipline.acceptCaptions",p);assert_eq!(r["captions"],12);
++}
++fn seqs_from_project(p:&filmcraft_engine::project::Project,owner:ItemId)->[u64;3]{let m:Value=serde_json::from_str(&p.item(owner).unwrap().metadata[LINKS]).unwrap();[m["sharedSequence"].as_u64().unwrap(),m["landscapeSequence"].as_u64().unwrap(),m["portraitSequence"].as_u64().unwrap()]}
++#[test]
++fn inactive_owner_manual_divergence_prevents_snapshot_and_save_copy_without_writes(){
++ let(mut s,owner,mut p)=fixture();run(&mut s,"clipline.acceptCaptions",p.clone());run(&mut s,"file.newSequence",json!({"name":"Independent"}));
++ let m=metadata(&s,owner,CAPTIONS);let receipt=&m["cues"][0];let working=Arc::make_mut(&mut s.project);let q=working.sequence_mut(ItemId(receipt["sequence"].as_u64().unwrap())).unwrap();q.caption_tracks[0].captions.iter_mut().find(|c|c.id.0==receipt["nativeId"].as_u64().unwrap()).unwrap().text="raw bypass".into();
++ let root=output_root();let target=root.join(format!("invalid-captions-{}.fcproj",std::process::id()));assert!(!target.exists());
++ reject(&mut s,"clipline.validate",json!({}));refresh(&s,owner,&mut p);reject(&mut s,"clipline.acceptCaptions",p);
++ reject(&mut s,"file.saveCopy",json!({"path":target}));assert!(!target.exists());
++ let p=json!({"path":target,"expectedProjectPath":s.path,"expectedRevision":s.revision,"expectedLinksRevisions":[{"owner":owner.0,"revision":0}]});reject(&mut s,"clipline.saveSnapshot",p);assert!(!target.exists());
++}
++#[test]
++fn accepted_source_range_and_final_clip_limit_bound_minimum_duration(){
++ let(mut s,owner,mut p)=fixture();p["projectionInput"]["identity"]["range"]["end_us"]=json!(7_900_000);
++ for track in p["tracks"].as_array_mut().unwrap(){track["rules"]["minDurationUs"]=json!(1_000_000);}
++ run(&mut s,"clipline.acceptCaptions",p);for c in metadata(&s,owner,CAPTIONS)["cues"].as_array().unwrap(){assert!(c["start"].as_i64().unwrap()+c["duration"].as_i64().unwrap()<=69*TPS/10);}
++}
++#[test]
++fn rejects_ambiguous_repeated_source_even_when_timeline_ranges_do_not_overlap(){
++ let(mut s,owner,mut p)=fixture();let m=metadata(&s,owner,LINKS);run(&mut s,"timeline.razor",json!({"clip":m["units"][0]["roles"][0]["portrait"],"time":3*TPS}));
++ let links=metadata(&s,owner,LINKS);s.edit("Fixture repeated source",|p,_|{for seq in seqs_from_project(p,owner){let q=p.sequence_mut(ItemId(seq)).unwrap();for t in q.all_tracks_mut(){for c in &mut t.items{if c.start==Tick(3*TPS){c.source_in=Tick(2*TPS);}}}}Ok(())}).unwrap();
++ assert_eq!(links["units"].as_array().unwrap().len(),2);run(&mut s,"clipline.validate",json!({}));refresh(&s,owner,&mut p);reject(&mut s,"clipline.acceptCaptions",p);
++}
++
++#[test]
++fn explicit_historical_revision_pin_is_valid_but_its_retained_payload_is_immutable(){
++ let(mut s,owner,original)=fixture();run(&mut s,"clipline.acceptCaptions",original.clone());
++ let mut second=original.clone();refresh(&s,owner,&mut second);second["projectionInput"]["accepted"]["revision"]=json!(2);second["projectionInput"]["accepted"]["parent_revision"]=json!(1);
++ second["projectionInput"]["accepted"]["words"][0]["timing"]["start_us"]=json!(2_150_000);run(&mut s,"clipline.acceptCaptions",second);
++ let mut historical=original;refresh(&s,owner,&mut historical);let mut forged=historical.clone();forged["projectionInput"]["accepted"]["created_utc"]=json!("different immutable payload");reject(&mut s,"clipline.acceptCaptions",forged);
++ run(&mut s,"clipline.acceptCaptions",historical);assert_eq!(metadata(&s,owner,CAPTIONS)["pin"]["revision"],1);
++}
++#[test]
++fn bindings_native_identity_and_null_time_refuse_without_mutation(){
++ for mode in ["doubletrack","unknownrole","nativeidentity","nulltime","nullowner","stream"] {
++  let(mut s,_,mut p)=fixture();match mode {
++   "doubletrack"=>p["tracks"][1]["track"]=p["tracks"][0]["track"].clone(),
++   "unknownrole"=>p["tracks"][0]["role"]=json!("other"),
++   "nativeidentity"=>p["source"]["storedMediaIdentity"]["fingerprint"]=json!("000000000000002b"),
++   "nulltime"=>p["projectionInput"]["accepted"]["words"][0]["timing"]["start_us"]=Value::Null,
++   "nullowner"=>p["expectedLinksRevisions"]=Value::Null,
++   "stream"=>p["projectionInput"]["identity"]["source"]["audio_stream_index"]=json!(0),_=>unreachable!()}
++  reject(&mut s,"clipline.acceptCaptions",p);
++ }
++}
++#[test]
++fn failed_linked_regeneration_keeps_recovery_and_playback_at_prior_committed_document(){
++ use filmcraft_engine::autosave::AutosaveConfig;
++ let(mut s,owner,p)=fixture();run(&mut s,"clipline.acceptCaptions",p);let root=output_root().join(format!("caption-observers-{}",std::process::id()));
++ s.start_autosave(AutosaveConfig::new(root)).unwrap();s.sync_persistence();s.persistence.as_ref().unwrap().flush();
++ let track=metadata(&s,owner,CAPTIONS)["tracks"][2]["track"].clone();run(&mut s,"captions.setTrack",json!({"track":track,"locked":true}));s.persistence.as_ref().unwrap().flush();
++ let before=snapshot(&s);let m=metadata(&s,owner,LINKS);reject(&mut s,"timeline.razor",json!({"clip":m["units"][0]["roles"][0]["portrait"],"time":3*TPS}));
++ s.persistence.as_ref().unwrap().flush();let path=s.persistence.as_ref().unwrap().session_dir.join("snapshot.fcproj");
++ let decoded=filmcraft_format::decode(&std::fs::read(path).unwrap()).unwrap();assert_eq!(serde_json::to_value(decoded.project).unwrap(),before);s.shutdown();
++}
++
++#[test]
++fn structurally_valid_accepted_metadata_cannot_bypass_the_explicit_acceptance_owner(){
++ let(mut s,owner,p)=fixture();run(&mut s,"clipline.acceptCaptions",p);
++ let(mut other,other_owner,mut newer)=fixture();assert_eq!(owner,other_owner);newer["projectionInput"]["accepted"]["revision"]=json!(2);newer["projectionInput"]["accepted"]["parent_revision"]=json!(1);
++ run(&mut other,"clipline.acceptCaptions",newer);let forged=metadata(&other,owner,CAPTIONS);
++ assert_eq!(metadata(&s,owner,CAPTIONS)["cues"],forged["cues"]);
++ let before=snapshot(&s);let error=s.execute("metadata.set",json!({"item":owner.0,"field":CAPTIONS,"value":forged.to_string()})).unwrap_err();
++ assert!(error.to_string().contains("explicit native acceptance"));assert_eq!(snapshot(&s),before);
++}
++
++#[test]
++fn canonical_global_audio_index_one_maps_to_sole_native_audio_ordinal_zero_and_ambiguity_rejects(){
++ let(mut s,owner,p)=fixture();assert_eq!(p["projectionInput"]["identity"]["source"]["audio_stream_index"],1);
++ assert_eq!(s.project.item(ItemId(p["source"]["sourceItem"].as_u64().unwrap())).unwrap().as_media().unwrap().info.audio_streams.len(),1);
++ run(&mut s,"clipline.acceptCaptions",p);assert_eq!(metadata(&s,owner,CAPTIONS)["cues"].as_array().unwrap().len(),12);
++ for mode in ["multiple_native_audio","wrong_selected_index","wrong_descriptor","partial_channels"] {
++  let(mut s,owner,mut p)=fixture();match mode {
++   "multiple_native_audio"=>{let media=ItemId(p["source"]["sourceItem"].as_u64().unwrap());s.edit("Fixture ambiguous streams",|p,_|{let audio=&mut p.item_mut(media).unwrap().as_media_mut().unwrap().info.audio_streams;audio.push(audio[0].clone());Ok(())}).unwrap();run(&mut s,"clipline.validate",json!({}));refresh(&s,owner,&mut p);},
++   "wrong_selected_index"=>p["projectionInput"]["identity"]["audio"]["extraction"]["selected_stream"]["index"]=json!(2),
++   "wrong_descriptor"=>p["projectionInput"]["identity"]["audio"]["extraction"]["selected_stream"]["sample_rate"]=json!("44100"),
++   "partial_channels"=>p["projectionInput"]["identity"]["source"]["channels"]=json!([]),_=>unreachable!()}
++  reject(&mut s,"clipline.acceptCaptions",p);
++ }
++}
++#[test]
++fn undo_then_different_payload_cannot_reuse_a_successfully_observed_transcript_revision(){
++ let(mut s,owner,p)=fixture();run(&mut s,"clipline.acceptCaptions",p.clone());run(&mut s,"edit.undo",json!({}));assert!(!s.project.item(owner).unwrap().metadata.contains_key(CAPTIONS));
++ let mut changed=p.clone();refresh(&s,owner,&mut changed);changed["projectionInput"]["accepted"]["words"][0]["text"]=json!("different");reject(&mut s,"clipline.acceptCaptions",changed);
++ let mut unchanged=p;refresh(&s,owner,&mut unchanged);run(&mut s,"clipline.acceptCaptions",unchanged);assert_eq!(metadata(&s,owner,CAPTIONS)["pin"]["revision"],1);
++}
++
++#[test]
++fn native_validation_reports_exact_resolved_file_path_without_claiming_a_fresh_hash(){
++ let(mut s,owner,p)=fixture();let source=ItemId(p["source"]["sourceItem"].as_u64().unwrap());
++ s.edit("Fixture file reference",|p,_|{p.item_mut(source).unwrap().as_media_mut().unwrap().media=MediaRef::File{path:"C:/owned exact/source.mp4".into()};Ok(())}).unwrap();
++ let validation=run(&mut s,"clipline.validate",json!({}));let role=&validation["owners"][0]["units"][0]["roles"][0];
++ assert_eq!(role["resolvedMediaItem"],source.0);assert_eq!(role["resolvedMediaPath"],"C:/owned exact/source.mp4");assert_eq!(role["storedMediaIdentity"]["fingerprint"],"000000000000002a");
++ assert_eq!(validation["owners"][0]["owner"],owner.0);assert!(validation["sourceIdentityCheck"].as_str().unwrap().contains("not rehashed"));
++}
++
++#[test]
++fn ordinary_metadata_queries_keep_last_valid_playback_and_recover_invalid_working_data(){
++ use filmcraft_engine::autosave::AutosaveConfig;
++ let(mut s,owner,p)=fixture();run(&mut s,"clipline.acceptCaptions",p);
++ s.start_autosave(AutosaveConfig::new(output_root().join(format!("caption-raw-recovery-{}",std::process::id())))).unwrap();
++ s.sync_persistence();s.persistence.as_ref().unwrap().flush();
++ let published=s.previews.live.project().unwrap();assert!(Arc::ptr_eq(&published,&s.project));let published_json=serde_json::to_value(&*published).unwrap();
++ let result:filmcraft_engine::Result<()>=s.edit_group("Staged playback probe",|s|{
++  s.edit("Staged valid native presentation",|p,_|{p.sequence_mut(owner).unwrap().caption_tracks[0].style.size+=2.;Ok(())})?;
++  assert!(!Arc::ptr_eq(&published,&s.project));assert!(Arc::ptr_eq(&published,&s.playback_project()));
++  Err(filmcraft_engine::EngineError::Other("injected group refusal".into()))
++ });assert!(result.is_err());assert!(Arc::ptr_eq(&s.project,&published));
++ let receipt=metadata(&s,owner,CAPTIONS)["cues"][0].clone();let sequence=ItemId(receipt["sequence"].as_u64().unwrap());let id=receipt["nativeId"].as_u64().unwrap();
++ Arc::make_mut(&mut s.project).sequence_mut(sequence).unwrap().caption_tracks[0].captions.iter_mut().find(|c|c.id.0==id).unwrap().text="raw invalid accepted text".into();
++ s.revision+=1;assert!(!Arc::ptr_eq(&published,&s.project));assert_eq!(serde_json::to_value(&*published).unwrap(),published_json);
++ assert!(Arc::ptr_eq(&published,&s.playback_project()));
++ for _ in 0..2 {run(&mut s,"metadata.get",json!({"item":owner.0}));assert!(Arc::ptr_eq(&published,&s.previews.live.project().unwrap()));}
++ s.persistence.as_ref().unwrap().flush();let path=s.persistence.as_ref().unwrap().session_dir.join("snapshot.fcproj");
++ let recovered=filmcraft_format::decode(&std::fs::read(path).unwrap()).unwrap().project;assert_eq!(recovered,*s.project);assert_ne!(serde_json::to_value(&recovered).unwrap(),published_json);
++ Arc::make_mut(&mut s.project).sequence_mut(sequence).unwrap().caption_tracks[0].captions.iter_mut().find(|c|c.id.0==id).unwrap().text=receipt["text"].as_str().unwrap().into();s.revision+=1;
++ assert!(Arc::ptr_eq(&s.project,&s.playback_project()));run(&mut s,"metadata.get",json!({"item":owner.0}));assert!(Arc::ptr_eq(&s.project,&s.previews.live.project().unwrap()));s.shutdown();
++}
 diff --git a/crates/engine/tests/clipline_linked_commands.rs b/crates/engine/tests/clipline_linked_commands.rs
 new file mode 100644
 --- /dev/null
@@ -2212,3 +3084,51 @@ new file mode 100644
 +    reopened.execute("file.open", json!({"path":path})).unwrap();
 +    assert_eq!(reopened.project.to_json(), before.to_json());
 +}
+diff --git a/crates/project/src/caption.rs b/crates/project/src/caption.rs
+--- a/crates/project/src/caption.rs
++++ b/crates/project/src/caption.rs
+@@ -261,6 +261,19 @@
+                 }
+             }
+             '&' => {
++                // Decode numeric entities once; escaped plain text must not become markup.
++                let numeric: String = chars.clone().take(12).collect();
++                if let Some(end) = numeric.find(';').filter(|_| numeric.starts_with('#')) {
++                    let body = &numeric[1..end];
++                    let number = if let Some(hex) = body.strip_prefix('x').or_else(||body.strip_prefix('X')) {
++                        u32::from_str_radix(hex,16).ok()
++                    } else { body.parse::<u32>().ok() };
++                    if let Some(decoded) = number.and_then(char::from_u32).filter(|c|!c.is_control()) {
++                        for _ in 0..numeric[..=end].chars().count() {chars.next();}
++                        out.push(decoded);
++                        continue;
++                    }
++                }
+                 let rest: String = chars.clone().take(8).collect();
+                 let ents = [
+                     ("amp;", '&'),
+@@ -293,6 +306,12 @@
+     use super::*;
+ 
+     #[test]
++    fn escaped_source_words_remain_literal_without_recursive_markup_parsing() {
++        assert_eq!(plain_text("&lt;b&gt; &#123;\\an8} &amp;amp; 漢字"), "<b> {\\an8} &amp; 漢字");
++        assert_eq!(plain_text("&#x1f600; &#99999999; &#not-a-number; &#xD800; &#0; &#-1;"), "😀 &#99999999; &#not-a-number; &#xD800; &#0; &#-1;");
++    }
++
++    #[test]
+     fn plain() {
+         assert_eq!(plain_text("<i>Hello</i> &amp; <b>bye</b>"), "Hello & bye");
+         assert_eq!(plain_text("{\\an8}Top"), "Top");
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -2151,7 +2151,7 @@
+ /// active sequence at device rate `sr` from `device_frame`, with the live project snapshot (edits
+ /// made while playing are heard), Output Mapping, the 5.1 mixdown and voice-over cues.
+ pub fn playback_mix(session: &Session, seq_id: filmcraft_project::ItemId, sr: u32) -> impl FnMut(i64, &mut [f32], usize) + Send + 'static {
+-    let project = session.project.clone();
++    let project = session.playback_project();
+     let provider = session.media.provider(project.clone(), session.services.clone());
+     let previews = session.previews.clone();
+     // Settings ▸ Audio Hardware ▸ Output Mapping
