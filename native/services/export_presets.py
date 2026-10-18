@@ -10,8 +10,8 @@ rounded facecam stacked into 9:16); without a guide it falls back to the
 plain vertical crop below. "Gameplay Focus" and "Baked Text Punch" remain
 single-source crops.
 
-Aspect-ratio presets (Output stage) are separate from style presets — they
-control resolution + scale + pad, not the framing bias.
+Portrait outputs use the selected style's framing. Landscape outputs fit
+the complete source frame so a portrait style cannot discard source content.
 """
 from __future__ import annotations
 
@@ -58,8 +58,7 @@ class FormatPreset:
     key: str
     label: str
     description: str
-    # Drives the final scale/pad on the Output stage. Leave video_filter
-    # alone — that's the StylePreset's responsibility.
+    # Drives the final canvas. Landscape preserves the complete source frame.
     width: int
     height: int
 
@@ -130,12 +129,22 @@ def build_clip_export_args(
     Returns the args between input and output paths so the worker can
     prepend ``-i <input>`` and append ``<output>`` itself.
     """
-    vf = style.video_filter + (
-        f",scale={fmt.width}:{fmt.height}:force_original_aspect_ratio=increase,"
-        f"crop={fmt.width}:{fmt.height}"
-        if fmt is not None
-        else ""
-    )
+    if fmt is not None and fmt.width > fmt.height:
+        # Convert source display geometry to square pixels before fitting it.
+        # Applying the portrait style first irreversibly removes source edges.
+        vf = (
+            "scale=w='trunc(iw*sar/2)*2':h=ih,setsar=1,"
+            f"scale={fmt.width}:{fmt.height}:force_original_aspect_ratio=decrease,"
+            f"pad={fmt.width}:{fmt.height}:(ow-iw)/2:(oh-ih)/2"
+        )
+    else:
+        vf = style.video_filter + (
+            f",scale={fmt.width}:{fmt.height}:force_original_aspect_ratio=increase,"
+            f"crop={fmt.width}:{fmt.height}"
+            if fmt is not None
+            else ""
+        )
+    vf += ",setsar=1"
     if subtitle_ass:
         vf += f",ass='{subtitle_ass}'"
     args: list[str] = [
