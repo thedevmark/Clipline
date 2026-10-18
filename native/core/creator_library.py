@@ -309,6 +309,19 @@ class CreatorLibrary:
             raise LibraryError(f"Unknown asset {asset_id}")
         return Asset(**dict(row))
 
+    def verify_asset(self, asset_id: str) -> Asset:
+        """Read the current bytes without changing identity or source location.
+
+        This is a point-in-time fingerprint check, not a lifetime file lock.
+        """
+        asset = self.asset(asset_id)
+        path, digest, size = _fingerprint(asset.path)
+        if self.asset(asset_id) != asset:
+            raise RevisionConflict("The source registration changed during verification")
+        if path != asset.path or digest != asset.sha256 or size != asset.bytes:
+            raise FingerprintMismatch("Current source bytes differ from the registered asset")
+        return asset
+
     def register_asset(self, path: Path | str) -> Asset:
         path, digest, size = _fingerprint(path)
         key = os.path.normcase(path)
