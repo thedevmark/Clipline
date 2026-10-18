@@ -18,9 +18,9 @@ Local implementation commits (not pushed): `21942a3` pinned Filmcraft source/com
 | Agent | Role | Write boundary |
 | --- | --- | --- |
 | `/root` | Controller, shared fixtures/harness, product integration, acceptance ledger | Product checkout and shared local evaluation manifests |
-| `/root/creator_kit_architecture` | Filmcraft executable evaluation | Local evaluation `filmcraft/` only |
-| `/root/caption_decision_review` | Drift executable evaluation and reserve screening | Local evaluation `drift/` only |
-| `/root/creative_workflow_review` | Premiere/current-product baseline and real-media inventory | Local evaluation `baseline/` and owned Premiere UI only |
+| `/root/creator_kit_architecture` | Native Kit factory/module/helper qualification | Local evaluation `filmcraft/` only |
+| `/root/native_session_owner` | Native session and caption correction/timing candidates | Local evaluation `filmcraft/` only |
+| `/root/creative_workflow_review` | Independent integration review and native export/Homebase contract | Local evaluation `baseline/`, `filmcraft/` and `homebase-native-handoff/` only |
 
 Agents inherit the session model. The exact model identifier is not exposed in their tool results. Parent integrates files after inspecting artifacts; there is one writer in the product checkout.
 
@@ -35,14 +35,14 @@ Agents inherit the session model. The exact model identifier is not exposed in t
 | W4: caption quality | Worker, canonical corrections and native projection integrated; incomplete | Actual admitted local ASR/alignment retains proposals. Explicit correction projects to three native tracks and renders. One-action spelling repair panel/controller passes actual Qt/native save/undo/redo/reopen. Managed installation, full workflow UI, timing/partial realignment and measured accuracy/repair effort remain |
 | W5: creative recipes | Policy ready; implementation pending | Hooks, subtitles, transitions, music/SFX, CTA |
 | W6: optional Jev | Evaluation design ready; no API access used | Opt-in data/cost boundary; local product does not depend on it |
-| W7: outputs / Homebase / results | Pending W3-W5 | Immutable jobs, verified exports, idempotent delivery, real analytics |
+| W7: outputs / Homebase / results | Native output owner and receiver-contract work executing; incomplete | Private storage proof and current Homebase mismatch reviewed. Immutable native export authority, compatible draft receiver, integration and real analytics remain |
 | W8: migration / release candidate | Pending | Clean Windows package, rollback, matched workflow benchmark |
 
 ## Current integration checkpoint
 
 Canonical v5 source is pinned by patch5fc762a2e11ae81461eae872407976ad63d1cd1a92f5363c92ec280ecd5838d4; fresh preparation matches all17 changed files. Root read82 final native checks. Actual product gateways passed native checkpoint publication and accepted-caption correction/linked regeneration/save/reopen on real media. Four native caption frames were rendered and visually reviewed. The clean v5 GUI now passes actual product-session startup, canonical caption correction, sampled preview, dual210-frame60fps exports, checkpoint publication and exact accepted-metadata reopen. Source/pin/EXE identities and independent output probes/decode are recorded below. The first startup adapter mismatch was corrected against the actual native query contract.
 
-The product editor process/session owner is integrated and passes actual GUI startup, save, close and reopen. The private native Kit factory now instantiates separate moment projects with shared template styles. The canonical spelling repair panel/controller is integrated and passes an actual Qt keyboard correction into the native GUI. Next product units are canonical factory integration and full Twitch/Library/Kit workflow integration, followed by measured acceptance. The accepted caption tests use authored evaluation text; speech accuracy and the reported two-hour workflow improvement remain unmeasured. General recovery, global resource governance, all native editing paths, repair UI, hooks/CTA/transition recipes and Homebase acceptance remain open.
+The product editor process/session owner is integrated and passes actual GUI startup, save, close and reopen. The private native Kit factory now instantiates separate moment projects with shared template styles. The canonical spelling repair panel/controller is integrated and passes an actual Qt keyboard correction into the native GUI. Next product units are canonical factory integration and full Twitch/Library/Kit workflow integration, followed by measured acceptance. The accepted caption tests use authored evaluation text; speech accuracy and the reported two-hour workflow improvement remain unmeasured. General recovery, global resource governance, all native editing paths, full caption workflow/timing UI, hooks/CTA/transition recipes and Homebase acceptance remain open.
 
 ## Earlier native integration history
 
@@ -398,3 +398,10 @@ Separate-process lease qualification also passes on the final spelling controlle
 `CreatorLibrary.kit_record()` now returns a frozen Kit ID/version, the exact persisted descriptor text and its UTF-8 SHA256. It does not reconstruct JSON with a different serializer. Existing `kit()` consumers parse that same text. This is the canonical source for the corrected native factory request and future export provenance; it adds no native document or second Kit store. A Unicode/fractional-value regression verifies stored bytes/hash, old-version stability after a new Kit revision and rejection of missing versions. Root ran the Creator Library, Twitch inbox and native-caption suites on this change: **57 passed, 37 subtests passed**, 16.43 seconds, exit 0; complete log `accepted-caption-product-integration/kit-record-tests-001.log`.
 
 The private corrected native factory independently repeats its two-moment, negative-case and NTSC matrix using this public API, including native persisted/returned descriptor hashes. It remains outside the canonical product source pin until root reviews the frozen module/strict-boundary tests and full-workspace helper build. Its earlier external-helper build is not a full-workspace executable qualification. Current source pin and clean GUI remain v5. Manual timing repair and immutable native export ownership are the next active independent units.
+
+
+### Final combined product regression after spelling repair and Kit identity API
+
+Root ran the complete repository pytest collection on product commit `5d5312f`, including the preserved foreign Homebase files: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 C:/Python314/python.exe -m pytest -q`. The complete raw output reports **417 passed, 955 subtests passed**, 64.42 seconds, exit 0, without warnings. Root read the complete output from `accepted-caption-product-integration/product-regression-after-repair-001.log`. This is the Python product suite; it is separate from native Rust compilation, model inference, GUI/render evidence, speech accuracy and Premiere performance. No code changed after that run for this record update.
+
+Active private units at this checkpoint: corrected native Kit module passed 25 boundary tests and canonical two-moment/negative/NTSC replay, including the public KitRecord API; formatting and a selected full-workspace helper build remain before source promotion. Original module tests retain four reproduced failures (oversized seed, differing later-cut gain and positional JSON arrays); corrected source rejects these inputs. Manual timing recovery passed the real v5 native command host but its controller/UI candidate is not integrated. The immutable native export authority/helper is under implementation; the Homebase handoff producer remains private and rejects current GUI result/path input. Canonical product source/clean GUI remain v5. No agent may overwrite the product checkout; root reviews and integrates each frozen unit.
