@@ -131,7 +131,16 @@ class TwitchLibraryTests(unittest.TestCase):
             old.execute("INSERT INTO kits VALUES ('kit-existing',1)")
             old.execute("INSERT INTO kit_versions VALUES ('kit-existing',1,?)", ('{"name":"Existing Kit"}',))
             old.commit()
-        with patch.object(Path, "open", side_effect=AssertionError("Migration must not open media")):
+        from native.core import accepted_transcript
+        migration_path = Path(accepted_transcript.__file__).with_name("caption_schema.sql")
+        original_open = Path.open
+
+        def migration_only(path, *args, **kwargs):
+            if path != migration_path:
+                raise AssertionError("Migration must not open media")
+            return original_open(path, *args, **kwargs)
+
+        with patch.object(Path, "open", migration_only):
             with CreatorLibrary(self.db) as library:
                 self.assertEqual(library.connection.execute("PRAGMA user_version").fetchone()[0], 2)
                 self.assertEqual(library.asset("asset-existing").sha256, "a" * 64)

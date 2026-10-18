@@ -28,13 +28,13 @@ binaries = [
     if dll.suffix.lower() == ".dll" and dll.name.lower().startswith(_FFMPEG_PREFIXES)
 ]
 
-# Just the icon assets are needed at runtime by the native shell. Bundling the
-# rest of ``static/`` would pull in ~600 KB of JS/HTML/CSS the native EXE
-# never reads, and it gets deleted in Phase 7 anyway.
+# Keep the runtime schema beside its owning module. The native shell needs only
+# icons from static/; it does not read the legacy web application's JS/HTML/CSS.
 datas = [
     ("static/favicon.ico", "static"),
     ("static/img/app-icon.svg", "static/img"),
     ("THIRD_PARTY_NOTICES.txt", "."),
+    ("native/core/caption_schema.sql", "native/core"),
 ]
 
 hiddenimports = [

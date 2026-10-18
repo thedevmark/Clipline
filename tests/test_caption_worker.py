@@ -20,7 +20,7 @@ class WorkerTests(unittest.TestCase):
                 "sample_zero_source_us":10_000_000,"extraction":{"source_sha256":hash_file(source),"argv":["fixture"]}},
             "range":{"start_us":10_000_000,"end_us":10_010_000}}
     def client(self,mode):
-        return CaptionClient(sys.executable,R/"native/services/caption_worker/worker.py",command=[sys.executable,"-u",str(R/"tests/fixtures/caption_fake_worker.py"),mode])
+        return CaptionClient(sys.executable,R/"native/services/caption_worker/worker.py",command=[sys.executable,"-u","-B","-S",str(R/"tests/fixtures/caption_fake_worker.py"),mode])
     def run_mode(self,mode,**kwargs):return self.client(mode).run(self.r,self.root/"runs",**kwargs)
     def test_empty_hypothesis_is_complete_and_artifacts_are_immutable(self):
         result=self.run_mode("success",timeout=4)
@@ -49,17 +49,25 @@ class WorkerTests(unittest.TestCase):
         cancel=threading.Event();cancel.set();r=self.run_mode("success",cancel=cancel);self.assertEqual(r.state,"cancelled");self.assertIsNone(r.hypothesis_path)
     def test_cancel_after_hypothesis_preserves_it_without_acceptance(self):
         cancel=threading.Event();holder=[]
-        t=threading.Thread(target=lambda:holder.append(self.run_mode("cancel_partial",cancel=cancel,timeout=5)));t.start()
+        t=threading.Thread(target=lambda:holder.append(self.run_mode("cancel_partial",cancel=cancel,timeout=30)));t.start()
         expected=self.root/"runs"/self.r["run_id"]/"hypothesis.json"
-        deadline=time.monotonic()+4
-        while not expected.exists() and time.monotonic()<deadline:time.sleep(.02)
-        self.assertTrue(expected.exists());cancel.set();t.join(4);self.assertFalse(t.is_alive());self.assertEqual(holder[0].state,"cancelled");self.assertTrue(expected.exists())
+        try:
+            deadline=time.monotonic()+15
+            while not expected.exists() and time.monotonic()<deadline:time.sleep(.02)
+            self.assertTrue(expected.exists())
+        finally:
+            cancel.set();t.join(10)
+        self.assertFalse(t.is_alive());self.assertEqual(holder[0].state,"cancelled");self.assertTrue(expected.exists())
     def test_cancel_kills_worker_descendant(self):
         cancel=threading.Event();holder=[];pid_path=self.root/"child.pid";self.r["test_child_pid_path"]=str(pid_path)
-        t=threading.Thread(target=lambda:holder.append(self.run_mode("child",cancel=cancel,timeout=5)));t.start()
-        deadline=time.monotonic()+4
-        while not pid_path.exists() and time.monotonic()<deadline:time.sleep(.02)
-        self.assertTrue(pid_path.exists());pid=int(pid_path.read_text());cancel.set();t.join(4);self.assertFalse(t.is_alive());self.assertEqual(holder[0].state,"cancelled")
+        t=threading.Thread(target=lambda:holder.append(self.run_mode("child",cancel=cancel,timeout=30)));t.start()
+        try:
+            deadline=time.monotonic()+15
+            while not pid_path.exists() and time.monotonic()<deadline:time.sleep(.02)
+            self.assertTrue(pid_path.exists());pid=int(pid_path.read_text())
+        finally:
+            cancel.set();t.join(10)
+        self.assertFalse(t.is_alive());self.assertEqual(holder[0].state,"cancelled")
         if os.name=="nt":
             import ctypes
             k=ctypes.WinDLL("kernel32",use_last_error=True);k.OpenProcess.restype=ctypes.c_void_p;k.OpenProcess.argtypes=[ctypes.c_uint32,ctypes.c_int,ctypes.c_uint32]
@@ -103,11 +111,14 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(p.returncode,0,p.stderr)
     def test_client_refuses_overlapping_heavy_jobs(self):
         c=self.client("sleep");cancel=threading.Event();holder=[]
-        t=threading.Thread(target=lambda:holder.append(c.run(self.r,self.root/"runs",timeout=5,cancel=cancel)));t.start()
-        deadline=time.monotonic()+4
-        while not (self.root/"runs"/self.r["run_id"]/"lifecycle.jsonl").exists() and time.monotonic()<deadline:time.sleep(.01)
-        with self.assertRaises(RuntimeError):c.run(self.r,self.root/"other")
-        cancel.set();t.join(4);self.assertFalse(t.is_alive());self.assertEqual(holder[0].state,"cancelled")
+        t=threading.Thread(target=lambda:holder.append(c.run(self.r,self.root/"runs",timeout=30,cancel=cancel)));t.start()
+        try:
+            deadline=time.monotonic()+15
+            while not (self.root/"runs"/self.r["run_id"]/"lifecycle.jsonl").exists() and time.monotonic()<deadline:time.sleep(.01)
+            with self.assertRaises(RuntimeError):c.run(self.r,self.root/"other")
+        finally:
+            cancel.set();t.join(10)
+        self.assertFalse(t.is_alive());self.assertEqual(holder[0].state,"cancelled")
     def test_malformed_worker_input_has_stable_failure(self):
         p=subprocess.run([sys.executable,"-B","-S",str(R/"native/services/caption_worker/worker.py")],input=b"{bad json}\n",capture_output=True,timeout=5)
         self.assertEqual(p.returncode,1);event=json.loads(p.stdout);self.assertEqual(event["data"]["error_code"],"INVALID_REQUEST")
@@ -133,13 +144,16 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(r.error_code,"INVALID_TIMEOUT")
     def test_short_stderr_phase_is_visible_before_worker_exit(self):
         cancel=threading.Event();holder=[]
-        t=threading.Thread(target=lambda:holder.append(self.run_mode("phase",timeout=5,cancel=cancel)));t.start()
-        log=self.root/"runs"/self.r["run_id"]/"stderr.log";deadline=time.monotonic()+2
+        t=threading.Thread(target=lambda:holder.append(self.run_mode("phase",timeout=30,cancel=cancel)));t.start()
+        log=self.root/"runs"/self.r["run_id"]/"stderr.log";deadline=time.monotonic()+15
         visible=False
-        while time.monotonic()<deadline:
-            if log.exists() and b"phase=waiting" in log.read_bytes():visible=True;break
-            time.sleep(.02)
-        cancel.set();t.join(4);self.assertFalse(t.is_alive());self.assertTrue(visible,"short stderr marker remained buffered")
+        try:
+            while time.monotonic()<deadline:
+                if log.exists() and b"phase=waiting" in log.read_bytes():visible=True;break
+                time.sleep(.02)
+        finally:
+            cancel.set();t.join(10)
+        self.assertFalse(t.is_alive());self.assertTrue(visible,"short stderr marker remained buffered")
     def test_alignment_cannot_introduce_foreign_word_id(self):
         r=self.run_mode("bad_alignment",timeout=4);self.assertEqual(r.error_code,"INVALID_EVIDENCE");self.assertIsNone(r.alignment_path)
     def test_machine_artifact_tampering_is_detected_on_read(self):

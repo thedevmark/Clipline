@@ -16,7 +16,7 @@ if mode=="crash": os._exit(7)
 if mode=="sleep": time.sleep(30);raise SystemExit(0)
 if mode=="phase": print("phase=waiting",file=sys.stderr,flush=True);time.sleep(30);raise SystemExit(0)
 if mode=="child":
-    child=subprocess.Popen([sys.executable,"-c","import time;time.sleep(30)"],creationflags=subprocess.CREATE_NO_WINDOW if os.name=="nt" else 0)
+    child=subprocess.Popen([sys.executable,"-S","-c","import time;time.sleep(30)"],creationflags=subprocess.CREATE_NO_WINDOW if os.name=="nt" else 0)
     Path(r["test_child_pid_path"]).write_text(str(child.pid),encoding="ascii")
     time.sleep(30);raise SystemExit(0)
 if mode=="false_complete": send("terminal",{"state":"complete"});raise SystemExit(0)

@@ -17,6 +17,7 @@ import uuid
 from typing import Any
 
 from native.core.twitch_inbox import TwitchClip, timestamp_identity
+from native.core.accepted_transcript import AcceptedTranscriptStore, install_schema as install_caption_schema
 
 
 class LibraryError(ValueError):
@@ -239,7 +240,13 @@ class CreatorLibrary:
             self.connection.execute("ROLLBACK")
             self.connection.close()
             raise
-        self.connection.execute("PRAGMA journal_mode=WAL")
+        try:
+            self.connection.execute("PRAGMA journal_mode=WAL")
+            install_caption_schema(self.connection)
+            self.captions = AcceptedTranscriptStore(self.connection)
+        except Exception:
+            self.connection.close()
+            raise
 
     def close(self) -> None:
         self.connection.close()
