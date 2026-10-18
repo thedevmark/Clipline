@@ -156,16 +156,19 @@ class DurableJobs:
         if changed!=1:raise StaleTransition("Job revision changed")
         self._event(job["id"],revision,state,detail or {})
 
-    def claim_next(self,*,owner_id):
+    def claim_next(self,*,owner_id,kinds=None):
         _id(owner_id)
+        if kinds is None:kinds=sorted(KINDS)
+        if not isinstance(kinds,(list,tuple)) or not kinds or len(kinds)>len(KINDS) or any(not isinstance(k,str) or k not in KINDS for k in kinds) or len(set(kinds))!=len(kinds):
+            raise JobError("Explicit supported job kinds required")
         with _write(self.c):
             free={}
             for row in self.c.execute("SELECT s.resource,s.slot FROM durable_job_slots s WHERE NOT EXISTS(SELECT 1 FROM durable_job_holds h WHERE h.resource=s.resource AND h.slot=s.slot) ORDER BY s.slot"):
                 free.setdefault(row[0],row[1])
             if "io" not in free:return None
-            query="SELECT i.id FROM durable_job_intents i JOIN durable_job_heads h ON h.job_id=i.id WHERE h.state='queued'"
+            query="SELECT i.id FROM durable_job_intents i JOIN durable_job_heads h ON h.job_id=i.id WHERE h.state='queued' AND i.kind IN ("+",".join("?" for _ in kinds)+")"
             if "heavy" not in free:query+=" AND i.kind='io'"
-            row=self.c.execute(query+" ORDER BY i.sequence LIMIT 1").fetchone()
+            row=self.c.execute(query+" ORDER BY i.sequence LIMIT 1",kinds).fetchone()
             if row is None:return None
             job=self.job(row[0]);token=str(uuid.uuid4());resources=["io"] if job["kind"]=="io" else ["heavy","io"]
             for resource in resources:self.c.execute("INSERT INTO durable_job_holds VALUES(?,?,?,?)",(resource,free[resource],job["id"],token))
@@ -246,3 +249,8 @@ class DurableJobs:
 
     def resources(self):
         return [dict(zip(("resource","slot","job_id","claim_token"),tuple(r))) for r in self.c.execute("SELECT resource,slot,job_id,claim_token FROM durable_job_holds ORDER BY resource,slot")]
+
+    def settlement(self,jid):
+        _id(jid)
+        row=self.c.execute("SELECT attestation_json FROM durable_job_settlements WHERE job_id=?",(jid,)).fetchone()
+        return json.loads(row[0]) if row is not None else None

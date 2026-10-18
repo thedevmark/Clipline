@@ -265,5 +265,12 @@ class JobTests(unittest.TestCase):
     def test_listing_bounds(self):
         for after,limit in ((-1,1),(0,0),(0,201),(True,1)):
             with self.subTest(after=after,limit=limit),self.assertRaises(m.JobError):self.store.list_jobs(after=after,limit=limit)
+    def test_kind_filter_cannot_claim_unsupported_queued_work(self):
+        io=self.submit("io",{});caption=self.submit()
+        claimed=self.store.claim_next(owner_id=self.owner,kinds=["caption"])
+        self.assertEqual(claimed["id"],caption["id"])
+        self.assertEqual(self.store.job(io["id"])["state"],"queued")
+        for kinds in ([],["unknown"],["caption","caption"],"caption",[True]):
+            with self.subTest(kinds=kinds),self.assertRaises(m.JobError):self.store.claim_next(owner_id=self.owner,kinds=kinds)
 
 if __name__=="__main__":unittest.main(verbosity=2)
