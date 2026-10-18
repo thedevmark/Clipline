@@ -32,7 +32,7 @@ Agents inherit the session model. The exact model identifier is not exposed in t
 | W1: Creator Library / Kit | Persistence slice integrated; incomplete | Shared identity, versioned Kits, conflict handling and bounded metadata pages pass tests. Native generations, jobs, retention, migration and UI remain |
 | W2: Twitch intake | Metadata persistence/API slice integrated; incomplete | Stable provenance, bounded pages and deduplication pass. Native inbox UI, durable preparation, downloads and connected account remain |
 | W3: editor / linked outputs | Pending W0/W1 | Native document authority, manual override preservation, performance |
-| W4: caption quality | Pending transcript and engine contracts | Managed local workers, corrections, measured repair effort |
+| W4: caption quality | Local worker integrated; incomplete | Source-bound immutable hypotheses/alignment and cancellation pass. Accepted corrections, native projection, managed installation and measured repair effort remain |
 | W5: creative recipes | Policy ready; implementation pending | Hooks, subtitles, transitions, music/SFX, CTA |
 | W6: optional Jev | Evaluation design ready; no API access used | Opt-in data/cost boundary; local product does not depend on it |
 | W7: outputs / Homebase / results | Pending W3-W5 | Immutable jobs, verified exports, idempotent delivery, real analytics |
@@ -68,6 +68,18 @@ The new `twitch_api.clips_page` retains complete clip provenance, explicit date 
 The read-only existing-account check stopped with `TwitchAuthError: Not connected to Twitch.` It changed no scopes/settings and downloaded no media. Receipt: `twitch-inbox/live-metadata-result.json`. The native inbox UI, preparation scheduling and connected-account acceptance remain unfinished; this slice does not close W2.
 
 The [Twitch reference](https://dev.twitch.tv/docs/api/reference/#get-clips) confirms view-count ordering, up to100 results per page, date filters, approximately1000 results per query, and nullable VOD offsets. Future inbox sync must paginate date windows rather than label the first page “latest.” The separate [download endpoint](https://dev.twitch.tv/docs/api/reference/#get-clips-download) requires clip-management scope and returns temporary URLs. This change does not request that scope or persist those URLs.
+
+### Integrated local caption worker
+
+`native/services/caption_worker/` now owns the optional local machine-evidence subprocess boundary. The parent imports only standard-library code. It validates source/audio/profile bindings, bounds protocol output/logs and deadlines, owns the Windows child tree, preserves partial hypotheses, checks canonical word order/non-overlap, and verifies artifact hashes on readback. ASR pieces/probabilities and alignment scores remain separate; missing timings stay null. It has no API that overwrites accepted corrections.
+
+Root integrated the six frozen candidate files byte for byte. The 38 protocol tests passed in the product checkout. Independent review reproduced an alignment-order/overlap hole; the corrected probe rejects it with partial evidence retained. Four earlier root review findings were also reproduced and fixed: invalid-request receipts, audio-path type, finite deadlines, and buffered short stderr messages. Original failed receipts remain retained.
+
+The final product runtime replay registered the real source through CreatorLibrary in a private evaluation catalog, then completed ASR/alignment with the final integrated worker build `3aa9fefae6b298423ce7898ecca7f7edd826b62d84a611bcdf9634665c22f049`. Thirteen canonical words retain sixteen ASR pieces; all thirteen align to their original IDs in source order within the selected 0..18-second span. Exit0, full artifact hashes and the actual source UUID are recorded in `caption-product-integration/runs/4a2ccf91-2680-4c7c-8563-8e8abfca25c1/`. The replay took102.039 seconds under concurrent compilation; it is not an uncontended performance result. The production library remained untouched.
+
+The profile still uses the qualified cached CPU small model and WhisperX alignment. It is an evaluation profile, not a selected quality winner. No listened reference, WER or repair-time improvement exists. Model installation, accepted transcript revisions/corrections, partial-span realignment, native subtitle projection, global scheduling/resource limits and caption UI remain unfinished. The accepted-transcript persistence prototype is the next independent W4 unit.
+
+Parent-read combined product check after the Twitch and caption worker integrations: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q` — **167 passed, 861 subtests passed**. This does not run optional model inference; the separate real runtime receipt above supplies that bounded check.
 
 ### Pinned source preparation
 
