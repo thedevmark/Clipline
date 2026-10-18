@@ -1,0 +1,64 @@
+# Chinese-language open-source screen for Clipline
+
+Checked 2026-10-18 against public primary repositories. This screen extends the master plan; it does not replace the Twitch-first direction or the selected Filmcraft native editor. Chinese and bilingual documentation were searched directly. Author nationality is not inferred from a username.
+
+## Evidence boundary
+
+GitHub API repository identities, default-branch commit IDs, archive flags and detected source licenses were captured for all sixteen candidates below. None was archived at this check. Selected immutable source files were downloaded and read for Qwen inference/alignment/dependencies, HotClip ASR/crop/highlight modules, FunClip clipping, and VideoCaptioner Bcut. Repository trees and source hashes remain in local evaluation `chinese-oss-screen/`. This was a source screen: no candidate application, model, installer, benchmark, media upload or external publication ran.
+
+Labels below separate source-confirmed paths from README-advertised behavior. License labels are GitHub metadata, checked against relevant README/model-card statements where noted, not a completed dependency/weight redistribution audit. Clipline currently carries AGPL-3.0 text; direct reuse still needs the applicable source, model, font and bundled-asset notices.
+
+## Ranked candidates
+
+| Repository at checked commit | Source license reported | Fit and next decision |
+| --- | --- | --- |
+| [QwenLM/Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR/tree/7c6daf77a2421100f5fb066495372c00129d39ff) | Apache-2.0 | **P1: benchmark**. Local ASR and forced alignment; inspect vocabulary context and exact word timing. Source confirms Transformers/local-path backend. English gaming accuracy and Windows operation untested. The aligner repairs anomalous timestamps internally; provenance must be retained before admission. |
+| [modelscope/FunASR](https://github.com/modelscope/FunASR/tree/879a219c717123fdec6024e8e56c734a7aace2ff) | MIT | **P1: screen selected backends**. VAD, punctuation and speech-model runtime. Toolkit license does not establish every weight license or timestamp granularity. |
+| [modelscope/FunClip](https://github.com/modelscope/FunClip/tree/36acf72e2add3c4af33fd35d373574a5dee96482) | MIT | **P1: workflow reference**. Text/speaker selection and clipping; English Paraformer launch path exists. Use native Clipline timelines for execution. Segment-level alternatives do not replace word timing. |
+| [QwenAudio/SenseVoice](https://github.com/QwenAudio/SenseVoice/tree/586bbdb2b052f4fe19322581825228b6810a9fb3) | MIT | **P2: quick-local challenger**. English is supported; laughter/emotion/audio-event tags may help candidate discovery. Model tags are evidence, not proof that a moment is good. The official weight card declares separate model-license terms, not the code's MIT license. |
+| [xixihhhh/hotclip](https://github.com/xixihhhh/hotclip/tree/4f4347d12c8a989d16be46aaeed7455d1f35f992) | AGPL-3.0 | **P1: inspect selected modules**. Strong stream-to-shorts overlap. Source confirms separate local/cloud ASR entries, face-crop planning/smoothing and a highlight gate. No Twitch-specific provenance or linked-composition guarantee established. |
+| [WEIFENG2333/VideoCaptioner](https://github.com/WEIFENG2333/VideoCaptioner/tree/95842ecb5618c0b6a548a336bdfb0eb859bdb501) | GPL-3.0 | **P1: subtitle UX reference**. Subtitle segmentation, repair and styles. Inspected Bcut backend explicitly uploads audio to Bilibili; exclude it from the local core. Other backends need individual review. |
+| [Huanshere/VideoLingo](https://github.com/Huanshere/VideoLingo/tree/01f843492759be9bbfd1a5cb697b799cc9de1609) | Apache-2.0 | **P2: caption workflow reference**. Segmentation, terminology and progress resumption. README identifies local Qwen recognition plus optional provider-dependent LLM/TTS; the full workflow is not automatically offline or free. |
+| [0xsline/OpenChatCut](https://github.com/0xsline/OpenChatCut/tree/7995b3cb3cf679b5c2c6a158e387680d7602e9eb) | AGPL-3.0 | **P2: editor/recipe comparison**. Correct upstream, not the small fork returned by search. Editable multitrack/agent workflow, visual-resource library and Remotion export are advertised. Inspect reusable resources and dependencies separately; no foundation switch selected. |
+| [WebAV-Tech/WebAV](https://github.com/WebAV-Tech/WebAV/tree/42dd6fd65ccbda39c729265c14aab56ac4d28235) | MIT | **P2: SDK reference**. MIT WebCodecs SDK with browser/Electron support; Pro is separate. Compare browser media handling where useful; no measured native Windows advantage established. |
+| [RapidAI/RapidOCR](https://github.com/RapidAI/RapidOCR/tree/7cfd3d9ef786a2e538ca30df700325e72e85b5f5) | Apache-2.0 | **P2: optional event evidence**. Local OCR runtime candidate for scoreboards, kill feeds and on-screen text. Sampled OCR proposes moments; it must not replace speech or accepted captions. |
+| [FireRedTeam/FireRedASR2S](https://github.com/FireRedTeam/FireRedASR2S/tree/4e7d9aaf4482a47cec1724807026b9b151926eb5) | Apache-2.0 | **P2: ASR standby**. Official project advertises English, code-switching and word timestamps. Mandarin CER claims are not English Twitch evidence. Weight and Windows runtime checks remain. |
+| [yoqu/lingji-cut](https://github.com/yoqu/lingji-cut/tree/59a2fc9f8bd00ca243b2b0d4c4e31b67eb6387d1) | Apache-2.0 | **P2: creator workflow reference**. Chinese-language desktop workflow for project assets, captions, motion cards and Remotion output. Distinguish reusable workflow ideas from configured generation/publication services. |
+| [mtsee/unicut](https://github.com/mtsee/unicut/tree/e0f2d47c51632f6d0024be25a33118c77f0f6766) | NOASSERTION | **Hold direct code reuse**. README and LICENSE describe a modified Apache-derived license with added conditions. GitHub reports NOASSERTION. Do not label this standard Apache-2.0 or assume branding/multitenant rights. |
+| [GuanYixuan/pyJianYingDraft](https://github.com/GuanYixuan/pyJianYingDraft/tree/1e228479dda361e312e85f6037002346cf6dca9a) | Apache-2.0 | **Reference only**. Draft/template automation around proprietary Jianying. Useful interchange research; it is not an independent open-source renderer or native editor foundation. |
+| [PaddlePaddle/PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR/tree/dab3fe35379033fdcb2d0e9572fac0b36c9a9ebf) | Apache-2.0 | **P2: optional event evidence**. OCR alternative for game-screen text. Evaluate selected model/runtime size and event precision, not document benchmarks alone. |
+| [Friend-Xu/GameVideoEdit](https://github.com/Friend-Xu/GameVideoEdit/tree/53e1fd778513ff0a5a64ff1a5c006512db0ea0d8) | GPL-3.0 | **P2: game-event reference**. Project advertises PUBG kill-text OCR and FFmpeg highlight exports. Game-specific detection is a pattern to test, not a universal gaming highlight classifier. |
+
+## Changes to the execution program
+
+1. **W4: add a real caption challenger.** Compare Qwen3-ASR 0.6B/1.7B with the current functional Whisper baseline and, where feasible, Whisper large-v3/turbo. Compare text recognition and forced alignment separately; the cached small model is not the strongest-market quality baseline. Qwen code and both selected official model cards declare Apache-2.0. The source offers a direct Transformers backend and vocabulary context, while optional vLLM is a separate dependency. Isolated Windows dependency/weight/runtime admission remains required. [Qwen source](https://github.com/QwenLM/Qwen3-ASR), [ASR model](https://huggingface.co/Qwen/Qwen3-ASR-1.7B), [aligner model](https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B).
+
+2. **W1/W3/W5: inspect complete workflow references.** Prioritize HotClip transcript repair, long-recording workflow, crop stability and quality gates; use FunClip for transcript-to-selection interaction. Examine VideoCaptioner/VideoLingo segmentation and terminology. Preserve source-clock accepted words, manual edits, native command ownership and linked outputs. LLM rewriting remains a proposal requiring review, not an automatic replacement of spoken words. [HotClip](https://github.com/xixihhhh/hotclip), [FunClip](https://github.com/modelscope/FunClip).
+
+3. **W5: screen creative resources and editor interactions.** Inspect OpenChatCut and Lingji Cut for editable motion-template/transition browsing and asset reuse. Prefer useful components or interaction patterns that fit the existing native owner. Remotion, online resource packs and provider-backed generation keep their own terms/dependencies. Filmcraft remains the native foundation; an attractive README alone does not trigger another rebuild. [OpenChatCut upstream](https://github.com/0xsline/OpenChatCut), [Lingji Cut](https://github.com/yoqu/lingji-cut).
+
+4. **W2: optional game-event discovery.** Evaluate RapidOCR/PaddleOCR over sampled frames for visible score/kill/event text, combined with speech, chat and creator marks. Retain evidence timestamps and reasons. Treat a candidate as a proposal; a kill feed or loud voice does not prove humor, payoff or post quality. This is an extension after the clip-first workflow, not a dependency for importing a known Twitch clip. [RapidOCR](https://github.com/RapidAI/RapidOCR), [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR).
+
+## Real-footage admission matrix
+
+Use the same local Twitch sources and precisely identified audio streams. Retain a listened, human-corrected reference and exact evaluation spans. Cover ordinary English gaming speech; names/game terms; shouting/laughter/music; overlapping speakers; silence; a word at a clip boundary; missing timing; and long-recording chunk boundaries. Test vocabulary context both on and off, including silence, to detect biased insertions.
+
+Measure text errors, proper-name errors, omitted/inserted words, timestamp boundary error and unresolved words separately. Record cold setup/download bytes, warm inference time, peak RAM/VRAM, cancellation, interrupted-work recovery and human correction time. Evaluate portrait/landscape readability and source-to-sequence mapping after native cuts. A candidate advances only when it reduces repair effort without corrupting timing, accepted corrections or offline behavior. Upstream Mandarin CER, stars, demo videos and advertised real-time factors do not establish this result.
+
+A Qwen/FunASR source/runtime review is assigned to the caption agent under local evaluation `chinese-oss-screen/asr-review/`. It may produce a source-only worker adapter proposal. It must retain the existing machine-proposal/explicit-acceptance protocol and source-clock identity; it may not download/run models, install packages or upload private audio in that review unit.
+
+## Concrete exclusions and corrections
+
+- Root source inspection confirms Qwen ForcedAligner `parse_timestamp()` always calls `fix_timestamp()`, which replaces/interpolates non-monotonic boundaries before returning public items. A Clipline adapter must retain raw/fixed evidence and withhold repaired spans; a clean-looking timestamp is not automatically measured alignment. [Pinned aligner source](https://github.com/QwenLM/Qwen3-ASR/blob/7c6daf77a2421100f5fb066495372c00129d39ff/qwen_asr/inference/qwen3_forced_aligner.py).
+- The official SenseVoiceSmall weight card declares `license: other` and links a model license. Its code repository's MIT license does not describe those weights. Read the applicable model terms before choosing or packaging a checkpoint. [Official weight card](https://huggingface.co/FunAudioLLM/SenseVoiceSmall).
+
+
+- Search initially returned `Leo0186/openchatcut`, a small fork. The retained candidate is the verified upstream `0xsline/OpenChatCut`.
+- VideoCaptioner's Bcut implementation uses a Bilibili cloud upload endpoint. Its no-key/free label is not offline processing. No such upload ran.
+- HotClip has both local and cloud ASR catalog entries. Its local defaults do not imply every optional feature avoids uploads.
+- UNICUT explicitly distinguishes its modified license from standard Apache-2.0; direct code reuse is held for that boundary.
+- Jianying draft automation still depends on the proprietary editor for the corresponding render workflow. It does not satisfy the independent native foundation requirement.
+
+## Evidence files
+
+Local-only evaluation contains `public-repository-metadata.json`, four complete repository tree responses, `source-receipts.json`, and immutable selected source copies. The table pins all sixteen repository revisions. No private media or credentials are in those public-source receipts. Future runtime claims require new receipts; this document supplies no candidate speed, accuracy or compatibility winner.

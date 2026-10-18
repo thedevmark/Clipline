@@ -35,6 +35,7 @@ Mark authorized execution of the full plan with agents on 2026-10-18. Begin with
 | R16 | Reuse what we have and the best suitable open source | Reuse map and component decisions; sections 2/5 |
 | R17 | Full workflow through export and content operations | Immutable export snapshots, Homebase handoff and results import; W7 |
 | R18 | Orchestrate an ambitious coherent program | Single acceptance ledger, dependency-ordered work packages, review contracts; section 10 |
+| R19 | Search Chinese-language and China-developed open-source ecosystems before final component choices | [Pinned 16-repository screen](../../evaluation/2026-10-18-chinese-oss-screen.md); Qwen/FunASR caption comparison, HotClip/FunClip workflows and creative/vision references |
 
 These requirements accumulate. A later message refines this table; it does not replace the other rows. A scope change needs an explicit recorded decision.
 
@@ -249,3 +250,8 @@ Three independent read-only reviews examined Creator Kit/library architecture, c
 Current Homebase retired the Video Drop lane receiver. Its executable manual intake scans only `<videoDropRoot>/post`, ignores the old `.homebase.json` sidecar, and imports X/Threads items. Nonempty `<media>.txt` creates human-authored approved public revisions. Clipline must not adapt generated metadata into that TXT convention. The older copied Clipline lane delivery also has demonstrated retry/collision/sidecar ownership defects and remains preserved rather than wired into the native flow.
 
 W7 requires a dedicated versioned native bundle receiver alongside the manual intake. It validates grouped landscape/portrait artifacts and provenance, atomically upserts the export-set and per-artifact identities, creates drafts, repairs partial imports idempotently and returns an ingestion acknowledgement. Clipline first needs a durable native export owner binding immutable snapshot, native jobs, selected compositions and independent artifact verification. A raw path or a checkpoint followed by a same-session evaluation export is insufficient. Until that owner and receiver pass, the product may report only a verified local folder delivery; it must not report Homebase ingestion or publication. No live receiver, database, watched-folder or platform action ran during this review. Source/test report: local evaluation `homebase-native-handoff/report.md`.
+
+
+### Expanded Chinese-language open-source evaluation
+
+Mark explicitly requested this search during implementation. R01–R18 and technical A01–A20 remain intact; R19 adds the missing discovery coverage. The first source screen verifies sixteen primary repositories and pins their checked revisions. It prioritizes Qwen3-ASR/ForcedAligner as local caption challengers, FunASR/FunClip and HotClip as speech/clipping/workflow references, VideoCaptioner/VideoLingo for subtitle handling, and OpenChatCut/Lingji Cut for editable creative resources. OCR candidates remain optional moment evidence. See the linked screen for actual source findings, local/cloud distinctions, custom-license exclusions and the real-footage admission matrix. No winner is inferred from upstream benchmarks or Chinese-language support. The selected Filmcraft foundation remains in place while component comparisons run.
