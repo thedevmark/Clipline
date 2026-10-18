@@ -1,0 +1,1 @@
+"""Persistent creator-library ownership."""
