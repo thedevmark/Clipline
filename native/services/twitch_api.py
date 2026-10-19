@@ -1,14 +1,15 @@
 """Twitch Helix reads for ingest — the logged-in user's VODs and clips.
 
-Uses the user token from ``twitch_auth`` plus the configured client ID. Only
-public read endpoints are touched, so no extra OAuth scopes are required:
+Uses the user token from ``twitch_auth`` plus the configured client ID. Metadata
+reads need no additional scopes; explicit official download resolution does:
 
     GET /helix/users                              -> who am I (id, login)
     GET /helix/videos?user_id=&type=archive       -> past broadcasts (VODs)
     GET /helix/clips?broadcaster_id=&first=        -> clips
+    GET /helix/clips/downloads                    -> temporary source URL
 
-Items are normalized to ``TwitchItem`` so the Ingest list doesn't care whether
-a row is a VOD or a clip — both carry a ``url`` we hand to yt-dlp.
+Legacy rows normalize to ``TwitchItem``. The persistent inbox uses ``TwitchClip``.
+Temporary signed downloads are separate from both metadata/provenance records.
 """
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 from native.services import twitch_auth
@@ -38,6 +39,69 @@ class TwitchItem:
 
 class TwitchAuthError(RuntimeError):
     """Raised when the stored token is missing or rejected (401) — reconnect."""
+
+
+class ClipDownloadUnavailable(RuntimeError):
+    """The selected clip has no usable official landscape source."""
+
+
+@dataclass(frozen=True)
+class TemporaryClipDownload:
+    """In-memory transport input. Never persist this signed URL as provenance."""
+    clip_id: str
+    landscape_url: str = field(repr=False)
+
+
+def own_clip_download(clip: TwitchClip) -> TemporaryClipDownload:
+    """Resolve one selected broadcaster-owned clip immediately before transfer.
+
+    This does not download media or change OAuth grants. Official downloading
+    requires an explicitly granted channel:manage:clips permission. Keep the
+    resulting signed URL inside the transfer owner, away from UI/job metadata.
+    """
+    if type(clip) is not TwitchClip:
+        raise ValueError("Select a validated Twitch clip")
+    # Revalidate frozen records; callers can still bypass dataclass construction.
+    TwitchClip(**vars(clip))
+    try:
+        account = current_user()
+    except TwitchAuthError:
+        raise TwitchAuthError("Reconnect Twitch before downloading clips.") from None
+    except RuntimeError:
+        raise ClipDownloadUnavailable("Twitch account could not be verified. Try again later.") from None
+    if account['id'] != clip.broadcaster_id:
+        raise TwitchAuthError("Connect the broadcaster's Twitch account to download this clip.")
+    try:
+        response = _get("clips/downloads", {
+            "broadcaster_id": clip.broadcaster_id,
+            "editor_id": account['id'], "clip_id": clip.id,
+        })
+    except TwitchAuthError:
+        raise TwitchAuthError("Reconnect Twitch with clip download permission.") from None
+    except RuntimeError as exc:
+        # Provider errors can contain a signed URL. Do not forward their body.
+        if isinstance(exc.__cause__, urllib.error.HTTPError) and exc.__cause__.code == 403:
+            raise TwitchAuthError("Twitch did not authorize clip downloads for this account.") from None
+        raise ClipDownloadUnavailable("Twitch could not provide this clip's download. Try again later.") from None
+    items = response.get('data') if isinstance(response, dict) else None
+    if (not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict)
+            or items[0].get('clip_id') != clip.id):
+        raise ClipDownloadUnavailable("Twitch did not return the selected clip's download.")
+    url = items[0].get('landscape_download_url')
+    if url is None:
+        raise ClipDownloadUnavailable("The landscape download is unavailable for this clip.")
+    if not isinstance(url, str) or not url or len(url) > 32768:
+        raise ClipDownloadUnavailable("Twitch returned an invalid clip download.")
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        valid = (parsed.scheme == 'https' and parsed.hostname and parsed.port in (None, 443)
+                 and not parsed.username and not parsed.password and not parsed.fragment
+                 and bool(parsed.path) and not any(ord(c) <= 32 or ord(c) == 127 for c in url))
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ClipDownloadUnavailable("Twitch returned an invalid clip download.")
+    return TemporaryClipDownload(clip.id, url)
 
 
 def _get(path: str, params: dict) -> dict:
