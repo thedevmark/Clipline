@@ -6,6 +6,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QDialog,
+    QDialogButtonBox,
     QInputDialog,
     QMessageBox,
     QPushButton,
@@ -29,12 +31,87 @@ def source_time(us):
     minutes, seconds = divmod(seconds, 60)
     return f'{minutes}:{seconds:02d}.{remainder // 1000:03d}'
 
+
+class SpellingMatchDialog(QDialog):
+    """Review exact occurrences from one detached accepted revision."""
+    def __init__(self, view, word_id, parent=None):
+        super().__init__(parent)
+        self.setObjectName('stage')
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setWindowTitle('Replace matching words')
+        self.setStyleSheet(theme.GLOBAL_QSS)
+        self.resize(840,540)
+        self.source_text = next(word.text for word in view.words if word.id==word_id)
+        body=QVBoxLayout(self)
+        heading=QLabel(f'Replace “{self.source_text}”')
+        heading.setTextFormat(Qt.TextFormat.PlainText);heading.setWordWrap(True)
+        heading.setProperty('title',True);body.addWidget(heading)
+        note=QLabel('Choose the occurrences to change in this accepted transcript. Matching is exact and case-sensitive. Source timing stays the same.')
+        note.setWordWrap(True);body.addWidget(note)
+        row=QHBoxLayout();label=QLabel('New spelling')
+        self.replacement=QLineEdit();self.replacement.setMaxLength(512)
+        self.replacement.setAccessibleName('Replacement spelling for checked occurrences');label.setBuddy(self.replacement)
+        row.addWidget(label);row.addWidget(self.replacement,1);body.addLayout(row)
+        matches=[(index,word) for index,word in enumerate(view.words) if word.text==self.source_text]
+        self.table=QTableWidget(len(matches),3)
+        self.table.setHorizontalHeaderLabels(['Use','Source time','Words around the match'])
+        self.table.setAccessibleName('Exact matching accepted-word occurrences')
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().hide()
+        self.table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2,QHeaderView.ResizeMode.Stretch)
+        for row,(index,word) in enumerate(matches):
+            check=QTableWidgetItem()
+            check.setFlags(Qt.ItemFlag.ItemIsEnabled|Qt.ItemFlag.ItemIsUserCheckable|Qt.ItemFlag.ItemIsSelectable)
+            check.setData(Qt.ItemDataRole.UserRole,word.id)
+            check.setCheckState(Qt.CheckState.Checked if word.id==word_id else Qt.CheckState.Unchecked)
+            self.table.setItem(row,0,check)
+            self.table.setItem(row,1,QTableWidgetItem(source_time(word.start_us)))
+            text=' '.join(('['+view.words[i].text+']') if i==index else view.words[i].text
+                for i in range(max(0,index-3),min(len(view.words),index+4)))
+            self.table.setItem(row,2,QTableWidgetItem(text))
+        body.addWidget(self.table,1)
+        selection=QHBoxLayout()
+        self.select_all=QPushButton('Select all matches')
+        self.clear=QPushButton('Clear selection')
+        self.select_all.clicked.connect(lambda:self._select(Qt.CheckState.Checked))
+        self.clear.clicked.connect(lambda:self._select(Qt.CheckState.Unchecked))
+        selection.addWidget(self.select_all);selection.addWidget(self.clear);selection.addStretch()
+        body.addLayout(selection)
+        self.buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel)
+        self.save=self.buttons.button(QDialogButtonBox.StandardButton.Save);self.save.setProperty('primary',True)
+        self.buttons.accepted.connect(self.accept);self.buttons.rejected.connect(self.reject)
+        body.addWidget(self.buttons)
+        self.table.itemChanged.connect(self._actions);self.replacement.textChanged.connect(self._actions)
+        self._actions();self.replacement.setFocus()
+
+    def selected_ids(self):
+        return [self.table.item(row,0).data(Qt.ItemDataRole.UserRole) for row in range(self.table.rowCount())
+                if self.table.item(row,0).checkState()==Qt.CheckState.Checked]
+
+    def _select(self,state):
+        self.table.blockSignals(True)
+        for row in range(self.table.rowCount()):self.table.item(row,0).setCheckState(state)
+        self.table.blockSignals(False)
+        self._actions()
+
+    def _actions(self,*args):
+        text=self.replacement.text();count=len(self.selected_ids())
+        self.save.setText(f'Replace selected ({count})')
+        self.save.setEnabled(count>0 and bool(text) and text!=self.source_text
+            and not any(c.isspace() or ord(c)<32 for c in text))
+
+    def accept(self):
+        if self.save.isEnabled():super().accept()
+
 class CaptionRepairPanel(QWidget):
     save_requested = Signal(object, str, str)
     apply_requested = Signal(object)
     check_requested = Signal(object)
     reload_requested = Signal(str)
     structure_requested = Signal(object, str, object, object)
+    matching_requested = Signal(object, str, str, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -98,6 +175,9 @@ class CaptionRepairPanel(QWidget):
         self.save.setProperty('primary', True)
         self.save.clicked.connect(self._save)
         row.addWidget(self.save)
+        self.matching = QPushButton('Replace matching…')
+        self.matching.clicked.connect(self._matching)
+        row.addWidget(self.matching)
         layout.addLayout(row)
         structural = QHBoxLayout()
         self.split = QPushButton('Split word…')
@@ -194,6 +274,7 @@ class CaptionRepairPanel(QWidget):
         self.save.setEnabled(
             editable and word is not None and (text != word.text) and bool(text) and (not any((c.isspace() or ord(c) < 32 for c in text))),
         )
+        self.matching.setEnabled(editable and word is not None and not self.has_draft())
         self.reload.setEnabled(self.view is not None and (not self.busy))
         self.apply.setVisible(bool(self.view and self.view.state == 'saved_pending'))
         self.apply.setEnabled(
@@ -222,6 +303,12 @@ class CaptionRepairPanel(QWidget):
     def _reload(self):
         if self.view:
             self.reload_requested.emit(self.view.transcript_id)
+
+    def _matching(self):
+        if not self.matching.isEnabled():return
+        dialog=SpellingMatchDialog(self.view,self.selected_word().id,self)
+        if dialog.exec()==QDialog.DialogCode.Accepted:
+            self.matching_requested.emit(self.view,dialog.source_text,dialog.replacement.text(),dialog.selected_ids())
 
     def _structure(self, action):
         button = {'split': self.split, 'merge': self.merge, 'delete': self.delete}.get(action)
@@ -287,6 +374,7 @@ class CaptionRepairBinding(QObject):
         panel.check_requested.connect(self._check)
         panel.reload_requested.connect(self._reload)
         panel.structure_requested.connect(self._structure)
+        panel.matching_requested.connect(self._matching)
 
     def _dispatch(self, fn, *args):
         if self.panel.busy:
@@ -319,6 +407,10 @@ class CaptionRepairBinding(QObject):
     @Slot(object, str, object, object)
     def _structure(self, view, action, word_ids, texts):
         self._dispatch(self.controller.save_structure, view, action, word_ids, texts)
+
+    @Slot(object, str, str, object)
+    def _matching(self,view,source_text,text,word_ids):
+        self._dispatch(self.controller.save_matching_spelling,view,source_text,text,word_ids)
 
     @Slot(object)
     def _finished(self, view):

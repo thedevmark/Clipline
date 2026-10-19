@@ -201,6 +201,7 @@ class RepairProxy:
     def load(self,transcript_id,revision):return self._call('load',transcript_id=transcript_id,revision=revision)
     def reload_saved(self,transcript_id):return self._call('reload',transcript_id=transcript_id)
     def save_spelling(self,view,word_id,text):return self._call('replace',view,word_id=word_id,text=text)
+    def save_matching_spelling(self,view,source_text,text,word_ids):return self._call('replace_matching',view,source_text=source_text,text=text,word_ids=word_ids)
     def save_timing(self,view,word_id,start_us,end_us):return self._call('retime',view,word_id=word_id,start_us=start_us,end_us=end_us)
     def save_structure(self,view,action,word_ids,texts):return self._call(action,view,word_ids=word_ids,texts=texts)
     def apply_saved(self,view):return self._call('apply',view)

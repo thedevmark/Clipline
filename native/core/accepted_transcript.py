@@ -309,7 +309,7 @@ class AcceptedTranscriptStore:
         if not isinstance(replacements,list) or len(replacements)>MAX_WORDS: raise TranscriptError("Bounded replacements are required")
         replacements=json.loads(_json(replacements))
         n,m=len(target_word_ids),len(replacements)
-        if not ((operation in ("replace","retime") and n==m==1) or (operation=="split" and n==1 and m>=2) or (operation=="merge" and n>=2 and m==1) or (operation=="delete" and m==0)):
+        if not ((operation=="replace" and n==m) or (operation=="retime" and n==m==1) or (operation=="split" and n==1 and m>=2) or (operation=="merge" and n>=2 and m==1) or (operation=="delete" and m==0)):
             raise TranscriptError("Correction cardinality does not match its operation")
         with _transaction(self.connection):
             if self.head(transcript_id)!=expected_revision: raise StaleRevision("Accepted head changed; read it again")
@@ -317,13 +317,21 @@ class AcceptedTranscriptStore:
             ids=[w["id"] for w in old]
             try: start=ids.index(target_word_ids[0])
             except ValueError as exc: raise TranscriptError("Target word is absent from this revision") from exc
-            if ids[start:start+n]!=target_word_ids: raise TranscriptError("Targets must be contiguous and preserve accepted order")
-            before=old[start:start+n]; replacement=[]
-            refs=[]
-            for w in before:
-                for ref in w["machine_refs"]:
-                    if ref not in refs: refs.append(ref)
-            for r in replacements:
+            if operation=="replace":
+                targets=set(target_word_ids)
+                positions=[i for i,wid in enumerate(ids) if wid in targets]
+                if [ids[i] for i in positions]!=target_word_ids: raise TranscriptError("Replacement targets must exist in accepted order")
+                before=[old[i] for i in positions]
+            else:
+                if ids[start:start+n]!=target_word_ids: raise TranscriptError("Targets must be contiguous and preserve accepted order")
+                before=old[start:start+n]
+            replacement=[]
+            for index,r in enumerate(replacements):
+                evidence=[before[index]] if operation=="replace" else before
+                refs=[]
+                for w in evidence:
+                    for ref in w["machine_refs"]:
+                        if ref not in refs: refs.append(ref)
                 if not isinstance(r,dict) or set(r)-{"text","timing"} or "text" not in r: raise TranscriptError("Replacement requires authored text and optional manual timing")
                 text=_token(r["text"])
                 if "timing" in r:
@@ -332,10 +340,14 @@ class AcceptedTranscriptStore:
                         raise TranscriptError("Authored timing must be manual or unresolved")
                     provenance={"kind":"human_manual" if timing["status"]=="manually_timed" else "human_unresolved","at_revision":expected_revision+1}
                 else:
-                    timing,provenance=self._retained_timing(operation,before,expected_revision)
+                    timing,provenance=self._retained_timing(operation,evidence,expected_revision)
                 if operation=="retime" and text!=before[0]["text"]: raise TranscriptError("Retime cannot change text")
-                replacement.append({"id":before[0]["id"] if operation=="retime" else str(uuid.uuid4()),"text":text,"timing":timing,"timing_provenance":provenance,"text_origin":before[0]["text_origin"] if operation=="retime" else "human","parent_word_ids":before[0]["parent_word_ids"] if operation=="retime" else target_word_ids[:],"machine_refs":refs})
-            words=old[:start]+replacement+old[start+n:]
+                replacement.append({"id":before[0]["id"] if operation=="retime" else str(uuid.uuid4()),"text":text,"timing":timing,"timing_provenance":provenance,"text_origin":before[0]["text_origin"] if operation=="retime" else "human","parent_word_ids":before[0]["parent_word_ids"] if operation=="retime" else [w['id'] for w in evidence],"machine_refs":refs})
+            if operation=="replace":
+                changed=dict(zip(positions,replacement))
+                words=[changed.get(i,word) for i,word in enumerate(old)]
+            else:
+                words=old[:start]+replacement+old[start+n:]
             resolved=[w["timing"] for w in before if w["timing"]["start_us"] is not None]
             span={"start_us":min(t["start_us"] for t in resolved),"end_us":max(t["end_us"] for t in resolved)} if resolved else {"start_us":None,"end_us":None}
             event={"operation":operation,"origin":origin,"target_word_ids":target_word_ids,"before_text":" ".join(w["text"] for w in before),"after_text":" ".join(w["text"] for w in replacement),"before_words":before,"after_word_ids":[w["id"] for w in replacement],"manual_timing":[{"word_id":w["id"],"timing":w["timing"]} for w in replacement if w["timing_provenance"]["kind"]=="human_manual"] or None,"timing_decisions":[{"word_id":w["id"],"timing":w["timing"],"provenance":w["timing_provenance"]} for w in replacement],"source_span":span}

@@ -307,6 +307,45 @@ class CaptionRepairController:
                 )
             return self._apply(library, saved, operation)
 
+    def save_matching_spelling(self, view, source_text, text, word_ids):
+        """Replace only the reviewed exact tokens in one canonical human revision."""
+        with self._operation() as library:
+            if not view.can_edit or view.state != 'saved_applied' or self.barrier.exists():
+                raise RepairBlocked('Apply or check the saved revision before another correction.')
+            allowed, reason = self._structure_admission(library, view)
+            if not allowed:
+                raise RepairBlocked(reason)
+            if not isinstance(word_ids,list) or not word_ids or len(word_ids)!=len(set(word_ids)):
+                raise RepairBlocked('Choose the occurrences to replace.')
+            words = library.captions.revision(view.transcript_id,view.revision)['words']
+            targets = set(word_ids)
+            selected = [word for word in words if word['id'] in targets]
+            if ([word['id'] for word in selected] != word_ids or not isinstance(source_text,str)
+                    or any(word['text'] != source_text for word in selected)):
+                raise RepairBlocked('Choose exact matching words from the displayed revision.')
+            if text == source_text:
+                raise RepairBlocked('Enter a different spelling.')
+            operation = self.directory / str(uuid.uuid4())
+            operation.mkdir()
+            write_once(operation/'save-intent.json', {
+                'operation':'replace','transcript_id':view.transcript_id,'expected_revision':view.revision,
+                'source_text':source_text,'replacement_text':text,'target_word_ids':word_ids,
+                'expected_native_pin':view.native_pin,
+            })
+            accepted = library.captions.edit(view.transcript_id,expected_revision=view.revision,
+                operation='replace',target_word_ids=word_ids,replacements=[{'text':text} for _ in word_ids],origin='human')
+            saved = self._view(library,view.transcript_id,accepted['revision'],
+                pin=view.native_pin,known=True,receipt=operation)
+            try:
+                write_once(operation/'saved.json',{'transcript_id':view.transcript_id,
+                    'revision':accepted['revision'],'event':library.captions.event(view.transcript_id,accepted['revision'])})
+            except OSError:
+                return replace(saved,message='Spelling changes saved. Their application receipt could not be started.')
+            result = self._apply(library,saved,operation)
+            if result.state == 'saved_applied':
+                return replace(result,message=f'{len(word_ids)} selected spelling change' + ('s' if len(word_ids)!=1 else '') + ' saved and applied.')
+            return result
+
     def apply_saved(self, view):
         """Explicit recovery after a known not-applied result; never follow head."""
         with self._operation() as library:
