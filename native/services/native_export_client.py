@@ -277,7 +277,7 @@ class NativeExportClient:
                     raise ExportRuntimeError('Snapshot bytes changed during native export')
                 state='completed'
         except ExportCancelled as exc:state='cancelled';fault=str(exc)
-        except Exception as exc:fault=type(exc).__name__+': '+str(exc)[:2000]
+        except Exception as exc:state='failed';fault=type(exc).__name__+': '+str(exc)[:2000]
         finally:
             cleanup=execution.stop()
         scopes=cleanup['scopes']
