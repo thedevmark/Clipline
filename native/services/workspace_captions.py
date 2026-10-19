@@ -318,7 +318,8 @@ class WorkspaceCaptions:
         def operation():
             self._admit(token,observation=action=='check');adapter=self._repair_adapter()
             specifications={'load':{'transcript_id','revision'},'reload':{'transcript_id'},'replace':{'word_id','text'},
-                'retime':{'word_id','start_us','end_us'},'apply':set(),'check':set()}
+                'retime':{'word_id','start_us','end_us'},'apply':set(),'check':set(),
+                'split':{'word_ids','texts'},'merge':{'word_ids','texts'},'delete':{'word_ids','texts'}}
             require(action in specifications and set(fields)==specifications[action],'Unknown or incomplete caption repair action')
             require(not self._native_uncertain or action=='check','Only Check editor can resolve this caption application')
             if action in ('load','reload'):
@@ -328,6 +329,7 @@ class WorkspaceCaptions:
                 require(view==self._view.repair and view is not None,'Use the exact displayed saved revision')
                 if action=='replace':result=adapter.save_spelling(view,fields['word_id'],fields['text'])
                 elif action=='retime':result=adapter.save_timing(view,fields['word_id'],fields['start_us'],fields['end_us'])
+                elif action in ('split','merge','delete'):result=adapter.save_structure(view,action,fields['word_ids'],fields['texts'])
                 elif action=='apply':result=adapter.apply_saved(view)
                 else:result=adapter.check_editor(view)
             return self._remember_repair(result,checked=action=='check')

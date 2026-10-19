@@ -6,6 +6,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QInputDialog,
+    QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -32,6 +34,7 @@ class CaptionRepairPanel(QWidget):
     apply_requested = Signal(object)
     check_requested = Signal(object)
     reload_requested = Signal(str)
+    structure_requested = Signal(object, str, object, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -62,7 +65,7 @@ class CaptionRepairPanel(QWidget):
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(['Source time', 'Word', 'Timing', 'Origin'])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().hide()
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -96,6 +99,15 @@ class CaptionRepairPanel(QWidget):
         self.save.clicked.connect(self._save)
         row.addWidget(self.save)
         layout.addLayout(row)
+        structural = QHBoxLayout()
+        self.split = QPushButton('Split word…')
+        self.merge = QPushButton('Merge words…')
+        self.delete = QPushButton('Delete…')
+        for button, action in ((self.split, 'split'), (self.merge, 'merge'), (self.delete, 'delete')):
+            button.clicked.connect(lambda checked=False, operation=action: self._structure(operation))
+            structural.addWidget(button)
+        structural.addStretch()
+        layout.addLayout(structural)
         self.message = QLabel('The correction keeps the selected word’s source timing.')
         self.message.setWordWrap(True)
         layout.addWidget(self.message)
@@ -143,10 +155,22 @@ class CaptionRepairPanel(QWidget):
         self._actions()
 
     def selected_word(self):
+        words = self.selected_words()
+        return words[0] if len(words) == 1 else None
+
+    def selected_words(self):
         if self.view is None:
-            return None
-        row = self.table.currentRow()
-        return self.view.words[row] if 0 <= row < len(self.view.words) else None
+            return ()
+        rows = sorted(index.row() for index in self.table.selectionModel().selectedRows())
+        return tuple(self.view.words[row] for row in rows if 0 <= row < len(self.view.words))
+
+    def contiguous_selection(self):
+        rows = sorted(index.row() for index in self.table.selectionModel().selectedRows())
+        return bool(rows) and rows == list(range(rows[0], rows[-1] + 1))
+
+    def has_draft(self):
+        word = self.selected_word()
+        return bool(word and self.spelling.text() != word.text)
 
     def _selected(self):
         word = self.selected_word()
@@ -156,7 +180,10 @@ class CaptionRepairPanel(QWidget):
                 f'Source {source_time(word.start_us)}–{source_time(word.end_us)} · {word.provenance}',
             )
         else:
-            self.detail.setText('Select one word to correct its spelling.')
+            count = len(self.selected_words())
+            self.detail.setText((f'{count} adjacent words selected. Merge or delete this selection.'
+                if self.contiguous_selection() else 'Select adjacent rows to merge or delete these words.') if count > 1
+                                else 'Select one word to correct its spelling or split it. Shift-select adjacent words to merge.')
         self._actions()
 
     def _actions(self):
@@ -175,6 +202,11 @@ class CaptionRepairPanel(QWidget):
         self.check.setVisible(bool(self.view and self.view.state == 'saved_uncertain'))
         self.check.setEnabled(not self.busy)
         self.table.setEnabled(not self.busy)
+        count = len(self.selected_words())
+        structural = bool(self.view and self.view.can_structure and not self.busy and not self._error and not self.has_draft())
+        self.split.setEnabled(structural and count == 1)
+        self.merge.setEnabled(structural and count >= 2 and self.contiguous_selection())
+        self.delete.setEnabled(structural and count >= 1 and self.contiguous_selection())
         if self.view and (not self.busy) and (not self._error):
             dirty = word is not None and text != word.text
             self.status.setText(
@@ -190,6 +222,43 @@ class CaptionRepairPanel(QWidget):
     def _reload(self):
         if self.view:
             self.reload_requested.emit(self.view.transcript_id)
+
+    def _structure(self, action):
+        button = {'split': self.split, 'merge': self.merge, 'delete': self.delete}.get(action)
+        if button is None or not button.isEnabled():
+            return
+        words = self.selected_words()
+        if action == 'delete':
+            confirm = QMessageBox(self)
+            confirm.setObjectName('stage')
+            confirm.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            confirm.setWindowTitle('Delete selected words?')
+            confirm.setTextFormat(Qt.TextFormat.PlainText)
+            confirm.setText(f'Delete {len(words)} selected word' + ('s?' if len(words) != 1 else '?'))
+            confirm.setInformativeText('Previous accepted revisions remain available. The source footage does not change.')
+            confirm.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+            confirm.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            if confirm.exec() != QMessageBox.StandardButton.Yes:
+                return
+            texts = []
+        else:
+            dialog = QInputDialog(self)
+            dialog.setObjectName('stage')
+            dialog.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            dialog.setInputMode(QInputDialog.InputMode.TextInput)
+            dialog.setWindowTitle('Split word' if action == 'split' else 'Merge words')
+            dialog.setLabelText('Enter the new words, separated by spaces. Set their source times next.'
+                if action == 'split' else 'Enter one merged word. Known outer source times are retained; missing times still need review.')
+            dialog.setTextValue(words[0].text if action == 'split' else ''.join(word.text for word in words))
+            dialog.setOkButtonText('Save split' if action == 'split' else 'Save merge')
+            dialog.findChild(QLineEdit).setMaxLength(4096)
+            if dialog.exec() != QInputDialog.DialogCode.Accepted:
+                return
+            texts = dialog.textValue().split() if action == 'split' else [dialog.textValue().strip()]
+            if (action == 'split' and len(texts) < 2) or any(not text or len(text) > 512 or any(c.isspace() or ord(c) < 32 for c in text) for text in texts):
+                self.message.setText('Enter at least two words for a split, or one word without spaces for a merge.')
+                return
+        self.structure_requested.emit(self.view, action, [word.id for word in words], texts)
 
     def set_busy(self, busy):
         self.busy = busy
@@ -217,6 +286,7 @@ class CaptionRepairBinding(QObject):
         panel.apply_requested.connect(self._apply)
         panel.check_requested.connect(self._check)
         panel.reload_requested.connect(self._reload)
+        panel.structure_requested.connect(self._structure)
 
     def _dispatch(self, fn, *args):
         if self.panel.busy:
@@ -245,6 +315,10 @@ class CaptionRepairBinding(QObject):
     @Slot(str)
     def _reload(self, tid):
         self._dispatch(self.controller.reload_saved, tid)
+
+    @Slot(object, str, object, object)
+    def _structure(self, view, action, word_ids, texts):
+        self._dispatch(self.controller.save_structure, view, action, word_ids, texts)
 
     @Slot(object)
     def _finished(self, view):

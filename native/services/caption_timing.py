@@ -66,10 +66,22 @@ class TimingRepairController(CaptionRepairController):
         current = library.captions.revision(view.transcript_id, view.revision)
         old_words = prior['accepted']['words']
         current_words = current['words']
+        structural = False
+        # Every intervening canonical revision must descend from this exact
+        # applied pin. A proposal or a different transcript is not a repair base.
+        for revision in range(pin['revision'] + 1, view.revision + 1):
+            event = library.captions.event(view.transcript_id, revision)
+            saved = library.captions.revision(view.transcript_id, revision)
+            if (event.get('origin') != 'human' or event.get('transcript_id') != view.transcript_id
+                    or event.get('operation') not in ('replace', 'retime', 'split', 'merge', 'delete')
+                    or event.get('expected_revision') != revision - 1
+                    or event.get('resulting_revision') != revision or saved['parent_revision'] != revision - 1):
+                return False, 'The pending words do not have a verified human repair lineage.'
+            structural = structural or event['operation'] in ('split', 'merge', 'delete')
         if (
-            len(old_words) != len(current_words)
+            not structural and (len(old_words) != len(current_words)
             or [word_identity(word) for word in old_words]
-            != [word_identity(word) for word in current_words]
+            != [word_identity(word) for word in current_words])
         ):
             return False, 'Apply the saved text correction before changing timing.'
         return True, 'Enter the selected word’s start and end in the original source.'
@@ -82,6 +94,7 @@ class TimingRepairController(CaptionRepairController):
             allowed = False
             reason = 'The editor could not be verified. Reload the saved words.'
         values = {field.name: getattr(view, field.name) for field in fields(RepairView)}
+        values['can_structure'] = allowed
         return TimingRepairView(
             **values,
             can_time=allowed,
@@ -89,6 +102,9 @@ class TimingRepairController(CaptionRepairController):
             source_end_us=identity['range']['end_us'],
             timing_message=reason,
         )
+
+    def _structure_admission(self, library, view):
+        return self._timing_admission(library, view)
 
     def _view(self, library, tid, revision, **kwargs):
         return self._with_timing(
@@ -110,6 +126,7 @@ class TimingRepairController(CaptionRepairController):
         return replace(
             result,
             can_time=False,
+            can_structure=False,
             timing_message='Check the unsettled editor application before changing timing.',
         )
 
@@ -118,6 +135,7 @@ class TimingRepairController(CaptionRepairController):
         return replace(
             result,
             can_time=result.state == 'saved_applied',
+            can_structure=result.state == 'saved_applied',
             timing_message=(
                 'Enter the selected word’s original source interval.'
                 if result.state == 'saved_applied'

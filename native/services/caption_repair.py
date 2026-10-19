@@ -1,4 +1,4 @@
-"""Canonical one-word correction followed by one native application.
+"""Canonical accepted-word repair followed by one native application.
 
 All methods run on a background owner. Every operation opens its own library
 connection there. Views are detached; no SQLite object or native timeline enters
@@ -40,6 +40,7 @@ class RepairView:
     can_apply: bool
     can_edit: bool
     receipt_directory: str | None = None
+    can_structure: bool = False
 
 class RepairBusy(RuntimeError):
     pass
@@ -139,7 +140,7 @@ class CaptionRepairController:
         words = tuple(
             (WordView(w['id'], w['text'], w['timing']['start_us'], w['timing']['end_us'], w['timing']['status'], self._provenance(w), w['text_origin']) for w in accepted['words']),
         )
-        usable = bool(words) and all((w.timing_status in ('aligned', 'manually_timed', 'inherited') for w in words))
+        usable = all((w.timing_status in ('aligned', 'manually_timed', 'inherited') for w in words))
         return RepairView(
             tid,
             revision,
@@ -152,12 +153,15 @@ class CaptionRepairController:
             state == 'saved_pending' and known and usable,
             state == 'saved_applied',
             str(receipt) if receipt else None,
+            state == 'saved_applied',
         )
 
     @staticmethod
     def _provenance(word):
         p = word['timing_provenance']
         if p['kind'] == 'inherited':
+            if p.get('mode') == 'outer_span':
+                return 'Outer interval from revision ' + str(p['from_revision'])
             return 'Same interval from revision ' + str(p['from_revision'])
         if p['kind'] == 'alignment_proposal':
             return 'Accepted alignment'
@@ -312,6 +316,57 @@ class CaptionRepairController:
             operation.mkdir()
             return self._apply(library, view, operation)
 
+    def _structure_admission(self, library, view):
+        if self.barrier.exists() or view.state != 'saved_applied' or not view.native_pin_known:
+            return False, 'Apply or check the saved revision before changing words.'
+        pin, body = self._observe()
+        if pin != view.native_pin or body is None or body.get('input') != library.captions.projection_input(view.transcript_id, revision=view.revision):
+            return False, 'The editor captions changed. Reload the saved words.'
+        return True, ''
+
+    def save_structure(self, view, action, word_ids, texts):
+        """Save one authored structural edit, then use the existing projection owner once."""
+        if action not in ('split', 'merge', 'delete'):
+            raise RepairBlocked('Choose Split, Merge or Delete.')
+        if not isinstance(word_ids, list) or not isinstance(texts, list):
+            raise RepairBlocked('Select ordered words and explicit replacement text.')
+        if not ((action == 'split' and len(word_ids) == 1 and len(texts) >= 2)
+                or (action == 'merge' and len(word_ids) >= 2 and len(texts) == 1)
+                or (action == 'delete' and word_ids and not texts)):
+            raise RepairBlocked('The selected words do not fit this action.')
+        with self._operation() as library:
+            if not view.can_structure:
+                raise RepairBlocked('This saved revision is not ready for word edits.')
+            allowed, reason = self._structure_admission(library, view)
+            if not allowed:
+                raise RepairBlocked(reason)
+            operation = self.directory / str(uuid.uuid4())
+            operation.mkdir()
+            write_once(operation / 'save-intent.json', {
+                'operation': action, 'transcript_id': view.transcript_id,
+                'expected_revision': view.revision, 'target_word_ids': word_ids,
+                'replacement_text': texts, 'expected_native_pin': view.native_pin,
+            })
+            accepted = library.captions.edit(view.transcript_id,
+                expected_revision=view.revision, operation=action,
+                target_word_ids=word_ids, replacements=[{'text': text} for text in texts], origin='human')
+            saved = self._view(library, view.transcript_id, accepted['revision'],
+                pin=view.native_pin, known=view.native_pin_known, receipt=operation)
+            try:
+                write_once(operation / 'saved.json', {
+                    'transcript_id': view.transcript_id, 'revision': accepted['revision'],
+                    'event': library.captions.event(view.transcript_id, accepted['revision']),
+                })
+            except OSError:
+                return replace(saved, message='Word edit saved. Its application receipt could not be started.')
+            result = self._apply(library, saved, operation)
+            if result.state == 'saved_pending' and not result.can_apply:
+                return replace(result, message=('Split saved. Set each new word’s source interval before applying.'
+                    if action == 'split' else 'Word edit saved. Finish the remaining source timing before applying.'))
+            if result.state == 'saved_applied':
+                return replace(result, message='Word edit saved and applied to the editor.')
+            return result
+
     def _apply(self, library, view, operation):
         if self.barrier.exists():
             raise RepairBlocked('An earlier editor application needs checking')
@@ -437,6 +492,7 @@ class CaptionRepairController:
             state='saved_uncertain',
             can_apply=False,
             can_edit=False,
+            can_structure=False,
             message='Correction saved. The editor outcome is unknown. Check the editor before another application.',
             receipt_directory=str(operation),
         )
@@ -502,6 +558,7 @@ class CaptionRepairController:
                 native_pin_known=True,
                 can_apply=False,
                 can_edit=True,
+                can_structure=True,
                 message='Saved correction confirmed in the editor.',
                 receipt_directory=str(operation),
             )

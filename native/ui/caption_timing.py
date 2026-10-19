@@ -96,6 +96,12 @@ class TimingRepairPanel(CaptionRepairPanel):
         self._timing_validation = None
         self._actions()
 
+    def has_draft(self):
+        word = self.selected_word()
+        return super().has_draft() or bool(word and self.start_time is not None and (
+            self.start_time.text() != source_seconds(word.start_us)
+            or self.end_time.text() != source_seconds(word.end_us)))
+
     def _interval(self):
         start = parse_source_seconds(self.start_time.text())
         end = parse_source_seconds(self.end_time.text())
