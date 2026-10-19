@@ -26,6 +26,14 @@ The 69 focused cases include 12 real private Windows process/Job Object/read-gua
 
 Historical actual standalone export002 remains separate evidence for its old qualified helper and frozen071 client. It produced verified real landscape and portrait files, with nine stopped owned scopes and zero remaining durable holds. This source integration does not transfer that qualification to a newly compiled binary. The unified two-helper build and its 31 factory plus seven export cases have a separate admission and receipt.
 
+## Explicit runtime configuration
+
+`native/services/export_runtime.py` now loads a strict, bounded schema-1 manifest with explicit helper, ffprobe, ffmpeg, Python and tool-gate identities, declared versions, engine version and native-only source-pin SHA256. Parsing reads at most 65,537 bytes and rejects oversized, duplicate, missing, extra, nonfinite or malformed settings. It performs no executable discovery or launch. Its source is exact private candidate SHA256 `82f8357059b1a57d49bf50d3942ab615869ab3ca5a53cb6a9f5e82410ce9690f`.
+
+Client construction requires a background thread. It compares the existing client's captured gate hash to the manifest before returning the client; later execution still guards and rechecks that admitted identity. A restored file after a constructor-time swap cannot hide a captured wrong gate. The parser does not prove that an arbitrary source digest describes native code; the qualified source owner must supply that identity and its exact helper binding.
+
+Root read the candidate source, tests and report, installed the unchanged service, and changed only the test import to the product namespace. The combined installed runtime/export collection passed **119 tests in 5.65 seconds**, exit 0. Root read the complete raw result at `filmcraft/native-export-runtime-001/results/root-product-001/pytest.log`. The 50 new manifest cases use temporary files and constructor doubles; the private omission control made both gate-swap cases fail when the comparison was removed. No actual helper, decoder or render ran. The preceding 593-test full collection predates this runtime module; it is not reported as a new full-suite result.
+
 ## Other active findings
 
 The companion editor's old checkpoint-then-force-close path failed an independent late-edit reproduction. The Qt caller now refuses that path. A private graceful-close replacement passed 40 fixtures but then failed a focused Save As reproduction: the native app could adopt a new saved path after a checkpoint while the old working file still matched the canonical generation. That candidate remains unpromoted. Comparing the old file after process exit cannot prove the final native project identity. The actual companion replay remains disabled pending a complete native close contract.
