@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 import native.services.export_runtime as subject
+from native.services.export_recipes import GPU_RECIPE_ID, SOFTWARE_RECIPE_ID
 
 
 def manifest(root):
@@ -44,6 +45,7 @@ def test_load_preserves_explicit_pins_without_reading_or_discovering_programs(tm
     assert runtime.engine_version == 'qualified-native-fixture-1'
     assert dict(runtime.program_versions)['ffprobe'] == 'ffprobe-fixture-1'
     assert not runtime.helper.path.exists()
+    assert runtime.recipe_id == SOFTWARE_RECIPE_ID
 
 
 @pytest.mark.parametrize('change', [
@@ -131,6 +133,30 @@ def test_background_construction_returns_only_manifest_matched_captured_gate(tmp
     assert client.python is runtime.python
     assert client.source_pin_sha256 == value['native_source_pin_sha256']
     assert client.engine_version == value['engine_version']
+    assert client.recipe_id == SOFTWARE_RECIPE_ID
+
+
+@pytest.mark.parametrize('recipe_id', [SOFTWARE_RECIPE_ID, GPU_RECIPE_ID])
+def test_explicit_profile_reaches_client_without_changing_program_pins(tmp_path, recipe_id):
+    value = manifest(tmp_path) | {'schema': 2, 'recipe_id': recipe_id}
+    gate = Path(value['gate']['path'])
+    gate.write_bytes(b'non-executed fixture gate')
+    value['gate']['sha256'] = hashlib.sha256(gate.read_bytes()).hexdigest()
+    runtime = subject.load_export_runtime(save(tmp_path, value))
+    client = background(runtime.client)
+    assert client.recipe_id == recipe_id
+    assert client.helper.sha256 == value['helper']['sha256']
+    assert client.source_pin_sha256 == value['native_source_pin_sha256']
+
+
+@pytest.mark.parametrize('change', [
+    {'schema': 1, 'recipe_id': GPU_RECIPE_ID},
+    {'schema': 2, 'recipe_id': 'unqualified'},
+    {'schema': 2, 'recipe_id': True},
+])
+def test_profile_selection_is_explicit_and_bounded(tmp_path, change):
+    with pytest.raises(ValueError):
+        subject.load_export_runtime(save(tmp_path, manifest(tmp_path) | change))
 
 
 def test_gate_changed_after_config_load_is_not_admitted(tmp_path):

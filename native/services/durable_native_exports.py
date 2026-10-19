@@ -13,8 +13,9 @@ from native.core.durable_jobs import DurableJobs,StaleTransition,VerificationReq
 from native.services.caption_worker.evidence import canonical,digest,hash_file
 from native.services.caption_worker.client import write_once
 from native.services.native_export_client import NativeExportClient,ExportExecution,ExportOutcome,verify_probe
+from native.services.export_recipes import export_recipe
 
-RECIPE={'id':'clipline.h264.software.v1','format':'h264','range':'entire','gpuRendering':'off','hardwareEncoding':'off','burnCaptions':True,'audio':{'codec':'aac','sample_rate':48000,'channels':2},'scale':1}
+RECIPE=export_recipe()
 class ExportJobError(ValueError):pass
 
 class ExportOwnershipError(ExportJobError):
@@ -54,6 +55,7 @@ class DurableNativeExports:
         if type(client) is not NativeExportClient:raise ExportJobError('The qualified native export client is required')
         self.library=library;self.directory=Path(directory).resolve();self.directory.mkdir(parents=True,exist_ok=True)
         self.client=client;self.owner_id=identifier(owner_id or str(uuid.uuid4()));self._attestations={};self._busy=threading.Lock();self._executions={}
+        self.recipe=export_recipe(client.recipe_id)
         self.jobs=DurableJobs(library.connection,settlement_verifier=self._verify)
         row=library.connection.execute('PRAGMA database_list').fetchone()
         if not row or not row[2]:raise ExportJobError('Persistent CreatorLibrary required')
@@ -88,7 +90,7 @@ class DurableNativeExports:
         envelope={'schema':1,'project_id':project_id,'snapshot':{'path':str(snapshot.path),'project_id':project_id,'generation':snapshot.generation,'revision':snapshot.revision,'sha256':snapshot.sha256,'engine':snapshot.engine,'engine_version':snapshot.engine_version},
             'kit':{**kit_pin,'descriptor_sha256':record.descriptor_sha256},'accepted_pin':accepted_pin,
             'source_asset_id':moment.source_asset_id,'assets':[{'asset_id':a.id,'sha256':a.sha256,'path':a.path} for a in sorted(pins.values(),key=lambda a:a.id)],
-            'owners':owners,'compositions':compositions,'recipe_sha256':digest(RECIPE),
+            'owners':owners,'compositions':compositions,'recipe_sha256':digest(self.recipe),
             'engine':{'helper_sha256':self.client.helper.sha256,'source_pin_sha256':self.client.source_pin_sha256,'version':self.client.engine_version}}
         envelope=json.loads(canonical(envelope));intent=self._bind(envelope)
         reference=self._write('requests',str(uuid.uuid5(uuid.UUID(idempotency_key),'native-export-request')),envelope)
@@ -96,7 +98,7 @@ class DurableNativeExports:
     def _bind(self,envelope,intent=None,*,live_paths=True):
         if not isinstance(envelope,dict) or set(envelope)!={'schema','project_id','snapshot','kit','accepted_pin','source_asset_id','assets','owners','compositions','recipe_sha256','engine'}:
             raise ExportJobError('Exact native execution envelope required')
-        if type(envelope['schema']) is not int or envelope['schema']!=1 or envelope['recipe_sha256']!=digest(RECIPE):raise ExportJobError('Unsupported pinned export recipe')
+        if type(envelope['schema']) is not int or envelope['schema']!=1 or envelope['recipe_sha256']!=digest(self.recipe):raise ExportJobError('Unsupported pinned export recipe')
         selected_compositions(envelope['compositions']);owner_inventory(envelope['owners'])
         identifier(envelope['project_id']);snapshot=envelope['snapshot'];identifier(snapshot['generation']);sha(snapshot['sha256'])
         if set(snapshot)!={'path','project_id','generation','revision','sha256','engine','engine_version'}:raise ExportJobError('Exact immutable snapshot binding required')
@@ -134,7 +136,7 @@ class DurableNativeExports:
         if intent is not None and (any(intent[k]!=v for k,v in expected.items()) or intent['profile_sha256'] is not None or intent['range'] is not None):raise ExportJobError('Durable intent differs from full native execution request')
         return expected
     def _native(self,envelope,observation):
-        if observation['recipe']!=RECIPE or observation['recipeSHA256']!=envelope['recipe_sha256'] or observation['validation']['valid'] is not True:raise ExportJobError('Native profile/document verification differs')
+        if observation['recipe']!=self.recipe or observation['recipeSHA256']!=envelope['recipe_sha256'] or observation['validation']['valid'] is not True:raise ExportJobError('Native profile/document verification differs')
         owners=observation['validation']['owners']
         if len(owners)!=1:raise ExportJobError('One linked moment is required')
         owner=str(owners[0]['owner']);metadata=observation['ownerMetadata'][owner]

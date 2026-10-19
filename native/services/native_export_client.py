@@ -14,6 +14,7 @@ from native.services.caption_worker.process_tree import ProcessTree
 from native.services.caption_worker.evidence import canonical,digest,hash_file
 from native.services.caption_worker.client import write_once
 from native.services.caption_audio import _source_read_guard
+from native.services.export_recipes import SOFTWARE_RECIPE_ID,export_recipe
 
 MAX_WIRE=16*1024*1024
 class ExportRuntimeError(RuntimeError):pass
@@ -194,7 +195,9 @@ class OwnedProcess:
             return self.proof
 
 class NativeExportClient:
-    def __init__(self,helper,ffprobe,ffmpeg,python,gate,*,engine_version,source_pin_sha256):
+    def __init__(self,helper,ffprobe,ffmpeg,python,gate,*,engine_version,source_pin_sha256,recipe_id=SOFTWARE_RECIPE_ID):
+        export_recipe(recipe_id)
+        self.recipe_id=recipe_id
         self.helper=helper;self.ffprobe=ffprobe;self.ffmpeg=ffmpeg;self.python=python;self.gate=Path(gate)
         self.engine_version=engine_version;self.source_pin_sha256=source_pin_sha256;self.gate_sha256=hash_file(self.gate)
     def admit(self,execution):

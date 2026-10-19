@@ -5,6 +5,7 @@ from pathlib import Path
 import threading
 
 from native.services.native_export_client import NativeExportClient, QualifiedProgram
+from native.services.export_recipes import SOFTWARE_RECIPE_ID, export_recipe
 
 
 MAX_MANIFEST_BYTES = 65536
@@ -21,6 +22,7 @@ class ExportRuntime:
     program_versions: tuple[tuple[str, str], ...]
     engine_version: str
     native_source_pin_sha256: str
+    recipe_id: str = SOFTWARE_RECIPE_ID
 
     def client(self) -> NativeExportClient:
         """Construct on the background owner, then admit the captured gate hash.
@@ -38,6 +40,7 @@ class ExportRuntime:
             self.gate.path,
             engine_version=self.engine_version,
             source_pin_sha256=self.native_source_pin_sha256,
+            recipe_id=self.recipe_id,
         )
         if client.gate_sha256 != self.gate.sha256:
             raise ValueError('The export tool gate differs from the runtime manifest.')
@@ -93,12 +96,17 @@ def load_export_runtime(path) -> ExportRuntime:
     if len(encoded) > MAX_MANIFEST_BYTES:
         raise ValueError('The export runtime configuration exceeds 64 KiB.')
     value = json.loads(encoded.decode('utf8'), object_pairs_hook=_object, parse_constant=_nonfinite)
+    if not isinstance(value, dict) or type(value.get('schema')) is not int or value['schema'] not in (1, 2):
+        raise ValueError('Unsupported export runtime configuration.')
     expected = {
         'schema', *PROGRAM_NAMES, 'engine_version', 'native_source_pin_sha256',
     }
-    if (not isinstance(value, dict) or set(value) != expected
-            or type(value['schema']) is not int or value['schema'] != 1):
+    if value['schema'] == 2:
+        expected.add('recipe_id')
+    if set(value) != expected:
         raise ValueError('Unsupported export runtime configuration.')
+    recipe_id = value.get('recipe_id', SOFTWARE_RECIPE_ID)
+    export_recipe(recipe_id)
     programs = {}
     versions = []
     for name in PROGRAM_NAMES:
@@ -109,4 +117,5 @@ def load_export_runtime(path) -> ExportRuntime:
         program_versions=tuple(versions),
         engine_version=_version(value['engine_version']),
         native_source_pin_sha256=_sha256(value['native_source_pin_sha256']),
+        recipe_id=recipe_id,
     )

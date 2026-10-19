@@ -18,6 +18,7 @@ from native.services.caption_worker.evidence import canonical,digest,hash_file
 from native.services.caption_worker.client import write_once
 from native.services.native_export_client import NativeExportClient,QualifiedProgram,ExportRuntimeError,ExportOutcome,verify_probe,finite_json
 from native.services.durable_native_exports import DurableNativeExports,ExportJobOutcome,ExportJobError,RECIPE
+from native.services.export_recipes import GPU_RECIPE_ID,export_recipe
 
 
 def uid():return str(uuid.uuid4())
@@ -100,6 +101,24 @@ def test_explicit_snapshot_kit_assets_and_idempotency_are_durable(case):
         library.revise_kit(case['kit'],descriptor,expected_version=1)
         assert submit(case,runner,key)==job
         assert job['input']['kit']['version']==1
+
+
+def test_accelerated_request_cannot_reinterpret_saved_software_request(case):
+    with CreatorLibrary(case['database']) as library:
+        software=owner(case,library)
+        saved=submit(case,software)
+        request=software._read('requests',saved['input']['request_ref'])
+        original=dict(request)
+        case['client'].recipe_id=GPU_RECIPE_ID
+        accelerated=owner(case,library)
+        new=submit(case,accelerated)
+        assert new['input']['recipe_sha256']==digest(export_recipe(GPU_RECIPE_ID))
+        assert saved['input']['recipe_sha256']==digest(RECIPE)
+        assert new['input']['recipe_sha256']!=saved['input']['recipe_sha256']
+        with pytest.raises(ExportJobError,match='recipe'):
+            accelerated._bind(request,saved['input'])
+        assert software._bind(request,saved['input'])['recipe_sha256']==digest(RECIPE)
+        assert software._read('requests',saved['input']['request_ref'])==original
 
 @pytest.mark.parametrize('change',[{'owners':[]},{'owners':[{'owner':5,'revision':False}]},{'compositions':['portrait','portrait']},{'compositions':['shared']}])
 def test_bad_owner_or_composition_does_not_queue(case,change):
