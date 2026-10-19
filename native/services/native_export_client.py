@@ -31,6 +31,17 @@ class QualifiedProgram:
         if not self.path.is_absolute() or not self.path.is_file() or hash_file(self.path)!=self.sha256:
             raise ExportRuntimeError('Qualified local executable changed')
 
+def qualified_runtime_libraries(helper,libraries):
+    """Admit only the explicit app-local DXC pair; discover no library."""
+    if not isinstance(libraries,(tuple,list)):
+        raise ValueError('Explicit native runtime libraries are required')
+    if not libraries:return ()
+    if (len(libraries)!=2 or any(type(item) is not QualifiedProgram for item in libraries)
+            or {item.path.name.lower() for item in libraries}!={'dxcompiler.dll','dxil.dll'}
+            or any(item.path.parent!=helper.path.parent for item in libraries)):
+        raise ValueError('The native DXC pair must be beside its pinned helper')
+    return tuple(sorted(libraries,key=lambda item:item.path.name.lower()))
+
 class ExportExecution:
     """Retain process handles and read guards until actual cessation is known."""
     def __init__(self,binding):
@@ -195,14 +206,20 @@ class OwnedProcess:
             return self.proof
 
 class NativeExportClient:
-    def __init__(self,helper,ffprobe,ffmpeg,python,gate,*,engine_version,source_pin_sha256,recipe_id=SOFTWARE_RECIPE_ID):
+    def __init__(self,helper,ffprobe,ffmpeg,python,gate,*,engine_version,source_pin_sha256,recipe_id=SOFTWARE_RECIPE_ID,runtime_libraries=()):
         export_recipe(recipe_id)
         self.recipe_id=recipe_id
         self.helper=helper;self.ffprobe=ffprobe;self.ffmpeg=ffmpeg;self.python=python;self.gate=Path(gate)
+        self.runtime_libraries=qualified_runtime_libraries(helper,runtime_libraries)
         self.engine_version=engine_version;self.source_pin_sha256=source_pin_sha256;self.gate_sha256=hash_file(self.gate)
+    def engine_identity(self):
+        value={'version':self.engine_version,'helper_sha256':self.helper.sha256,'source_pin_sha256':self.source_pin_sha256}
+        if self.runtime_libraries:
+            value['runtime_libraries']=[{'name':item.path.name.lower(),'sha256':item.sha256} for item in self.runtime_libraries]
+        return value
     def admit(self,execution):
         if type(execution) is not ExportExecution:raise ExportRuntimeError('A live export execution owner is required')
-        for program in (self.helper,self.ffprobe,self.ffmpeg,self.python):execution.hold(program.path,program.sha256)
+        for program in (self.helper,self.ffprobe,self.ffmpeg,self.python,*self.runtime_libraries):execution.hold(program.path,program.sha256)
         execution.hold(self.gate,self.gate_sha256)
     def _tool(self,program,args,directory,cancel,deadline,execution):
         execution.hold(program.path,program.sha256);execution.hold(self.python.path,self.python.sha256);execution.hold(self.gate,self.gate_sha256)
@@ -284,7 +301,7 @@ class NativeExportClient:
         ceased=cleanup['closed'] and not cleanup['cleanup_errors'] and bool(scopes) and all(s.get('disposition')=='stopped' and s.get('active_processes')==0 and s.get('streams_closed') for s in scopes)
         if not ceased:state='unknown'
         receipt={'schema':1,'state':state,'fault':fault,'process_disposition':'stopped' if ceased else 'unknown','scopes':scopes,'snapshot_sha256':envelope['snapshot']['sha256'],'native':native,'outputs':outputs,
-            'engine':{'version':self.engine_version,'helper_sha256':self.helper.sha256,'source_pin_sha256':self.source_pin_sha256},
+            'engine':self.engine_identity(),
             'tools':{'ffprobe':self.ffprobe.sha256,'ffmpeg':self.ffmpeg.sha256,'python':self.python.sha256,'gate':self.gate_sha256},
             'capture_sha256':hash_file(directory/'native-capture.json') if (directory/'native-capture.json').is_file() else None,
             'quarantined':state!='completed','execution_owner':{'key':execution.key,'closed':execution.closed,'guards_retained':bool(execution.guards)}}

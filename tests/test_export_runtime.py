@@ -159,6 +159,53 @@ def test_profile_selection_is_explicit_and_bounded(tmp_path, change):
         subject.load_export_runtime(save(tmp_path, manifest(tmp_path) | change))
 
 
+def dxc_manifest(root):
+    return manifest(root) | {'schema': 3, 'recipe_id': GPU_RECIPE_ID,
+        'runtime_libraries': [{'path': str(root / name), 'sha256': 'd' * 64,
+            'version': 'authored-dxc-fixture'} for name in ('dxcompiler.dll', 'dxil.dll')]}
+
+
+def test_dxc_pair_is_explicit_without_library_discovery_or_io(tmp_path):
+    value = dxc_manifest(tmp_path)
+    gate = Path(value['gate']['path']);gate.write_bytes(b'non-executed fixture gate')
+    value['gate']['sha256'] = hashlib.sha256(gate.read_bytes()).hexdigest()
+    runtime = subject.load_export_runtime(save(tmp_path, value))
+    client = background(runtime.client)
+    assert [item.path.name for item in client.runtime_libraries] == ['dxcompiler.dll', 'dxil.dll']
+    assert client.engine_identity()['runtime_libraries'] == [
+        {'name': name, 'sha256': 'd' * 64} for name in ('dxcompiler.dll', 'dxil.dll')]
+    assert all(not item.path.exists() for item in runtime.runtime_libraries)
+
+
+@pytest.mark.parametrize('fault', ['missing', 'duplicate', 'foreign-directory', 'wrong-name', 'extra'])
+def test_dxc_requires_the_exact_app_local_pair(tmp_path, fault):
+    value = dxc_manifest(tmp_path)
+    libraries = value['runtime_libraries']
+    if fault == 'missing':libraries.pop()
+    elif fault == 'duplicate':libraries[1] = dict(libraries[0])
+    elif fault == 'foreign-directory':libraries[1]['path'] = str(tmp_path / 'other' / 'dxil.dll')
+    elif fault == 'wrong-name':libraries[1]['path'] = str(tmp_path / 'other.dll')
+    elif fault == 'extra':libraries.append(dict(libraries[0]))
+    with pytest.raises(ValueError):subject.load_export_runtime(save(tmp_path, value))
+
+
+def test_changed_dxc_library_is_refused_before_any_process_launch(tmp_path):
+    from native.services.native_export_client import ExportExecution, ExportRuntimeError
+    value = dxc_manifest(tmp_path)
+    for record in [*(value[name] for name in subject.PROGRAM_NAMES), *value['runtime_libraries']]:
+        path = Path(record['path']);path.write_bytes(path.name.encode())
+        record['sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
+    runtime = subject.load_export_runtime(save(tmp_path, value))
+    client = background(runtime.client)
+    Path(value['runtime_libraries'][0]['path']).write_bytes(b'changed after manifest capture')
+    execution = ExportExecution({'purpose': 'changed-DXC-admission-fixture'})
+    try:
+        with pytest.raises(ExportRuntimeError, match='changed'):client.admit(execution)
+        assert execution.processes == []
+    finally:
+        assert execution.stop()['closed'] and not execution.guards
+
+
 def test_gate_changed_after_config_load_is_not_admitted(tmp_path):
     value = manifest(tmp_path)
     gate = Path(value['gate']['path'])

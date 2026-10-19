@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import threading
 
-from native.services.native_export_client import NativeExportClient, QualifiedProgram
+from native.services.native_export_client import NativeExportClient, QualifiedProgram, qualified_runtime_libraries
 from native.services.export_recipes import SOFTWARE_RECIPE_ID, export_recipe
 
 
@@ -23,6 +23,7 @@ class ExportRuntime:
     engine_version: str
     native_source_pin_sha256: str
     recipe_id: str = SOFTWARE_RECIPE_ID
+    runtime_libraries: tuple[QualifiedProgram, ...] = ()
 
     def client(self) -> NativeExportClient:
         """Construct on the background owner, then admit the captured gate hash.
@@ -41,6 +42,7 @@ class ExportRuntime:
             engine_version=self.engine_version,
             source_pin_sha256=self.native_source_pin_sha256,
             recipe_id=self.recipe_id,
+            runtime_libraries=self.runtime_libraries,
         )
         if client.gate_sha256 != self.gate.sha256:
             raise ValueError('The export tool gate differs from the runtime manifest.')
@@ -96,13 +98,15 @@ def load_export_runtime(path) -> ExportRuntime:
     if len(encoded) > MAX_MANIFEST_BYTES:
         raise ValueError('The export runtime configuration exceeds 64 KiB.')
     value = json.loads(encoded.decode('utf8'), object_pairs_hook=_object, parse_constant=_nonfinite)
-    if not isinstance(value, dict) or type(value.get('schema')) is not int or value['schema'] not in (1, 2):
+    if not isinstance(value, dict) or type(value.get('schema')) is not int or value['schema'] not in (1, 2, 3):
         raise ValueError('Unsupported export runtime configuration.')
     expected = {
         'schema', *PROGRAM_NAMES, 'engine_version', 'native_source_pin_sha256',
     }
-    if value['schema'] == 2:
+    if value['schema'] >= 2:
         expected.add('recipe_id')
+    if value['schema'] == 3:
+        expected.add('runtime_libraries')
     if set(value) != expected:
         raise ValueError('Unsupported export runtime configuration.')
     recipe_id = value.get('recipe_id', SOFTWARE_RECIPE_ID)
@@ -112,10 +116,21 @@ def load_export_runtime(path) -> ExportRuntime:
     for name in PROGRAM_NAMES:
         programs[name], version = _program(value[name])
         versions.append((name, version))
+    libraries = []
+    if value['schema'] == 3:
+        records = value['runtime_libraries']
+        if not isinstance(records, list) or len(records) != 2:
+            raise ValueError('The export runtime requires the explicit DXC pair.')
+        for record in records:
+            library, version = _program(record)
+            libraries.append(library)
+            versions.append(('library:' + library.path.name.lower(), version))
+    libraries = qualified_runtime_libraries(programs['helper'], libraries)
     return ExportRuntime(
         **programs,
         program_versions=tuple(versions),
         engine_version=_version(value['engine_version']),
         native_source_pin_sha256=_sha256(value['native_source_pin_sha256']),
         recipe_id=recipe_id,
+        runtime_libraries=libraries,
     )

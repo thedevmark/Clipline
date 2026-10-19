@@ -120,6 +120,26 @@ def test_accelerated_request_cannot_reinterpret_saved_software_request(case):
         assert software._bind(request,saved['input'])['recipe_sha256']==digest(RECIPE)
         assert software._read('requests',saved['input']['request_ref'])==original
 
+
+def test_dxc_library_hashes_are_pinned_in_queued_engine_identity(case):
+    original=case['client']
+    libraries=[]
+    for name in ('dxcompiler.dll','dxil.dll'):
+        path=case['root']/name;path.write_bytes(b'authored fixture '+name.encode())
+        libraries.append(QualifiedProgram(path,hash_file(path)))
+    with CreatorLibrary(case['database']) as library:
+        legacy=owner(case,library);old=submit(case,legacy)
+        case['client']=NativeExportClient(original.helper,original.ffprobe,original.ffmpeg,original.python,original.gate,
+            engine_version=original.engine_version,source_pin_sha256=original.source_pin_sha256,runtime_libraries=libraries)
+        current=owner(case,library);job=submit(case,current)
+        request=current._read('requests',job['input']['request_ref'])
+        assert request['engine']['runtime_libraries']==[
+            {'name':item.path.name,'sha256':item.sha256} for item in libraries]
+        with pytest.raises(ExportJobError,match='engine'):legacy._bind(request,job['input'])
+        current.client.runtime_libraries=(QualifiedProgram(libraries[0].path,'0'*64),libraries[1])
+        with pytest.raises(ExportJobError,match='engine'):current._bind(request,job['input'])
+        assert 'runtime_libraries' not in legacy._read('requests',old['input']['request_ref'])['engine']
+
 @pytest.mark.parametrize('change',[{'owners':[]},{'owners':[{'owner':5,'revision':False}]},{'compositions':['portrait','portrait']},{'compositions':['shared']}])
 def test_bad_owner_or_composition_does_not_queue(case,change):
     with CreatorLibrary(case['database']) as library:

@@ -91,7 +91,7 @@ class DurableNativeExports:
             'kit':{**kit_pin,'descriptor_sha256':record.descriptor_sha256},'accepted_pin':accepted_pin,
             'source_asset_id':moment.source_asset_id,'assets':[{'asset_id':a.id,'sha256':a.sha256,'path':a.path} for a in sorted(pins.values(),key=lambda a:a.id)],
             'owners':owners,'compositions':compositions,'recipe_sha256':digest(self.recipe),
-            'engine':{'helper_sha256':self.client.helper.sha256,'source_pin_sha256':self.client.source_pin_sha256,'version':self.client.engine_version}}
+            'engine':self.client.engine_identity()}
         envelope=json.loads(canonical(envelope));intent=self._bind(envelope)
         reference=self._write('requests',str(uuid.uuid5(uuid.UUID(idempotency_key),'native-export-request')),envelope)
         return self.jobs.submit('render',{**intent,'request_ref':reference},idempotency_key=idempotency_key)
@@ -105,7 +105,7 @@ class DurableNativeExports:
         integer(snapshot['revision'])
         if not isinstance(snapshot['path'],str) or len(snapshot['path'])>32768 or not Path(snapshot['path']).is_absolute() or Path(snapshot['path']).stem!=snapshot['generation'] or Path(snapshot['path']).suffix!='.fcproj':raise ExportJobError('Canonical immutable snapshot path required')
         if snapshot['project_id']!=envelope['project_id'] or snapshot['engine']!='filmcraft':raise ExportJobError('Snapshot project/engine identity differs')
-        expected_engine={'helper_sha256':self.client.helper.sha256,'source_pin_sha256':self.client.source_pin_sha256,'version':self.client.engine_version}
+        expected_engine=self.client.engine_identity()
         if envelope['engine']!=expected_engine:raise ExportJobError('Queued qualified render engine changed')
         if not isinstance(envelope['kit'],dict) or set(envelope['kit'])!={'kit_id','version','descriptor_sha256'}:raise ExportJobError('Exact Kit provenance required')
         identifier(envelope['kit']['kit_id']);integer(envelope['kit']['version'],1);sha(envelope['kit']['descriptor_sha256'])
