@@ -24,6 +24,8 @@ Evaluation evidence is under `%LOCALAPPDATA%/clipline/evaluation/2026-10-18/film
 
 The 69 focused cases include 12 real private Windows process/Job Object/read-guard cases, 28 durable storage/admission cases and 29 authored rational timing cases. Their media boundaries use fixtures. These runs do not execute a compiled native renderer or establish export performance, speech accuracy or final creative quality.
 
+The subsequent actual installed pipeline passed at `filmcraft/unified-moment-export-replay-001/`: the new unified factory created a fresh native Moment from copied canonical Kit/source records, then the new unified exporter rendered both formats through this product queue and explicit runtime. Root verified both 240-frame 1080p60 files, raw probe/decode evidence, six stopped process scopes, completed SQLite settlement with zero holds, and unchanged original inputs/product sources. The [execution ledger](2026-10-18-execution.md) records exact admission, native/output hashes and the muted/no-caption scope. This qualifies that binary/input/backend combination; the full editor UI and workflow remain unfinished.
+
 Historical actual standalone export002 remains separate evidence for its old qualified helper and frozen071 client. It produced verified real landscape and portrait files, with nine stopped owned scopes and zero remaining durable holds. This source integration does not transfer that qualification to a newly compiled binary. The unified two-helper build and its 31 factory plus seven export cases have a separate admission and receipt.
 
 ## Explicit runtime configuration
