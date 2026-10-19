@@ -7,15 +7,19 @@
   "archive_bytes": 21093176,
   "archive_sha256": "851a166241377875964251523594bb85c14171c740aa0d32b476ddeeb78d27e3",
   "patch_file": "clipline-native-edits.patch",
-  "patch_sha256": "5fc762a2e11ae81461eae872407976ad63d1cd1a92f5363c92ec280ecd5838d4",
+  "patch_sha256": "6974ec7cedfcb940603a2bec3a85ebd3b9bffdb3087383daa192d24acbaf8fbe",
   "patched_files_sha256": {
-    "Cargo.lock": "9751495b24a7f2841863e69d4e54d6101f033910181593387c45fc95f8b7188d",
+    "Cargo.lock": "bc177b99adae801c6bea8d754ad324701c49a10de9951a11d8b753f5c4859e56",
+    "apps/clipline-creator-kit/Cargo.toml": "2ca4b3f9d5024f62e432c9a62e84224a0543a51004ccb03c937e62d6e1ffc12c",
+    "apps/clipline-creator-kit/README.md": "5801172bbb0d6aa19cde87b577a9b6dfbdef08bbbc6f86b445945d80a26c5564",
+    "apps/clipline-creator-kit/src/main.rs": "053aae5d302f111553761f5ed7ab8580e896f89406b6f631f2119a66d49810ae",
     "crates/engine/Cargo.toml": "de882235618e1f062074518e334c0bc974d68a990816c51c437fa6f7c295f8f4",
     "crates/engine/src/accepted_captions.rs": "904793f7bee52ab2acc9fb59156de427dd7d3d25dc50484523dac3209f3d4a76",
     "crates/engine/src/autosave.rs": "f6a1669164882f96e5aa7e8e14823a93628d1ffe01b319e2c5f0f5c2d497e28b",
     "crates/engine/src/commands.rs": "d537f883ad88772f0bb6b3cd4e3d8ce85748b97dc2fdebfd3efbb9128ecb4c56",
+    "crates/engine/src/creator_kit.rs": "123f4c8ef9f64072a6b136f29173373bb6c09dccd1fcea036097acd19c415dd4",
     "crates/engine/src/export_tools.rs": "761189df9e5026b177f96b4c293bf274c395070b95517f95d793e441fc543bac",
-    "crates/engine/src/lib.rs": "b9467973973b964ae31180579f40b335a4516c5b7bbd96f18ff96f1b56743983",
+    "crates/engine/src/lib.rs": "79df414bb371e78453b8a55112a660bd8bc08c90fa24f956441f5449ae694c00",
     "crates/engine/src/linked_edits.rs": "49849f9c22facaf7fe140a695300bf464dd7823f2acaacdfed3a6ff1efda096b",
     "crates/engine/src/linked_edits/tests.rs": "2c1b0233a39bac314d81765b5d27058c617bb3e81d1c3ae46e1d948eca6cdddc",
     "crates/engine/src/mixer.rs": "6b1c3a133c07afc8fcbbc0fb58267f781705374847d9e26c6fe6dda9bf7c6e88",
@@ -27,6 +31,6 @@
     "crates/project/src/caption.rs": "28b8acbe264511be1555addff40b3fb93c70a4786a95a812e8c49ddd37417b70",
     "crates/ui-egui/src/lib.rs": "b047f6c48a42dcb78733d07e6d0b82f02bbb9a0a1d476be199fa6b345ca22026"
   },
-  "scope": "Native linked gameplay/facecam editing, document validation and atomic snapshots, accepted source-clock caption projection to three compositions, and validated committed playback publication. Full editor integration remains incomplete.",
+  "scope": "Native linked gameplay/facecam editing, document validation and atomic snapshots, accepted source-clock caption projection to three compositions, and validated committed playback publication. Full editor integration remains incomplete. Adds a native scratch-Session Creator Kit capture/instantiate helper with pinned creation identity receipts and supported static audio preservation. This does not add a second timeline, full Kit updates, or a UI command registry.",
   "archive_url_provenance": "Conventional tag archive reconstruction endpoint; original request URL was not retained. Verified archive ZIP comment equals upstream_commit."
 }

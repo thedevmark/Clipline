@@ -1,7 +1,22 @@
 diff --git a/Cargo.lock b/Cargo.lock
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -1934,7 +1934,9 @@
+@@ -843,6 +843,14 @@
+ checksum = "bde03770d3df201d4fb868f2c9c59e66a3e4e2bd06692a0fe701e7103c7e84d4"
+ dependencies = [
+  "error-code",
++]
++
++[[package]]
++name = "clipline-creator-kit"
++version = "0.9.0"
++dependencies = [
++ "filmcraft-engine",
++ "serde_json",
+ ]
+ 
+ [[package]]
+@@ -1934,7 +1942,9 @@
   "log",
   "serde",
   "serde_json",
@@ -11,6 +26,73 @@ diff --git a/Cargo.lock b/Cargo.lock
   "web-time",
  ]
  
+diff --git a/apps/clipline-creator-kit/Cargo.toml b/apps/clipline-creator-kit/Cargo.toml
+new file mode 100644
+--- /dev/null
++++ b/apps/clipline-creator-kit/Cargo.toml
+@@ -0,0 +1,14 @@
++[package]
++name = "clipline-creator-kit"
++description = "Clipline native Creator Kit scratch-project helper"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++rust-version.workspace = true
++
++[lints]
++workspace = true
++
++[dependencies]
++filmcraft-engine = { workspace = true }
++serde_json = { workspace = true }
+diff --git a/apps/clipline-creator-kit/README.md b/apps/clipline-creator-kit/README.md
+new file mode 100644
+--- /dev/null
++++ b/apps/clipline-creator-kit/README.md
+@@ -0,0 +1,14 @@
++# Native Creator Kit helper
++
++This workspace target delegates capture and instantiation to `engine::creator_kit`. The native engine owns typed request parsing, scratch Sessions, template import, source clocks, editable effects/audio, and project serialization. The existing workspace `apps/*` membership discovers the helper.
++
++The selected Windows workspace helper built with `cargo build --release --locked --offline -p clipline-creator-kit`. All 31 native API boundary tests passed. An actual product canonical-caller replay then created and published two moments from the same pinned Kit/source/template assets and verified nondefault static audio settings after exact native reopen. These results establish the tested creation boundary; binary distribution, GUI integration, long-duration performance, arbitrary Kit properties/assets, and Kit updates remain separate gates. Preserved native audio fields do not establish rendered DSP/sample behavior.
++
++The helper accepts only:
++
++```text
++clipline-creator-kit capture SEED PROFILE_JSON NEW_TEMPLATE
++clipline-creator-kit instantiate REQUEST_JSON NEW_PROJECT
++```
++
++It reads bounded JSON bytes and delegates document creation to the native owner. The canonical caller admits explicit Moment/Kit/source/template records, owns the gated process and verifies compact creation receipts. Successful files require ProjectStore publication. Creation receipts do not overwrite canonical records or become later timeline authority. Stderr, nonzero exits, partial outputs and unknown process/publication states require explicit reconciliation; the helper adds no automatic retry, command registry, general batch API or Python timeline.
+diff --git a/apps/clipline-creator-kit/src/main.rs b/apps/clipline-creator-kit/src/main.rs
+new file mode 100644
+--- /dev/null
++++ b/apps/clipline-creator-kit/src/main.rs
+@@ -0,0 +1,24 @@
++//! Workspace helper adapter. All native document logic belongs to engine::creator_kit.
++use std::{fs::File, io::Read};
++fn document(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
++    let mut bytes = Vec::new();
++    File::open(path)?
++        .take(2 * 1024 * 1024 + 1)
++        .read_to_end(&mut bytes)?;
++    if bytes.len() > 2 * 1024 * 1024 {
++        return Err("document exceeds candidate bound".into());
++    }
++    Ok(bytes)
++}
++fn main() -> Result<(), Box<dyn std::error::Error>> {
++    let args: Vec<_> = std::env::args().collect();
++    let result = match args.get(1).map(String::as_str) {
++        Some("capture") if args.len() == 5 =>
++            filmcraft_engine::creator_kit::capture(&args[2], &document(&args[3])?, &args[4]),
++        Some("instantiate") if args.len() == 4 =>
++            filmcraft_engine::creator_kit::instantiate(&document(&args[2])?, &args[3]),
++        _ => return Err("usage: clipline-creator-kit capture SEED PROFILE_JSON NEW_TEMPLATE | instantiate REQUEST_JSON NEW_PROJECT".into()),
++    }?;
++    println!("{}", serde_json::to_string(&result)?);
++    Ok(())
++}
 diff --git a/crates/engine/Cargo.toml b/crates/engine/Cargo.toml
 --- a/crates/engine/Cargo.toml
 +++ b/crates/engine/Cargo.toml
@@ -633,6 +715,1120 @@ diff --git a/crates/engine/src/commands.rs b/crates/engine/src/commands.rs
      let t0 = web_time::Instant::now();
      // Save As renames the project after its new file (not an edit: no undo step, not dirty).
      if adopt
+diff --git a/crates/engine/src/creator_kit.rs b/crates/engine/src/creator_kit.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/engine/src/creator_kit.rs
+@@ -0,0 +1,1109 @@
++//! Creator Kit creation owner extracted from the qualified native factory.
++//!
++//! Creates a fresh scratch Session; never replaces a caller's live document.
++//! Static full-moment illustrative native slots only. Not a complete Kit feature.
++//! Caller supplies canonical, expected-revision-admitted library records. The native
++//! creation receipt is not library authority and cannot update canonical rows.
++//! These blocking operations require a background owner; no command registration
++//! or UI-thread execution is added here. External import I/O is not edit-group atomic.
++use crate::project::{ClipId, ItemId, Project, TrackItem};
++use crate::{EngineError, FsServices, Services, Session};
++use filmcraft_media::{ByteReader, SharedReader};
++use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
++use serde::{Deserialize, Serialize};
++use serde_json::{Value, json};
++use sha2::{Digest, Sha256};
++use std::{
++    collections::{BTreeMap, BTreeSet},
++    fs,
++    io::{Read, Write},
++    path::Path,
++    sync::{
++        Arc,
++        atomic::{AtomicU64, Ordering},
++    },
++};
++
++const LINKS: &str = "clipline.links.v1";
++const TEMPLATE: &str = "clipline.creatorKitTemplate.v1";
++const INSTANCE: &str = "clipline.creatorKit.v1";
++const MAX_DOCUMENT: usize = 2 * 1024 * 1024;
++type R<T> = Result<T, EngineError>;
++fn bad(message: impl Into<String>) -> EngineError {
++    EngineError::Other(message.into())
++}
++fn check(ok: bool, message: &str) -> R<()> {
++    if ok { Ok(()) } else { Err(bad(message)) }
++}
++fn uuid(value: &str) -> R<()> {
++    check(
++        uuid::Uuid::parse_str(value).is_ok_and(|v| v.to_string() == value),
++        "canonical UUID required",
++    )
++}
++fn hash(bytes: &[u8]) -> String {
++    format!("{:x}", Sha256::digest(bytes))
++}
++fn json_bytes(value: &impl Serialize) -> R<Vec<u8>> {
++    serde_json::to_vec(value).map_err(|e| bad(e.to_string()))
++}
++fn read_small(path: &str) -> R<Vec<u8>> {
++    let mut file = fs::File::open(path).map_err(|e| bad(e.to_string()))?;
++    let mut bytes = Vec::new();
++    Read::by_ref(&mut file)
++        .take(MAX_DOCUMENT as u64 + 1)
++        .read_to_end(&mut bytes)
++        .map_err(|e| bad(e.to_string()))?;
++    check(
++        bytes.len() <= MAX_DOCUMENT,
++        "document exceeds candidate bound",
++    )?;
++    Ok(bytes)
++}
++fn fingerprint(path: &str) -> R<(String, u64)> {
++    check(
++        Path::new(path).is_absolute() && !path.starts_with("\\\\") && !path.starts_with("//"),
++        "absolute local file required",
++    )?;
++    let mut file = fs::File::open(path).map_err(|e| bad(e.to_string()))?;
++    let before = file.metadata().map_err(|e| bad(e.to_string()))?;
++    check(
++        before.is_file() && before.len() <= 2 * 1024 * 1024 * 1024,
++        "regular source at most2GiB required",
++    )?;
++    let mut digest = Sha256::new();
++    let mut buffer = [0_u8; 65536];
++    let mut count = 0;
++    loop {
++        let n = file.read(&mut buffer).map_err(|e| bad(e.to_string()))?;
++        if n == 0 {
++            break;
++        }
++        digest.update(&buffer[..n]);
++        count += n as u64;
++    }
++    let after = file.metadata().map_err(|e| bad(e.to_string()))?;
++    let located = fs::metadata(path).map_err(|e| bad(e.to_string()))?;
++    check(
++        before.len() == count
++            && after.len() == count
++            && located.len() == count
++            && before.modified().ok() == after.modified().ok()
++            && after.modified().ok() == located.modified().ok(),
++        "source changed during point-in-time fingerprint",
++    )?;
++    Ok((format!("{:x}", digest.finalize()), count))
++}
++fn run(s: &mut Session, id: &str, p: Value) -> R<Value> {
++    s.execute(id, p)
++}
++
++/// Serde structs otherwise accept positional JSON arrays. Wire records must be objects.
++struct Object<T>(T);
++impl<'de, T: Deserialize<'de>> Deserialize<'de> for Object<T> {
++    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
++        struct Visitor<T>(std::marker::PhantomData<T>);
++        impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Visitor<T> {
++            type Value = Object<T>;
++            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++                f.write_str("a JSON object required")
++            }
++            fn visit_map<A: serde::de::MapAccess<'de>>(
++                self,
++                map: A,
++            ) -> Result<Self::Value, A::Error> {
++                T::deserialize(serde::de::value::MapAccessDeserializer::new(map)).map(Object)
++            }
++        }
++        deserializer.deserialize_map(Visitor(std::marker::PhantomData))
++    }
++}
++fn object<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<T, D::Error> {
++    Object::<T>::deserialize(d).map(|v| v.0)
++}
++fn objects<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
++    d: D,
++) -> Result<Vec<T>, D::Error> {
++    Vec::<Object<T>>::deserialize(d).map(|v| v.into_iter().map(|o| o.0).collect())
++}
++fn object_values<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
++    d: D,
++) -> Result<BTreeMap<String, T>, D::Error> {
++    BTreeMap::<String, Object<T>>::deserialize(d)
++        .map(|v| v.into_iter().map(|(k, o)| (k, o.0)).collect())
++}
++fn parse_object<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> R<T> {
++    check(
++        bytes.len() <= MAX_DOCUMENT,
++        "document exceeds candidate bound",
++    )?;
++    serde_json::from_slice::<Object<T>>(bytes)
++        .map(|v| v.0)
++        .map_err(|e| bad(e.to_string()))
++}
++
++/// Supported static audio presentation only. Native placement owns identity/timing/link.
++fn copy_static_audio(target: &mut TrackItem, prototype: &TrackItem) {
++    target.effects.clone_from(&prototype.effects);
++    target.gain_db = prototype.gain_db;
++    target.enabled = prototype.enabled;
++    target.scale_to_frame = prototype.scale_to_frame;
++    target.essential.clone_from(&prototype.essential);
++    target
++        .source_channels
++        .clone_from(&prototype.source_channels);
++    target.audio_stream = prototype.audio_stream;
++}
++
++fn same_static_audio(a: &TrackItem, b: &TrackItem) -> bool {
++    a.effects == b.effects
++        && a.gain_db == b.gain_db
++        && a.enabled == b.enabled
++        && a.scale_to_frame == b.scale_to_frame
++        && a.essential == b.essential
++        && a.source_channels == b.source_channels
++        && a.audio_stream == b.audio_stream
++}
++
++fn validate_static_primary_audio(audio: &TrackItem) -> R<()> {
++    check(
++        audio.speed == 1.0
++            && !audio.reverse
++            && audio.frame_hold.is_none()
++            && audio.markers.is_empty()
++            && audio.effects.iter().all(|e| !e.is_animated()),
++        "only static normal-speed nonreversed audio without hold/markers is supported",
++    )?;
++    check(
++        audio.audio_stream == 0,
++        "Creator Kit supports the primary audio stream only",
++    )
++}
++
++fn validate_audio_channels(audio: &TrackItem, channels: usize) -> R<()> {
++    validate_static_primary_audio(audio)?;
++    check(
++        (1..=2).contains(&channels)
++            && audio.source_channels.len() <= 2
++            && audio
++                .source_channels
++                .iter()
++                .all(|&channel| usize::from(channel) < channels),
++        "template audio channel selection is incompatible with the actual mono/stereo source",
++    )
++}
++
++fn clip(p: &Project, seq: u64, id: u64) -> R<TrackItem> {
++    p.sequence(ItemId(seq))
++        .and_then(|q| q.find_item(ClipId(id)))
++        .map(|(_, c)| c.clone())
++        .ok_or_else(|| bad("missing native slot"))
++}
++
++#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
++#[serde(deny_unknown_fields)]
++struct Rect {
++    x: f64,
++    y: f64,
++    w: f64,
++    h: f64,
++}
++#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
++#[serde(deny_unknown_fields)]
++struct Profile {
++    id: String,
++    scene_key: String,
++    source_width: u32,
++    source_height: u32,
++    #[serde(deserialize_with = "object_values")]
++    regions: BTreeMap<String, Rect>,
++}
++impl Profile {
++    fn validate(&self) -> R<()> {
++        check(
++            !self.id.is_empty()
++                && !self.scene_key.is_empty()
++                && self.source_width > 0
++                && self.source_height > 0,
++            "explicit scene/profile/dimensions required",
++        )?;
++        for r in self.regions.values() {
++            check(
++                [r.x, r.y, r.w, r.h].iter().all(|v| v.is_finite())
++                    && r.x >= 0.
++                    && r.y >= 0.
++                    && r.w > 0.
++                    && r.h > 0.
++                    && r.x + r.w <= 1.000000001
++                    && r.y + r.h <= 1.000000001,
++                "invalid normalized source region",
++            )?;
++        }
++        check(
++            self.regions.contains_key("gameplay"),
++            "explicit gameplay source region required",
++        )
++    }
++}
++#[derive(Clone, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Slot {
++    role: String,
++    video_track: u64,
++    prototype_clip: u64,
++    audio_track: Option<u64>,
++    prototype_audio: Option<u64>,
++}
++#[derive(Clone, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Composition {
++    name: String,
++    sequence: u64,
++    width: u32,
++    height: u32,
++    slots: Vec<Slot>,
++}
++#[derive(Clone, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Blueprint {
++    schema: u32,
++    profile: Profile,
++    placeholder_source: u64,
++    compositions: Vec<Composition>,
++    scope: String,
++}
++#[derive(Clone, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Asset {
++    id: String,
++    path: String,
++    sha256: String,
++    bytes: u64,
++}
++#[derive(Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct KitDescriptor {
++    name: String,
++    asset_refs: BTreeMap<String, String>,
++    properties: BTreeMap<String, Value>,
++    #[serde(deserialize_with = "objects")]
++    layout_profiles: Vec<Profile>,
++    vocabulary: Vec<String>,
++}
++#[derive(Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Kit {
++    id: String,
++    version: u64,
++    descriptor_json: String,
++    descriptor_sha256: String,
++}
++#[derive(Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Moment {
++    id: String,
++    title: String,
++    source_asset_id: String,
++    source_in_us: i64,
++    source_out_us: i64,
++    kit_id: String,
++    kit_version: u64,
++    overrides: BTreeMap<String, Value>,
++    revision: u64,
++}
++#[derive(Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Request {
++    schema: u32,
++    #[serde(deserialize_with = "object")]
++    moment: Moment,
++    #[serde(deserialize_with = "object")]
++    kit: Kit,
++    #[serde(deserialize_with = "object")]
++    template: Asset,
++    #[serde(deserialize_with = "object")]
++    source: Asset,
++    profile_id: String,
++    scene_key: String,
++}
++
++#[derive(Default)]
++struct Stats {
++    opens: AtomicU64,
++    calls: AtomicU64,
++    bytes: AtomicU64,
++    max: AtomicU64,
++    ranges: AtomicU64,
++    whole: AtomicU64,
++}
++impl Stats {
++    fn value(&self) -> Value {
++        json!({"readerOpens":self.opens.load(Ordering::Relaxed),"readCalls":self.calls.load(Ordering::Relaxed),
++    "readerBytes":self.bytes.load(Ordering::Relaxed),"maxReadBytes":self.max.load(Ordering::Relaxed),
++    "identityRangeBytes":self.ranges.load(Ordering::Relaxed),"wholeSourceBufferAttempts":self.whole.load(Ordering::Relaxed)})
++    }
++}
++struct Counted {
++    inner: filmcraft_media::reader::FileReader,
++    stats: Arc<Stats>,
++}
++impl ByteReader for Counted {
++    fn len(&self) -> u64 {
++        self.inner.len()
++    }
++    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
++        self.stats.calls.fetch_add(1, Ordering::Relaxed);
++        self.stats
++            .bytes
++            .fetch_add(buf.len() as u64, Ordering::Relaxed);
++        self.stats
++            .max
++            .fetch_max(buf.len() as u64, Ordering::Relaxed);
++        self.inner.read_at(offset, buf)
++    }
++}
++struct Host {
++    source: String,
++    output: String,
++    stats: Arc<Stats>,
++    pinned_template: Option<(String, Vec<u8>)>,
++}
++impl Services for Host {
++    fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
++        if let Some((name, bytes)) = &self.pinned_template {
++            if path == name {
++                return Ok(bytes.clone());
++            }
++        }
++        if path == self.source {
++            self.stats.whole.fetch_add(1, Ordering::Relaxed);
++            return Err(std::io::Error::other("whole source buffering forbidden"));
++        }
++        FsServices.read_file(path)
++    }
++    fn write_file(&self, path: &str, bytes: &[u8]) -> std::io::Result<()> {
++        if path != self.output {
++            return Err(std::io::Error::other(
++                "only the unique candidate output may be written",
++            ));
++        }
++        let mut file = fs::OpenOptions::new()
++            .write(true)
++            .create_new(true)
++            .open(path)?;
++        file.write_all(bytes)?;
++        file.sync_all()
++    }
++    fn file_size(&self, path: &str) -> std::io::Result<u64> {
++        FsServices.file_size(path)
++    }
++    fn read_range(&self, path: &str, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
++        let bytes = FsServices.read_range(path, offset, len)?;
++        if path == self.source {
++            self.stats
++                .ranges
++                .fetch_add(bytes.len() as u64, Ordering::Relaxed);
++        }
++        Ok(bytes)
++    }
++    fn reader(&self, path: &str) -> Option<std::io::Result<SharedReader>> {
++        if path != self.source {
++            return FsServices.reader(path);
++        }
++        self.stats.opens.fetch_add(1, Ordering::Relaxed);
++        Some(
++            filmcraft_media::reader::FileReader::open(Path::new(path)).map(|inner| {
++                Arc::new(Counted {
++                    inner,
++                    stats: self.stats.clone(),
++                }) as SharedReader
++            }),
++        )
++    }
++}
++
++/// Capture the existing illustrative native layout. No final creative styling is selected here.
++fn capture_native(seed: &str, profile: Profile, output: &str) -> R<Value> {
++    profile.validate()?;
++    let mut s = Session::default();
++    let seed_bytes = read_small(seed)?;
++    let stats = Arc::new(Stats::default());
++    s.services = Arc::new(Host {
++        source: String::new(),
++        output: output.into(),
++        stats,
++        pinned_template: Some((seed.into(), seed_bytes)),
++    });
++    run(&mut s, "file.open", json!({"path":seed}))?;
++    run(&mut s, "clipline.validate", json!({}))?;
++    let owners: Vec<_> = s
++        .project
++        .items
++        .values()
++        .filter(|item| item.metadata.contains_key(LINKS))
++        .map(|i| i.id)
++        .collect();
++    check(
++        owners.len() == 1 && s.project.items.len() == 4,
++        "candidate capture requires exactly one media and three sequences",
++    )?;
++    let owner = owners[0];
++    let item = s.project.item(owner).ok_or_else(|| bad("owner missing"))?;
++    let links: Value =
++        serde_json::from_str(&item.metadata[LINKS]).map_err(|e| bad(e.to_string()))?;
++    check(links["schema"] == 2, "schema2 bundle seed required")?;
++    let units = links["units"]
++        .as_array()
++        .ok_or_else(|| bad("native units missing"))?;
++    let roles = units
++        .first()
++        .and_then(|u| u["roles"].as_array())
++        .ok_or_else(|| bad("first unit roles missing"))?;
++    check(
++        (1..=2).contains(&roles.len()),
++        "one gameplay and optional facecam role required",
++    )?;
++    let mut p = (*s.project).clone();
++    let mut compositions = Vec::new();
++    let mut source = None;
++    for (name, key) in [
++        ("shared", "sharedSequence"),
++        ("landscape", "landscapeSequence"),
++        ("portrait", "portraitSequence"),
++    ] {
++        let sid = links[key]
++            .as_u64()
++            .ok_or_else(|| bad("sequence binding missing"))?;
++        let q = p
++            .sequence(ItemId(sid))
++            .ok_or_else(|| bad("sequence missing"))?;
++        check(
++            q.caption_tracks.iter().all(|t| t.captions.is_empty())
++                && q.markers.is_empty()
++                && q.all_tracks().all(|t| t.transitions.is_empty()),
++            "caption content, markers and transitions need a separate duration policy",
++        )?;
++        let mut slots = Vec::new();
++        let mut keep = BTreeSet::new();
++        for role in roles {
++            let label = role["role"].as_str().ok_or_else(|| bad("role missing"))?;
++            check(
++                label == "gameplay" || label == "facecam",
++                "unsupported role",
++            )?;
++            check(
++                profile.regions.contains_key(label),
++                "the selected profile must name each authored source region",
++            )?;
++            let cid = role[name]
++                .as_u64()
++                .ok_or_else(|| bad("clip binding missing"))?;
++            let (track, c) = q
++                .find_item(ClipId(cid))
++                .ok_or_else(|| bad("slot clip missing"))?;
++            check(
++                c.start == Tick::ZERO
++                    && c.speed == 1.
++                    && !c.reverse
++                    && c.frame_hold.is_none()
++                    && c.markers.is_empty()
++                    && c.effects.iter().all(|e| !e.is_animated()),
++                "only static full-moment role slots supported",
++            )?;
++            check(
++                source.is_none_or(|id| id == c.item.0),
++                "one placeholder source required",
++            )?;
++            source = Some(c.item.0);
++            keep.insert(c.id);
++            let partners: Vec<_> = q
++                .audio_tracks
++                .iter()
++                .flat_map(|t| {
++                    t.items
++                        .iter()
++                        .filter(move |a| c.link.is_some() && a.link == c.link)
++                        .map(move |a| (t.id, a.id))
++                })
++                .collect();
++            check(
++                (label == "gameplay" && partners.len() == 1)
++                    || (label == "facecam" && partners.is_empty() && c.link.is_none()),
++                "gameplay needs single native audio; facecam needs none",
++            )?;
++            let audio = partners.first().copied();
++            if let Some((_, id)) = audio {
++                keep.insert(id);
++            }
++            if let Some((_, id)) = audio {
++                validate_static_primary_audio(&clip(&p, sid, id.0)?)?;
++            }
++            // Timing differs across native cuts. Appearance/audio semantics may not silently disappear.
++            for later in units.iter().skip(1) {
++                let later_roles = later["roles"]
++                    .as_array()
++                    .ok_or_else(|| bad("later unit roles missing"))?;
++                check(
++                    later_roles.len() == roles.len(),
++                    "capture requires equal role sets across native units",
++                )?;
++                let matches: Vec<_> = later_roles
++                    .iter()
++                    .filter(|r| r["role"].as_str() == Some(label))
++                    .collect();
++                check(
++                    matches.len() == 1,
++                    "capture requires equal role sets across native units",
++                )?;
++                let other_id = matches[0][name]
++                    .as_u64()
++                    .ok_or_else(|| bad("later clip binding missing"))?;
++                let (other_track, other) = q
++                    .find_item(ClipId(other_id))
++                    .ok_or_else(|| bad("later native slot missing"))?;
++                check(
++                    other_track == track
++                        && other.item == c.item
++                        && other.speed == 1.
++                        && !other.reverse
++                        && other.frame_hold.is_none()
++                        && other.markers.is_empty()
++                        && other.effects.iter().all(|e| !e.is_animated())
++                        && other.effects == c.effects
++                        && other.gain_db == c.gain_db
++                        && other.enabled == c.enabled
++                        && other.scale_to_frame == c.scale_to_frame,
++                    "later native unit has different template semantics; explicit unit selection is not implemented",
++                )?;
++                let other_audio: Vec<_> = q
++                    .audio_tracks
++                    .iter()
++                    .flat_map(|t| {
++                        t.items
++                            .iter()
++                            .filter(move |a| other.link.is_some() && a.link == other.link)
++                            .map(move |a| (t.id, a))
++                    })
++                    .collect();
++                check(
++                    other_audio.len() == partners.len(),
++                    "later native unit has different audio ownership",
++                )?;
++                if let Some((expected_track, expected_id)) = audio {
++                    let expected = clip(&p, sid, expected_id.0)?;
++                    let (actual_track, actual) = other_audio[0];
++                    validate_static_primary_audio(actual)?;
++                    check(
++                        actual_track == expected_track
++                            && actual.item == expected.item
++                            && actual.speed == expected.speed
++                            && actual.reverse == expected.reverse
++                            && actual.frame_hold == expected.frame_hold
++                            && actual.markers.is_empty()
++                            && actual.effects.iter().all(|e| !e.is_animated())
++                            && same_static_audio(actual, &expected),
++                        "later native unit has different audio template semantics; explicit unit selection is not implemented",
++                    )?;
++                } else {
++                    check(
++                        other.link.is_none(),
++                        "later facecam has unexpected native audio link",
++                    )?;
++                }
++            }
++            slots.push(Slot {
++                role: label.into(),
++                video_track: track.0,
++                prototype_clip: cid,
++                audio_track: audio.map(|x| x.0.0),
++                prototype_audio: audio.map(|x| x.1.0),
++            });
++        }
++        check(
++            slots.iter().any(|x| x.role == "gameplay"),
++            "gameplay slot required",
++        )?;
++        let composition = Composition {
++            name: name.into(),
++            sequence: sid,
++            width: q.settings.width,
++            height: q.settings.height,
++            slots,
++        };
++        let q = p
++            .sequence_mut(ItemId(sid))
++            .ok_or_else(|| bad("sequence missing"))?;
++        for track in q.video_tracks.iter_mut().chain(q.audio_tracks.iter_mut()) {
++            track.items.retain(|c| keep.contains(&c.id));
++        }
++        compositions.push(composition);
++    }
++    let source = source.ok_or_else(|| bad("source missing"))?;
++    let media = p
++        .item(ItemId(source))
++        .and_then(|i| i.as_media())
++        .ok_or_else(|| bad("media missing"))?;
++    let video = media
++        .info
++        .video
++        .as_ref()
++        .ok_or_else(|| bad("video required"))?;
++    check(
++        (video.width, video.height) == (profile.source_width, profile.source_height)
++            && video.par == (1, 1),
++        "profile and native square-pixel dimensions differ",
++    )?;
++    check(
++        media.info.audio_streams.len() == 1,
++        "Creator Kit requires one mono/stereo audio stream",
++    )?;
++    let channels = media.info.audio_streams[0].channels as usize;
++    for composition in &compositions {
++        for slot in &composition.slots {
++            if let Some(id) = slot.prototype_audio {
++                validate_audio_channels(&clip(&p, composition.sequence, id)?, channels)?;
++            }
++        }
++    }
++    for item in p.items.values_mut() {
++        item.metadata.remove(LINKS);
++        item.metadata.remove("clipline.acceptedCaptions.v1");
++        item.metadata.remove(INSTANCE);
++    }
++    let blueprint=Blueprint{schema:1,profile,placeholder_source:source,compositions,scope:"static full-moment illustrative native layout; one selected source; not complete Creator Kit assets".into()};
++    let encoded = String::from_utf8(json_bytes(&blueprint)?).map_err(|e| bad(e.to_string()))?;
++    p.item_mut(owner)
++        .ok_or_else(|| bad("owner missing"))?
++        .metadata
++        .insert(TEMPLATE.into(), encoded);
++    s.project = Arc::new(p);
++    run(
++        &mut s,
++        "file.saveAsTemplate",
++        json!({"path":output,"name":"Reusable native proof layout"}),
++    )?;
++    Ok(
++        json!({"status":"captured","template":output,"sha256":hash(&read_small(output)?),"blueprint":blueprint,"styling":"copied unchanged from supplied native proof, not a final creator style"}),
++    )
++}
++
++fn exact_range(a: i64, b: i64, rate: FrameRate, available: Tick) -> R<(Tick, Tick)> {
++    check(
++        a >= 0 && a < b && rate.num > 0 && rate.den > 0,
++        "invalid interval/rational source rate",
++    )?;
++    check(
++        i128::from(TICKS_PER_SECOND) * i128::from(rate.den) % i128::from(rate.num) == 0,
++        "candidate requires an exact native frame tick; unsupported exotic rate",
++    )?;
++    let units = |u: i64| -> R<Tick> {
++        let value = i128::from(u) * i128::from(TICKS_PER_SECOND) / 1_000_000;
++        check(value < i128::from(Tick::MAX.0), "source interval overflow")?;
++        Ok(Tick(value as i64))
++    };
++    let lo = units(a)?;
++    let hi = units(b)?;
++    check(
++        hi <= available,
++        "selected range exceeds native media handles",
++    )?;
++    let frame = rate.frame_at(lo);
++    let floor = rate.tick_of(frame);
++    let start = if floor < lo {
++        rate.tick_of(frame.checked_add(1).ok_or_else(|| bad("frame overflow"))?)
++    } else {
++        floor
++    };
++    let end = rate.snap(hi);
++    check(
++        start < end,
++        "selected interval contains no complete native frame",
++    )?;
++    Ok((start, end - start))
++}
++
++/// Creates a separate native document. It cannot replace or mutate any caller's Session.
++fn instantiate_native(request: Request, output: &str) -> R<Value> {
++    let r = &request;
++    check(
++        r.schema == 2 && r.kit.version > 0 && r.moment.revision > 0,
++        "unsupported request",
++    )?;
++    check(
++        hash(r.kit.descriptor_json.as_bytes()) == r.kit.descriptor_sha256,
++        "canonical Kit descriptor fingerprint changed",
++    )?;
++    let descriptor: KitDescriptor = parse_object(r.kit.descriptor_json.as_bytes())?;
++    for id in [&r.moment.id, &r.kit.id, &r.template.id, &r.source.id] {
++        uuid(id)?;
++    }
++    check(
++        r.moment.kit_id == r.kit.id
++            && r.moment.kit_version == r.kit.version
++            && r.moment.source_asset_id == r.source.id,
++        "moment identity differs from pinned Kit/source",
++    )?;
++    check(
++        descriptor.properties.is_empty() && r.moment.overrides.is_empty(),
++        "generic property bindings/overrides are not implemented in this first native factory",
++    )?;
++    check(
++        descriptor.asset_refs.len() == 1
++            && descriptor.asset_refs.get("native_template") == Some(&r.template.id),
++        "first candidate supports the registered native_template asset only",
++    )?;
++    let bytes = read_small(&r.template.path)?;
++    check(
++        hash(&bytes) == r.template.sha256 && bytes.len() as u64 == r.template.bytes,
++        "template fingerprint changed",
++    )?;
++    let (source_sha, source_bytes) = fingerprint(&r.source.path)?;
++    check(
++        source_sha == r.source.sha256 && source_bytes == r.source.bytes,
++        "source fingerprint changed",
++    )?;
++    let stats = Arc::new(Stats::default());
++    let host: Arc<dyn Services> = Arc::new(Host {
++        source: r.source.path.clone(),
++        output: output.into(),
++        stats: stats.clone(),
++        pinned_template: Some((r.template.path.clone(), bytes)),
++    });
++    let mut s = Session::default();
++    s.services = host.clone();
++    run(
++        &mut s,
++        "file.newProjectFromTemplate",
++        json!({"template":r.template.path,"name":r.moment.title}),
++    )?;
++    let holders: Vec<_> = s
++        .project
++        .items
++        .values()
++        .filter(|i| i.metadata.contains_key(TEMPLATE))
++        .map(|i| i.id)
++        .collect();
++    check(
++        holders.len() == 1 && s.project.items.len() == 4,
++        "one template owner, one placeholder media, three sequences required",
++    )?;
++    let owner = holders[0];
++    let text = &s
++        .project
++        .item(owner)
++        .ok_or_else(|| bad("owner missing"))?
++        .metadata[TEMPLATE];
++    let blueprint: Blueprint = serde_json::from_str(text).map_err(|e| bad(e.to_string()))?;
++    blueprint.profile.validate()?;
++    check(
++        blueprint.schema == 1 && blueprint.compositions.len() == 3,
++        "unsupported native template",
++    )?;
++    let profiles: Vec<_> = descriptor
++        .layout_profiles
++        .iter()
++        .filter(|p| p.id == r.profile_id && p.scene_key == r.scene_key)
++        .collect();
++    check(
++        profiles.len() == 1 && *profiles[0] == blueprint.profile,
++        "explicit scene/profile differs from authored template; no dimension-only matching",
++    )?;
++    let mut prototypes = BTreeMap::new();
++    let mut audio_prototypes = BTreeMap::new();
++    let mut ids = BTreeSet::new();
++    check(
++        blueprint.compositions[0].sequence == owner.0,
++        "template owner must be the shared sequence",
++    )?;
++    for (index, c) in blueprint.compositions.iter().enumerate() {
++        check(
++            c.name == ["shared", "landscape", "portrait"][index] && ids.insert(c.sequence),
++            "three distinct ordered native compositions required",
++        )?;
++        let q = s
++            .project
++            .sequence(ItemId(c.sequence))
++            .ok_or_else(|| bad("sequence missing"))?;
++        check(
++            (q.settings.width, q.settings.height) == (c.width, c.height)
++                && q.settings.par == (1, 1),
++            "template canvas mismatch",
++        )?;
++        check(
++            (index != 1 || u64::from(c.width) * 9 == u64::from(c.height) * 16)
++                && (index != 2 || u64::from(c.width) * 16 == u64::from(c.height) * 9),
++            "template needs native16:9 landscape and9:16 portrait canvases",
++        )?;
++        check(
++            q.caption_tracks.iter().all(|t| t.captions.is_empty())
++                && q.markers.is_empty()
++                && q.all_tracks().all(|t| t.transitions.is_empty()),
++            "unsupported duration-dependent template content",
++        )?;
++        let mut claimed = BTreeSet::new();
++        let mut names = BTreeSet::new();
++        for slot in &c.slots {
++            check(
++                names.insert(slot.role.clone())
++                    && (slot.role == "gameplay" || slot.role == "facecam"),
++                "duplicate/unsupported slot",
++            )?;
++            check(
++                blueprint.profile.regions.contains_key(&slot.role),
++                "profile lacks a source region for the authored role",
++            )?;
++            let p = clip(&s.project, c.sequence, slot.prototype_clip)?;
++            check(
++                p.item.0 == blueprint.placeholder_source
++                    && p.speed == 1.
++                    && !p.reverse
++                    && p.frame_hold.is_none()
++                    && p.markers.is_empty()
++                    && p.effects.iter().all(|e| !e.is_animated()),
++                "invalid/static source slot required",
++            )?;
++            let qtrack = q.find_item(p.id).ok_or_else(|| bad("prototype missing"))?.0;
++            check(qtrack.0 == slot.video_track, "prototype track differs")?;
++            claimed.insert(p.id);
++            if let Some(audio) = slot.prototype_audio {
++                let a = clip(&s.project, c.sequence, audio)?;
++                validate_static_primary_audio(&a)?;
++                check(
++                    a.item == p.item
++                        && a.link == p.link
++                        && a.link.is_some()
++                        && a.markers.is_empty()
++                        && a.effects.iter().all(|e| !e.is_animated())
++                        && q.find_item(a.id)
++                            .is_some_and(|(track, _)| Some(track.0) == slot.audio_track),
++                    "audio prototype differs",
++                )?;
++                claimed.insert(a.id);
++                audio_prototypes.insert(c.sequence, a);
++            }
++            check(
++                (slot.role == "gameplay"
++                    && slot.audio_track.is_some()
++                    && slot.prototype_audio.is_some())
++                    || (slot.role == "facecam"
++                        && slot.audio_track.is_none()
++                        && slot.prototype_audio.is_none()
++                        && p.link.is_none()),
++                "unsupported role audio policy",
++            )?;
++            prototypes.insert((c.sequence, slot.role.clone()), p);
++        }
++        check(
++            names.contains("gameplay")
++                && q.all_tracks()
++                    .flat_map(|t| t.items.iter())
++                    .all(|i| claimed.contains(&i.id)),
++            "template has unbound duration-sensitive items",
++        )?;
++    }
++    // Import performs external I/O and media-cache updates BEFORE staged project editing.
++    let imported = crate::commands::import_streamed(&mut s, &r.source.path, None)?;
++    let import_stats = stats.value();
++    let media = s
++        .project
++        .item(imported)
++        .and_then(|i| i.as_media())
++        .cloned()
++        .ok_or_else(|| bad("import lacks native media"))?;
++    let video = media
++        .info
++        .video
++        .as_ref()
++        .ok_or_else(|| bad("video source required"))?;
++    check(
++        (video.width, video.height)
++            == (
++                blueprint.profile.source_width,
++                blueprint.profile.source_height,
++            )
++            && video.par == (1, 1),
++        "selected source dimensions/PAR differ; choose an explicitly matching profile/template",
++    )?;
++    check(
++        media.info.audio_streams.len() == 1
++            && (1..=2).contains(&media.info.audio_streams[0].channels),
++        "first proof requires one mono/stereo native audio stream",
++    )?;
++    // Validate against the imported source, before entering the compound native edit.
++    for audio in audio_prototypes.values() {
++        validate_audio_channels(audio, media.info.audio_streams[0].channels as usize)?;
++    }
++    let rate = video.frame_rate;
++    let (source_in, duration) = exact_range(
++        r.moment.source_in_us,
++        r.moment.source_out_us,
++        rate,
++        media.info.duration,
++    )?;
++    let mut role_ids: BTreeMap<String, Vec<u64>> = BTreeMap::new();
++    s.edit_group("Instantiate pinned Creator Kit",|s| {
++        s.edit("Prepare native moment slots",|p,_| {
++            for c in &blueprint.compositions {let q=p.sequence_mut(ItemId(c.sequence)).ok_or_else(||bad("sequence missing"))?;
++                q.settings.frame_rate=rate;q.settings.preset=format!("{}x{} {}",q.settings.width,q.settings.height,rate.label());
++                for t in q.video_tracks.iter_mut().chain(q.audio_tracks.iter_mut()) {t.items.clear();}}
++            Ok(())
++        })?;
++        for c in &blueprint.compositions {
++            run(s,"sequence.open",json!({"item":c.sequence}))?;
++            for slot in &c.slots {
++                let mut params=json!({"item":imported.0,"track":slot.video_track,"time":0,"sourceIn":source_in.0,"duration":duration.0,"audio":slot.role=="gameplay"});
++                if let Some(a)=slot.audio_track {params["audioTrack"]=json!(a);}
++                run(s,"timeline.place",params)?;
++                let q=s.project.sequence(ItemId(c.sequence)).ok_or_else(||bad("sequence missing"))?;
++                let v=q.video_tracks.iter().find(|t|t.id.0==slot.video_track).and_then(|t|t.items.first()).ok_or_else(||bad("native placement missing"))?.clone();
++                let prototype=prototypes.get(&(c.sequence,slot.role.clone())).ok_or_else(||bad("effect prototype missing"))?.clone();
++                s.edit("Reuse authored native effects",|p,_| {
++                    let q=p.sequence_mut(ItemId(c.sequence)).ok_or_else(||bad("sequence missing"))?;
++                    let placed=q.find_item_mut(v.id).ok_or_else(||bad("placed clip missing"))?.1;
++                    placed.effects=prototype.effects;placed.gain_db=prototype.gain_db;placed.enabled=prototype.enabled;placed.scale_to_frame=prototype.scale_to_frame;
++                    if slot.role=="gameplay" {
++                        let proto=audio_prototypes.get(&c.sequence).ok_or_else(||bad("audio prototype missing"))?;
++                        let audio:Vec<_>=q.audio_tracks.iter_mut().flat_map(|t|t.items.iter_mut()).filter(|a|v.link.is_some() && a.link==v.link).collect();
++                        check(audio.len()==1,"native source must place one audio partner")?;
++                        for a in audio {copy_static_audio(a, proto);}
++                    }
++                    Ok(())
++                })?;
++                role_ids.entry(slot.role.clone()).or_default().push(v.id.0);
++            }
++        }
++        let mut roles=Vec::new();for(role,ids)in &role_ids {check(ids.len()==3,"role must exist in all three compositions")?;
++            roles.push(json!({"role":role,"audio":if role=="gameplay"{"inherit"}else{"none"},"shared":ids[0],"landscape":ids[1],"portrait":ids[2]}));}
++        let seqs:Vec<_>=blueprint.compositions.iter().map(|c|c.sequence).collect();
++        let links=json!({"schema":2,"revision":0,"sourceAsset":{"id":r.source.id,"sha256":r.source.sha256},"sharedSequence":seqs[0],"landscapeSequence":seqs[1],"portraitSequence":seqs[2],"units":[{"id":r.moment.id,"parent":null,"roles":roles}]});
++        let provenance=json!({"schema":1,"momentId":r.moment.id,"momentRevision":r.moment.revision,"kit":{"id":r.kit.id,"version":r.kit.version,"descriptorSha256":r.kit.descriptor_sha256},
++            "templateAsset":r.template,"assetRefs":descriptor.asset_refs,"sceneProfile":blueprint.profile,"sourceAsset":r.source,
++            "nativeImportedIdentity":media.identity,"requestedSourceRangeUs":{"start":r.moment.source_in_us,"end":r.moment.source_out_us},
++            "initialNativeRangeReceipt":{"sourceInTicks":source_in.0,"durationTicks":duration.0,"rate":rate,"rounding":"inward to complete native frames; receipt only, clips own later timing"}});
++        run(s,"metadata.set",json!({"item":owner.0,"field":LINKS,"value":links.to_string()}))?;
++        run(s,"metadata.set",json!({"item":owner.0,"field":INSTANCE,"value":provenance.to_string()}))?;
++        s.edit("Remove placeholder reference",|p,_| {p.items.remove(&ItemId(blueprint.placeholder_source));p.root.remove_item(ItemId(blueprint.placeholder_source));p.item_mut(owner).ok_or_else(||bad("owner missing"))?.metadata.remove(TEMPLATE);Ok(())})?;
++        Ok(())
++    })?;
++    let validation = run(&mut s, "clipline.validate", json!({}))?;
++    let final_project = serde_json::to_value(&*s.project).map_err(|e| bad(e.to_string()))?;
++    let (after_sha, after_bytes) = fingerprint(&r.source.path)?;
++    check(
++        after_sha == r.source.sha256 && after_bytes == r.source.bytes,
++        "source changed during factory preparation",
++    )?;
++    run(&mut s, "file.saveCopy", json!({"path":output}))?;
++    let mut reopened = Session::default();
++    reopened.services = host;
++    run(&mut reopened, "file.open", json!({"path":output}))?;
++    check(
++        serde_json::to_value(&*reopened.project).map_err(|e| bad(e.to_string()))? == final_project,
++        "native exact save/reopen mismatch",
++    )?;
++    check(
++        reopened.project.items.len() == 4,
++        "moment must contain only selected media and three native sequences",
++    )?;
++    for (peer, c) in blueprint.compositions.iter().enumerate() {
++        let q = reopened
++            .project
++            .sequence(ItemId(c.sequence))
++            .ok_or_else(|| bad("reopened sequence missing"))?;
++        check(
++            q.settings.frame_rate == rate
++                && (q.settings.width, q.settings.height) == (c.width, c.height)
++                && q.duration() == duration,
++            "native clock/canvas/duration changed",
++        )?;
++        check(
++            q.video_tracks.iter().map(|t| t.items.len()).sum::<usize>() == c.slots.len()
++                && q.audio_tracks.iter().map(|t| t.items.len()).sum::<usize>() == 1,
++            "native role/audio count changed",
++        )?;
++        for slot in &c.slots {
++            let cid = role_ids
++                .get(&slot.role)
++                .and_then(|ids| ids.get(peer))
++                .ok_or_else(|| bad("role receipt missing"))?;
++            let native = clip(&reopened.project, c.sequence, *cid)?;
++            let prototype = prototypes
++                .get(&(c.sequence, slot.role.clone()))
++                .ok_or_else(|| bad("prototype missing"))?;
++            check(
++                native.item == imported
++                    && native.start == Tick::ZERO
++                    && native.source_in == source_in
++                    && native.duration == duration
++                    && native.effects == prototype.effects,
++                "native source/effects changed",
++            )?;
++            if slot.role == "facecam" {
++                check(native.link.is_none(), "facecam duplicated audio ownership")?;
++            } else {
++                let audio: Vec<_> = q
++                    .audio_tracks
++                    .iter()
++                    .flat_map(|t| t.items.iter())
++                    .filter(|a| native.link.is_some() && a.link == native.link)
++                    .collect();
++                check(
++                    audio.len() == 1
++                        && audio[0].item == imported
++                        && audio[0].source_in == source_in
++                        && audio[0].duration == duration
++                        && same_static_audio(
++                            audio[0],
++                            audio_prototypes
++                                .get(&c.sequence)
++                                .ok_or_else(|| bad("audio prototype missing"))?,
++                        ),
++                    "native inherited audio changed",
++                )?;
++            }
++        }
++    }
++    Ok(
++        json!({"status":"pass","project":output,"projectSha256":hash(&read_small(output)?),"projectBytes":fs::metadata(output).map_err(|e|bad(e.to_string()))?.len(),
++        "momentId":r.moment.id,"momentRevision":r.moment.revision,
++        "requestedSourceRangeUs":{"start":r.moment.source_in_us,"end":r.moment.source_out_us},
++        "profileId":r.profile_id,"sceneKey":r.scene_key,
++        "kit":{"id":r.kit.id,"version":r.kit.version,"descriptorSha256":r.kit.descriptor_sha256},"sourceAsset":r.source.id,"templateAsset":r.template.id,"mediaCopies":0,
++        "nativeImportCalls":1,"importIO":import_stats,"afterReopenIO":stats.value(),"sourceFingerprintBytes":source_bytes+after_bytes,
++        "nativeInterval":{"sourceInTicks":source_in.0,"durationTicks":duration.0,"frameRate":rate,"frames":rate.frame_at(duration)},
++        "compositions":blueprint.compositions,"validation":validation,"exactSaveReopen":true,"nativeEffectsAndAudioPreserved":true,"liveSessionAccess":false,
++        "scope":"separate native scratch Session; static illustrative slots only; no final styling, performance or complete shared-asset claim"}),
++    )
++}
++
++/// Capture a reusable static layout through the existing native template owner.
++/// `profile_json` is bounded strict typed JSON; unknown struct fields are rejected.
++/// The selected profile and scene are explicit, not inferred from source dimensions.
++/// The supplied native layout is illustrative; this function chooses no final styling.
++pub fn capture(seed: &str, profile_json: &[u8], output: &str) -> crate::Result<Value> {
++    check(
++        profile_json.len() <= MAX_DOCUMENT,
++        "document exceeds candidate bound",
++    )?;
++    let profile: Profile = parse_object(profile_json)?;
++    capture_native(seed, profile, output)
++}
++
++/// Instantiate one small native moment in a fresh scratch Session.
++/// `request_json` parses into private typed request/profile/asset structs with
++/// `deny_unknown_fields`. IDs are canonical inputs, not generated timeline IDs.
++/// Caller must freshly admit the exact canonical Moment/Kit/assets; this function
++/// verifies supplied consistency and point-in-time files, not database authority.
++/// Native clips own later timing. Persisted Kit/source data is a creation receipt.
++/// The return receipt hashes the exact consumed request bytes, without reserialization.
++/// A failed save can leave a partial unique file; caller owns staging/quarantine
++/// and ProjectStore publication. No database/filesystem transaction is claimed.
++pub fn instantiate(request_json: &[u8], output: &str) -> crate::Result<Value> {
++    check(
++        request_json.len() <= MAX_DOCUMENT,
++        "document exceeds candidate bound",
++    )?;
++    let request: Request = parse_object(request_json)?;
++    let mut receipt = instantiate_native(request, output)?;
++    receipt["requestSha256"] = json!(hash(request_json));
++    Ok(receipt)
++}
 diff --git a/crates/engine/src/export_tools.rs b/crates/engine/src/export_tools.rs
 --- a/crates/engine/src/export_tools.rs
 +++ b/crates/engine/src/export_tools.rs
@@ -671,16 +1867,17 @@ diff --git a/crates/engine/src/export_tools.rs b/crates/engine/src/export_tools.
 diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
 --- a/crates/engine/src/lib.rs
 +++ b/crates/engine/src/lib.rs
-@@ -25,6 +25,8 @@
+@@ -25,6 +25,9 @@
  pub mod interchange;
  pub mod keyboard;
  mod keyframe_move;
 +mod linked_edits;
 +mod accepted_captions;
++pub mod creator_kit;
  mod marker_export;
  pub mod masks;
  pub mod media_browser;
-@@ -443,6 +445,13 @@
+@@ -443,6 +446,13 @@
      pub browser: media_browser::BrowserState,
      /// Nesting depth of [`Session::execute`] (commands that run other commands).
      exec_depth: u32,
@@ -694,7 +1891,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
      /// Each media file's size and modification time when last seen (Settings ▸ Media ▸
      /// Automatically refresh growing files, [`media_watch`]).
      pub media_stamps: std::collections::HashMap<String, media_watch::Stamp>,
-@@ -495,8 +504,9 @@
+@@ -495,8 +505,9 @@
  
  impl Session {
      pub fn new(services: Arc<dyn Services>) -> Self {
@@ -705,7 +1902,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
              history: History { limit: 200, ..Default::default() },
              revision: 1,
              saved_revision: 1,
-@@ -538,6 +548,10 @@
+@@ -538,6 +549,10 @@
              log: Default::default(),
              browser: Default::default(),
              exec_depth: 0,
@@ -716,7 +1913,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
              media_stamps: Default::default(),
              media_scan: None,
          }
-@@ -605,6 +619,9 @@
+@@ -605,6 +620,9 @@
      /// Tell the worker about the current project state if it changed (cheap: an `Arc` clone and a
      /// channel send; serialization happens on the worker). Called after every command.
      pub fn sync_persistence(&mut self) {
@@ -726,7 +1923,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
          let dirty = self.is_dirty();
          let Some(p) = self.persistence.as_mut() else { return };
          let cur = autosave::Sent { revision: self.revision, saved_revision: self.saved_revision, path: self.path.clone() };
-@@ -692,6 +709,9 @@
+@@ -692,6 +710,9 @@
      /// Run a command by id.
      pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
          let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
@@ -736,7 +1933,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
          if self.exec_depth == 0 && spec.journal && self.trim_play.active() {
              self.settle_trim_playback(id);
          }
-@@ -706,10 +726,15 @@
+@@ -706,10 +727,15 @@
          // Last-resort guard: a panic in a command (a bug that escaped the never-crash rules)
          // becomes an error for the caller (UI, CLI, control channel, MCP) instead of taking the
          // session and its unsaved project down. The panic hook has logged where it happened.
@@ -754,7 +1951,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
              source_monitor::track_history(self);
          }
          // source graphics: an edited instance updates the shared layers and the other instances
-@@ -721,9 +746,7 @@
+@@ -721,9 +747,7 @@
          {
              self.log.push(panels::Level::Error, id, e.to_string());
          }
@@ -765,7 +1962,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
          if r.is_ok() && spec.journal {
              self.journal.push((id.to_string(), params));
              if self.journal.len() > 10_000 {
-@@ -731,6 +754,14 @@
+@@ -731,6 +755,14 @@
              }
          }
          r
@@ -780,7 +1977,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
      }
  
      /// Another command arrives while trim-mode playback runs: a dynamic trim is committed first
-@@ -838,6 +869,7 @@
+@@ -838,6 +870,7 @@
          let mut st = self.state.clone();
          let r = f(&mut p, &mut st)?;
          self.refuse_self_nesting(&p)?;
@@ -788,7 +1985,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
          let old = std::mem::replace(&mut self.project, Arc::new(p));
          self.history.undo.push((label.to_string(), old));
          if self.history.undo.len() > self.history.limit {
-@@ -864,6 +896,7 @@
+@@ -864,6 +897,7 @@
          let mut st = self.state.clone();
          let r = f(&mut p, &mut st)?;
          self.refuse_self_nesting(&p)?;
@@ -796,7 +1993,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
          self.project = Arc::new(p);
          self.state = st;
          self.drop_stale_gap();
-@@ -871,43 +904,95 @@
+@@ -871,43 +905,95 @@
          Ok(r)
      }
  
@@ -924,7 +2121,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
              }
          }
      }
-@@ -988,6 +1073,7 @@
+@@ -988,6 +1074,7 @@
          self.history.redo.push((label.clone(), cur));
          self.fix_state();
          self.bump();
@@ -932,7 +2129,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
          Some(label)
      }
  
-@@ -998,6 +1084,7 @@
+@@ -998,6 +1085,7 @@
          self.history.undo.push((label.clone(), cur));
          self.fix_state();
          self.bump();
