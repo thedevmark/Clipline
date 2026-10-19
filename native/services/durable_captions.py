@@ -18,9 +18,10 @@ import uuid
 from native.core.durable_jobs import DurableJobs, JobError, StaleTransition, VerificationRequired
 from native.core.creator_library import CreatorLibrary
 from native.services.caption_audio import PreparedAudio
+from native.services.caption_vocabulary import verify_kit_vocabulary
 from native.services.caption_worker.backend import verify_source_audio
 from native.services.caption_worker.client import CaptionClient, write_once, failure_message
-from native.services.caption_worker.evidence import canonical, digest, hash_file, validate_request
+from native.services.caption_worker.evidence import canonical, digest, hash_file, validate_request, validate_hint_evidence
 
 
 class CaptionJobError(ValueError):
@@ -78,6 +79,7 @@ class DurableCaptionRunner:
         if not isinstance(envelope,dict) or set(envelope)!={"schema","transcript_id","accepted_revision","request"} or envelope["schema"]!=1:
             raise CaptionJobError("Unsupported caption execution envelope")
         request=validate_request(envelope["request"])
+        verify_kit_vocabulary(self.library, request)
         tid=_uuid(envelope["transcript_id"])
         if self.library.captions.identity(tid)!={k:request[k] for k in ("source","audio","range")}:
             raise CaptionJobError("Request differs from its transcript source/audio identity")
@@ -321,6 +323,9 @@ class DurableCaptionRunner:
             artifacts={kind:result.load(kind) for kind in ("hypothesis","alignment")}
             if result.state=="complete" and (receipt["worker_exit_code"]!=0 or any(value is None for value in artifacts.values())):
                 raise CaptionJobError("Complete output lacks verified machine evidence")
+            if result.state == "complete":
+                for value in artifacts.values():
+                    validate_hint_evidence(request, value)
         except Exception as exc:fault={"type":type(exc).__name__,"message":failure_message(exc)[:500]}
         finally:
             done.set()
@@ -401,6 +406,7 @@ class DurableCaptionRunner:
             if len(data)>1048576:raise CaptionJobError("Machine evidence exceeds its bound")
             value=json.loads(data)
             if digest(value)!=receipt["hashes"][kind]:raise CaptionJobError("Completed machine evidence changed")
+            validate_hint_evidence(request, value)
             artifacts[kind]=value
         tid=envelope["transcript_id"]
         hypothesis=self.library.captions.propose_hypothesis(tid,artifacts["hypothesis"])

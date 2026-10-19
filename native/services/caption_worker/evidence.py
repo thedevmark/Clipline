@@ -37,6 +37,58 @@ def integer(value, name, low=0, high=2**63-1):
         raise EvidenceError("INVALID_REQUEST", f"{name} must be an integer in [{low}, {high}]")
     return value
 
+
+def validate_vocabulary(value, kit_pin):
+    """A nullable, bounded snapshot in the existing vocabulary_revision field."""
+    if value is None:
+        return None
+    try:
+        fields = {"schema", "kit_id", "version", "descriptor_sha256", "vocabulary_sha256", "terms"}
+        if not isinstance(value, dict) or set(value) != fields or type(value["schema"]) is not int or value["schema"] != 1:
+            raise ValueError("Unsupported vocabulary snapshot")
+        if str(uuid.UUID(value["kit_id"])) != value["kit_id"]:
+            raise ValueError("Canonical Kit ID required")
+        integer(value["version"], "Kit version", 1)
+        if (not isinstance(kit_pin, dict) or set(kit_pin) != {"kit_id", "version"}
+                or type(kit_pin["version"]) is not int
+                or kit_pin != {"kit_id": value["kit_id"], "version": value["version"]}):
+            raise ValueError("Vocabulary and Kit version differ")
+        for key in ("descriptor_sha256", "vocabulary_sha256"):
+            if not isinstance(value[key], str) or not re.fullmatch("[0-9a-f]{64}", value[key]):
+                raise ValueError("Invalid vocabulary provenance hash")
+        terms = value["terms"]
+        if not isinstance(terms, list) or not 1 <= len(terms) <= 64:
+            raise ValueError("Use 1 to 64 authored vocabulary terms")
+        for term in terms:
+            if not isinstance(term, str) or not term.strip() or len(term) > 80 or not term.isprintable():
+                raise ValueError("Vocabulary terms must be printable single lines of at most 80 characters")
+        text = ", ".join(term.strip() for term in terms)
+        if len(text.encode("utf-8")) > 2048:
+            raise ValueError("Vocabulary hints exceed 2048 UTF-8 bytes")
+        if digest(terms) != value["vocabulary_sha256"]:
+            raise ValueError("Authored vocabulary hash differs")
+        return text
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise EvidenceError("INVALID_VOCABULARY", str(exc)) from exc
+
+
+def validate_hint_evidence(request, evidence):
+    value = request.get("vocabulary_revision")
+    if value is None:
+        return
+    text = validate_vocabulary(value, request.get("kit_revision"))
+    runtime = evidence.get("runtime")
+    hints = runtime.get("asr_hints") if isinstance(runtime, dict) else None
+    expected = {"mechanism": "faster-whisper.hotwords", "vocabulary_revision": value,
+                "text": text, "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "token_limit": 223}
+    if (not isinstance(hints, dict) or set(hints) != {*expected, "token_count"}
+            or any(hints.get(k) != v for k, v in expected.items())
+            or type(hints["token_count"]) is not int or not 1 <= hints["token_count"] <= 223):
+        raise EvidenceError("INVALID_EVIDENCE", "Applied ASR hints differ from the request")
+    if "vocabulary_revision" in evidence and evidence["vocabulary_revision"] != value:
+        raise EvidenceError("INVALID_EVIDENCE", "Evidence vocabulary differs from the request")
+
 def validate_request(r):
     try:
         if not isinstance(r,dict):
@@ -77,6 +129,7 @@ def validate_request(r):
             raise ValueError("range must fall on exact prepared-audio samples")
         if a["extraction"]["source_sha256"] != r["source"]["sha256"] or not a["extraction"]["argv"]:
             raise ValueError("extraction receipt is not bound to this source")
+        validate_vocabulary(r.get("vocabulary_revision"), r.get("kit_revision"))
         if len(canonical(r))+1 > MAX_REQUEST:
             raise ValueError("request too large")
     except (KeyError, TypeError, ValueError, OverflowError, RecursionError) as e:

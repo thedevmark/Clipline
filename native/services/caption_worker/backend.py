@@ -10,7 +10,7 @@ import sys
 import wave
 import time
 from pathlib import Path
-from .evidence import EvidenceError, hash_file
+from .evidence import EvidenceError, hash_file, validate_vocabulary
 
 
 PROFILE_MODES = {
@@ -137,6 +137,30 @@ def verify_source_audio(request):
     except (OSError,KeyError,TypeError,ValueError,wave.Error) as e:
         raise EvidenceError("AUDIO_MISMATCH",str(e)) from e
 
+def asr_hint_options(request, model):
+    text = validate_vocabulary(request.get("vocabulary_revision"), request.get("kit_revision"))
+    if text is None:
+        return {}, None
+    # Match faster-whisper 1.2.1 get_prompt, which otherwise silently truncates.
+    if model.max_length != 448:
+        raise EvidenceError("PROFILE_UNAVAILABLE", "Unsupported ASR hint token budget")
+    count = len(model.hf_tokenizer.encode(" " + text, add_special_tokens=False).ids)
+    if not 1 <= count <= 223:
+        raise EvidenceError("INVALID_VOCABULARY", "Saved vocabulary exceeds the model's 223 hint-token budget")
+    receipt = {"mechanism": "faster-whisper.hotwords",
+               "vocabulary_revision": request["vocabulary_revision"], "text": text,
+               "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+               "token_count": count, "token_limit": 223}
+    return {"hotwords": text}, receipt
+
+
+def transcribe_with_hints(request, model, audio):
+    options, receipt = asr_hint_options(request, model)
+    iterator, info = model.transcribe(audio, language="en", beam_size=5, vad_filter=True,
+                                     word_timestamps=True, condition_on_previous_text=False, **options)
+    return iterator, info, receipt
+
+
 def load(request, profile):
     deny_network()
     os.environ.update(HF_HUB_OFFLINE="1",HF_HUB_DISABLE_TELEMETRY="1",TRANSFORMERS_OFFLINE="1",DO_NOT_TRACK="1",
@@ -175,7 +199,7 @@ def load(request, profile):
     model_load_seconds = time.perf_counter() - load_started
     inference_started = time.perf_counter()
     print("phase=asr_inference",file=sys.stderr,flush=True)
-    iterator,info=model.transcribe(audio,language="en",beam_size=5,vad_filter=True,word_timestamps=True,condition_on_previous_text=False)
+    iterator, info, hint_receipt = transcribe_with_hints(request, model, audio)
     segments=[]
     for s in iterator:
         segments.append({"start":s.start,"end":s.end,"text":s.text,"avg_logprob":s.avg_logprob,"no_speech_prob":s.no_speech_prob,
@@ -203,6 +227,8 @@ def load(request, profile):
         "network_policy":"Python socket calls denied plus offline model settings; not an OS firewall",
         "audio_decode":"WhisperX.load_audio: FFmpeg to NumPy, reused by ASR and alignment",
         "sample_zero_source_us":request["range"]["start_us"],"speaker_identity":None}
+    if hint_receipt is not None:
+        runtime["asr_hints"] = hint_receipt
     runtime["source_time_conversion"]="reported selected-range seconds to integer source microseconds, ROUND_HALF_UP; precision is not asserted"
     runtime["hardware"]={"machine":platform.machine(),"processor":platform.processor(),"logical_cpu_count":os.cpu_count()}
     return segments,align,runtime

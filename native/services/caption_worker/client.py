@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime,timezone
 from pathlib import Path
-from .evidence import MAX_EVENT, MAX_WIRE, MAX_LOG, EvidenceError, canonical, digest, validate_request
+from .evidence import MAX_EVENT, MAX_WIRE, MAX_LOG, EvidenceError, canonical, digest, validate_request, validate_hint_evidence
 from .process_tree import ProcessTree
 
 @dataclass(frozen=True)
@@ -418,6 +418,7 @@ class CaptionClient:
                     if kind=="hypothesis" and hypothesis is None and alignment is None:
                         if not isinstance(data,dict) or data.get("run_id")!=request["run_id"] or data.get("request_sha256")!=digest(request) or data.get("source")!=request["source"] or data.get("audio")!=request["audio"] or data.get("range")!=request["range"] or not isinstance(data.get("words"),list):
                             raise EvidenceError("INVALID_EVIDENCE","hypothesis is not bound to request")
+                        validate_hint_evidence(request, data)
                         for word in data["words"]:
                             if not isinstance(word,dict) or not isinstance(word.get("text"),str) or not isinstance(word.get("id"),str) or word["id"] in hypothesis_words:
                                 raise EvidenceError("INVALID_EVIDENCE","invalid or repeated machine word identity")
@@ -428,6 +429,7 @@ class CaptionClient:
                     elif kind=="alignment" and hypothesis is not None and alignment is None:
                         if not isinstance(data,dict) or data.get("hypothesis_run_id")!=request["run_id"] or data.get("request_sha256")!=digest(request):
                             raise EvidenceError("INVALID_EVIDENCE","alignment is not bound to hypothesis")
+                        validate_hint_evidence(request, data)
                         if not isinstance(data.get("words"),list) or len(data["words"])!=len(hypothesis_words):
                             raise EvidenceError("INVALID_EVIDENCE","alignment word set changed")
                         seen=set();canonical_ids=list(hypothesis_words);previous_resolved_end=None

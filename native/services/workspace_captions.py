@@ -8,6 +8,7 @@ import uuid
 
 from native.core.creator_library import CreatorLibrary
 from native.services.caption_audio import CaptionAudioPreparer
+from native.services.caption_vocabulary import kit_vocabulary
 from native.services.caption_worker.client import CaptionClient
 from native.services.durable_captions import DurableCaptionRunner
 from native.services.moment_captions import MomentCaptionSelector
@@ -291,6 +292,13 @@ class WorkspaceCaptions:
                 'start_us':start,'end_us':end,'context_start_us':start,'context_end_us':end,
                 'profile_path':self.runtime.profile[0],'profile_sha256':self.runtime.profile[1],
                 'kit_revision':{'kit_id':f.moment.kit_id,'version':f.moment.kit_version}}
+            with CreatorLibrary(e.workspace.database) as library:
+                record = library.kit_record(f.moment.kit_id, f.moment.kit_version)
+                require(record.descriptor_sha256 == f.kit.descriptor_sha256, 'The selected Kit descriptor changed')
+                chosen['vocabulary_revision'] = kit_vocabulary(record)
+            require(chosen['vocabulary_revision'] is None or
+                    getattr(self.runtime, 'vocabulary_hints', None) == 'faster-whisper.hotwords.v1',
+                    'This runtime cannot use saved Kit vocabulary. Configure a hint-capable worker runtime first.')
             prepared=self.preparer.prepare(chosen,self.directory/'prepared',cancel=cancel)
             if prepared.owner is not None:self._retained=prepared.owner
             if prepared.state=='cancelled' and not self.preparer.has_unsettled:

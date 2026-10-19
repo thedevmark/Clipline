@@ -16,6 +16,7 @@ class CaptionRuntime:
     ffprobe: tuple[str, str]
     projection_json: str
     assets_json: str
+    vocabulary_hints: str | None = None
 
     @property
     def projection(self):
@@ -37,8 +38,15 @@ def load_caption_runtime(path):
     value = json.loads(raw, object_pairs_hook=_object, parse_constant=lambda _: (_ for _ in ()).throw(ValueError('Finite JSON required')))
     required = {'schema', 'purpose', 'display_name', 'profile', 'python', 'worker', 'ffmpeg', 'ffprobe',
                 'caption_projection_profile', 'assets_verified', 'observed_utc', 'limits'}
-    if not isinstance(value, dict) or set(value) != required or type(value['schema']) is not int or value['schema'] != 1:
+    if not isinstance(value, dict) or type(value.get('schema')) is not int or value['schema'] not in (1, 2):
         raise ValueError('Unsupported explicit caption runtime manifest')
+    if value['schema'] == 2:
+        required = required | {'vocabulary_hints'}
+    if set(value) != required:
+        raise ValueError('Unsupported explicit caption runtime manifest')
+    hints = value.get('vocabulary_hints')
+    if value['schema'] == 2 and hints != 'faster-whisper.hotwords.v1':
+        raise ValueError('Unsupported explicit vocabulary hint capability')
     def program(record):
         path, pin = record['path'], record['sha256']
         if not isinstance(path, str) or not Path(path).is_absolute() or path.startswith(('//', '\\\\')):
@@ -52,6 +60,14 @@ def load_caption_runtime(path):
         raise ValueError('Bounded caption asset pins required')
     for item in assets:
         program(item)
+    if hints is not None:
+        worker = Path(programs[2][0])
+        if worker.name != 'worker.py':
+            raise ValueError('Hint-capable runtime requires the pinned caption worker closure')
+        for name in ('worker.py', 'backend.py', 'evidence.py'):
+            matches = [item for item in assets if Path(item['path']) == worker.with_name(name)]
+            if len(matches) != 1 or name == 'worker.py' and matches[0]['sha256'] != programs[2][1]:
+                raise ValueError('Hint-capable runtime omits or misbinds a worker closure pin')
     title = value['display_name']
     if not isinstance(title, str) or not title.strip() or len(title) > 200:
         raise ValueError('A human caption profile name is required')
@@ -64,7 +80,7 @@ def load_caption_runtime(path):
     settings = projection['defaultSettings']
     if rules['minDurationUs'] > rules['maxDurationUs'] or not isinstance(settings,str) or len(settings)>1024 or any(ord(c)<32 for c in settings):
         raise ValueError('Invalid explicit caption projection settings')
-    return CaptionRuntime(title,*programs,json.dumps(projection,allow_nan=False),json.dumps(assets,allow_nan=False))
+    return CaptionRuntime(title,*programs,json.dumps(projection,allow_nan=False),json.dumps(assets,allow_nan=False),hints)
 
 
 def configured_caption_runtimes(value):
