@@ -104,7 +104,7 @@ class WorkspaceEditorController:
 
     def __init__(self, workspace, *, helper, editor, python,
                  creation_timeout_seconds=120, readiness_seconds=30, managed_exit=False,
-                 close_wait_seconds=10):
+                 close_wait_seconds=10, caption_runtime=None):
         require(type(workspace) is WorkspaceLibrary, 'Use the canonical WorkspaceLibrary owner')
         require(type(helper) is QualifiedCreatorKitHelper and type(editor) is QualifiedEditor,
                 'Explicit qualified helper and editor configuration are required')
@@ -130,6 +130,10 @@ class WorkspaceEditorController:
         self._profile_id = self._scene_key = None
         self._blocked_reason = None
         self._view = EditorOutcome('idle', 'No native editor is open.')
+        self._captions = None
+        if caption_runtime is not None:
+            from native.services.workspace_captions import WorkspaceCaptions
+            self._captions = WorkspaceCaptions(self,caption_runtime)
 
     def status(self):
         """Detached state only; safe on the GUI thread, without native/SQLite IO."""
@@ -140,7 +144,8 @@ class WorkspaceEditorController:
         """Shared admission for editing actions; operation lock owns busy state."""
         return (self._view.state == 'open' and self._session is not None
                 and self._retained_owner is None and self._blocked_reason is None
-                and not self._quit_attempted)
+                and not self._quit_attempted
+                and not (self._captions is not None and self._captions.unsettled))
 
     def _view_update(self, state, message, *, error=UNCHANGED, owner=None, receipt=None):
         with self._state_lock:
@@ -150,7 +155,8 @@ class WorkspaceEditorController:
                 can_checkpoint=self._session is not None and self._retained_owner is None and self._blocked_reason is None and not self._busy,
                 can_close_editor=self._session is not None and self._retained_owner is None and self._blocked_reason is None and not self._busy,
                 can_cleanup=self._retained_owner is not None and not self._busy,
-                app_close_allowed=not self._busy and self._session is None and self._retained_owner is None,
+                app_close_allowed=not self._busy and self._session is None and self._retained_owner is None
+                    and not (self._captions is not None and self._captions.unsettled),
                 error_type=(self._view.error_type if error is UNCHANGED else
                             type(error).__name__ if error is not None else None),
                 stop_receipt=immutable(receipt) if receipt is not None else self._view.stop_receipt)
@@ -391,11 +397,13 @@ class WorkspaceEditorController:
                     raise SessionError(str(error), failed_session.directory, owner=failed_session,
                                        cleanup_error=str(cleanup)) from error
                 raise
+            if self._captions is not None:self._captions.refresh_barrier()
             self._view_update('open', 'Native editor opened for the selected Moment.', error=None)
         return self._run(operation)
 
     def checkpoint(self):
         def operation():
+            self._caption_normal_admission()
             if not self._document_is_open():
                 raise OperationRefused('A verified open editor is required')
             self._assert_facts(verify=True)
@@ -443,6 +451,7 @@ class WorkspaceEditorController:
 
     def cleanup(self):
         def operation():
+            self._caption_normal_admission()
             if self._retained_owner is None and self._session is not None:
                 self._retained_owner, self._retained_kind = self._session, 'session'
                 self._session = None
@@ -489,6 +498,7 @@ class WorkspaceEditorController:
                 'The final native document contains an unadmitted source dependency')
 
     def _settle_exit(self):
+        self._caption_normal_admission()
         session = self._session or self._retained_owner
         require(session is not None and self._retained_kind in (None, 'session'),
                 'The original native session owner is required')
@@ -562,6 +572,7 @@ class WorkspaceEditorController:
 
     def save_and_close(self, *, cancel=None):
         def operation():
+            self._caption_normal_admission()
             if not self.managed_exit:
                 raise OperationRefused('Save and close requires an explicitly qualified managed-exit runtime')
             if not self._document_is_open():
@@ -633,3 +644,30 @@ class WorkspaceEditorController:
                     return
             self._settle_exit()
         return self._run(operation)
+
+    def _caption_normal_admission(self):
+        if self._captions is not None:
+            if not self._captions.unsettled:self._captions.refresh_barrier()
+            if self._captions.unsettled:
+                raise OperationRefused('Settle the retained caption operation or use its exact Check editor before checkpoint or normal close')
+
+    def caption_status(self):
+        return self._captions.status() if self._captions is not None else None
+
+    def caption_context(self,expected_moment_id,expected_moment_revision,*,cancel=None):
+        return self._captions.context(expected_moment_id,expected_moment_revision,cancel=cancel)
+
+    def generate_captions(self,context_token,selection,*,cancel=None):
+        return self._captions.generate(context_token,selection,cancel=cancel)
+
+    def accept_caption_proposal(self,context_token,job_id,transcript_id,hypothesis_id,alignment_id,*,expected_revision=0,tracks=None):
+        return self._captions.accept(context_token,job_id,transcript_id,hypothesis_id,alignment_id,expected_revision=expected_revision,tracks=tracks)
+
+    def repair_captions(self,context_token,action,view=None,**fields):
+        return self._captions.repair(context_token,action,view,**fields)
+
+    def observe_captions(self,*,cleanup=False):
+        return self._captions.observe(cleanup=cleanup)
+
+    def caption_source_monitor(self,context_token,action,*,word_id=None):
+        return self._captions.source_monitor(context_token,action,word_id=word_id)

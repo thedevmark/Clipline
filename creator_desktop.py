@@ -17,8 +17,9 @@ def main(argv=None):
                         help='Explicit qualified local editor/helper identities for the native companion')
     parser.add_argument('--intake-runtime-manifest', type=Path,
                         help='Explicit qualified local source-download identities and public Twitch client ID')
+    parser.add_argument('--caption-runtime-manifest',type=Path,help='Explicit local caption worker/profile/tool identities; no automatic installation')
     args = parser.parse_args(argv)
-    editor_runtime = intake_runtime = None
+    editor_runtime = intake_runtime = caption_runtime = None
     # Reject malformed opt-in configuration before the window starts library workers.
     if args.runtime_manifest is not None:
         from native.services.editor_runtime import load_editor_runtime
@@ -32,13 +33,18 @@ def main(argv=None):
             intake_runtime = load_intake_runtime(args.intake_runtime_manifest)
         except Exception:
             parser.error('The source-download runtime configuration could not be loaded.')
+    if args.caption_runtime_manifest is not None:
+        if editor_runtime is None:parser.error('Caption workflow requires the active native editor runtime.')
+        from native.services.caption_runtime import load_caption_runtime
+        try:caption_runtime=load_caption_runtime(args.caption_runtime_manifest)
+        except Exception:parser.error('The caption runtime configuration could not be loaded.')
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName('Clipline')
     app.setWindowIcon(QIcon(str(INTERNAL_DIR / 'static' / 'favicon.ico')))
     window = CreatorLibraryWindow(args.workspace)
     if editor_runtime is not None:
         from native.ui.workspace_editor import EditorCompanionBinding
-        controller = editor_runtime.controller(window.library)
+        controller = editor_runtime.controller(window.library,caption_runtime=caption_runtime)
         window.editor_binding = EditorCompanionBinding(window, controller)
     if intake_runtime is not None:
         from native.services.workspace_intake import WorkspaceIntakeController

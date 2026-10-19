@@ -9,7 +9,8 @@ from pathlib import Path
 sys.dont_write_bytecode=True
 if __package__ in {None,""}:
     sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from caption_worker.evidence import MAX_REQUEST,MAX_EVENT,EvidenceError,canonical,validate_request,make_hypothesis,make_alignment,hash_file,digest
+    __package__ = "caption_worker"
+from .evidence import MAX_REQUEST,MAX_EVENT,EvidenceError,canonical,validate_request,make_hypothesis,make_alignment,hash_file,digest
 
 def machine_json(value):
     if isinstance(value,dict): return {k:machine_json(v) for k,v in value.items()}
@@ -33,7 +34,7 @@ def main():
             raise EvidenceError("INVALID_REQUEST","Missing or oversized request frame")
         try: request=validate_request(json.loads(line))
         except (ValueError,UnicodeError,RecursionError) as e: raise EvidenceError("INVALID_REQUEST",str(e)) from e
-        from caption_worker import backend
+        from . import backend
         with contextlib.redirect_stdout(sys.stderr):
             print("phase=preflight",file=sys.stderr,flush=True)
             profile=backend.preflight(request)

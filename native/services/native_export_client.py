@@ -8,6 +8,7 @@ must stop before the durable owner can release resource admission.
 from dataclasses import dataclass
 from pathlib import Path
 from fractions import Fraction
+import ctypes as c
 import json,math,os,queue,re,subprocess,threading,time,uuid
 from native.services.caption_worker.process_tree import ProcessTree
 from native.services.caption_worker.evidence import canonical,digest,hash_file
@@ -90,8 +91,8 @@ class OwnedProcess:
         child_environment.update(RAYON_NUM_THREADS='2',OMP_NUM_THREADS='2')
         self.directory=directory;directory.mkdir(exist_ok=False)
         self.cancel=cancel;self.deadline=deadline;self.events=queue.Queue(8) if events else None
-        self.faults=[];self.threads=[];self.process=None;self.tree=None;self.proof={'disposition':'never_started','active_processes':0};self.closed=False
-        self._closing=threading.Lock();self.close_attempts=0
+        self.faults=[];self.threads=[];self._starting_reader=None;self.process=None;self.tree=None;self.proof={'disposition':'never_started','active_processes':0};self.closed=False
+        self._closing=threading.Lock();self.close_attempts=0;self._empty_scope_proof=None
         self.execution_owner=execution
         self.gate_released=False
         write_once(directory/'launch.json',{'argv':argv,'gate_state_at_launch':'not_released'})
@@ -101,9 +102,17 @@ class OwnedProcess:
                 creationflags=subprocess.CREATE_NO_WINDOW,env=child_environment)
             self.proof={'disposition':'unknown'};self.tree=ProcessTree(self.process)
             for pipe,name,limit in [(self.process.stdout,'stdout.log',MAX_WIRE),(self.process.stderr,'stderr.log',1024*1024)]:
-                thread=threading.Thread(target=self._read,args=(pipe,name,limit),daemon=True);thread.start();self.threads.append(thread)
-        except BaseException:
-            self.close();raise
+                thread=threading.Thread(target=self._read,args=(pipe,name,limit),daemon=True)
+                self._starting_reader=thread
+                self.threads.append(thread)
+                thread.start()
+                self._starting_reader=None
+        except BaseException as primary:
+            primary.owner=self
+            try:self.close()
+            except BaseException as cleanup:primary.cleanup_error=cleanup
+            if self.closed:del primary.owner
+            raise
     def _read(self,pipe,name,limit):
         try:
             total=0
@@ -137,12 +146,19 @@ class OwnedProcess:
     def wait(self):
         while self.process.poll() is None:self.guard();time.sleep(.025)
         self.guard();return self.process.returncode
+    def _readers_settled(self):
+        pending=getattr(self,'_starting_reader',None)
+        return pending is None and all(not thread.is_alive() for thread in self.threads)
+
     def close(self):
         with self._closing:
             if self.closed:return self.proof
             self.close_attempts+=1
             try:
-                if self.tree:self.proof=self.tree.stop()
+                if self.tree:
+                    self.proof=dict(self._empty_scope_proof) if getattr(self,'_empty_scope_proof',None) is not None else self.tree.stop()
+                    if self.proof.get('disposition')=='stopped' and self.proof.get('active_processes')==0:
+                        self._empty_scope_proof=dict(self.proof)
                 elif self.process:
                     if not self.gate_released:
                         if self.process.poll() is None:self.process.kill()
@@ -156,15 +172,23 @@ class OwnedProcess:
                     if self.process:
                         if self.process.stdin and not self.process.stdin.closed:self.process.stdin.close()
                         self.process.wait(timeout=5)
-                    for thread in self.threads:thread.join(3)
-                    if any(t.is_alive() for t in self.threads):self.proof={**self.proof,'disposition':'unknown','reason':'owned pipe reader remains active'}
+                    pending=getattr(self,'_starting_reader',None)
+                    if pending is not None:
+                        pending.join(3)
+                        if not pending.is_alive():self._starting_reader=None
+                    for thread in self.threads:
+                        if thread is not pending and thread.is_alive():thread.join(3)
+                    if not self._readers_settled():self.proof={**self.proof,'disposition':'unknown','reason':'owned pipe reader remains active or its start outcome is unconfirmed'}
                     else:
                         for pipe in (self.process.stdout,self.process.stderr) if self.process else ():
                             if pipe is not None and not pipe.closed:pipe.close()
-                        if self.tree:self.tree.close()
+                        if self.tree and self.tree.close() is not True:
+                            error_code=c.get_last_error()
+                            raise OSError(error_code,'Owned export Job Object handle release was not confirmed')
+                        self._starting_reader=None
                         self.closed=True
             except Exception as exc:self.proof={**self.proof,'disposition':'unknown','reason':str(exc)[:1000]}
-            self.proof={**self.proof,'exit_code':self.process.returncode if self.process else None,'streams_closed':all(not t.is_alive() for t in self.threads),'close_attempt':self.close_attempts}
+            self.proof={**self.proof,'exit_code':self.process.returncode if self.process else None,'streams_closed':self._readers_settled(),'close_attempt':self.close_attempts}
             name='stop.json' if self.close_attempts==1 else f'stop-{self.close_attempts:03}.json'
             write_once(self.directory/name,self.proof)
             return self.proof

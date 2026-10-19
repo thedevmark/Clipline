@@ -509,7 +509,7 @@ class OwnerBoundaryTests(unittest.TestCase):
         self.closed = []
         self.proof = {'disposition': 'stopped', 'active_processes': 0, 'scope_id': 'actual-double-scope'}
         self.owner.tree = SimpleNamespace(observe=lambda: copy.deepcopy(self.proof),
-                                           close=lambda: self.closed.append('scope'))
+                                           close=lambda: self.closed.append('scope') or True)
         self.marker = self.root / 'editor-owner-uncertain.json'
         self.marker.write_text(json.dumps({'run': str(self.root)}))
 

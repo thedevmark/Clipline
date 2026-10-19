@@ -165,8 +165,8 @@ class TimingRepairPanel(CaptionRepairPanel):
 
 
 class TimingRepairBinding(CaptionRepairBinding):
-    def __init__(self, panel, controller, runner=None):
-        super().__init__(panel, controller, runner)
+    def __init__(self, panel, controller, runner=None, *, host_dispatch=None):
+        super().__init__(panel, controller, runner, host_dispatch=host_dispatch)
         panel.timing_requested.connect(self._save_timing)
 
     @Slot(object, str, object, object)

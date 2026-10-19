@@ -4,6 +4,7 @@ The qualified helper owns document creation and clocks. SQLite admission and
 ProjectStore publication have a retained crash boundary, not a joint commit.
 """
 from contextlib import ExitStack
+import ctypes as c
 from dataclasses import asdict, dataclass
 import hashlib
 import json
@@ -39,17 +40,26 @@ class NativeMomentCreationError(RuntimeError):
 class RetainedNativeMomentOwner:
     """Keep admitted inputs protected until this exact owned process is settled."""
 
-    def __init__(self, scope, process, guards):
+    def __init__(self, scope, process, guards, *, stopped_receipt=None,
+                 readers=None, pending_reader=None, read_errors=None, overflow=None):
         self.scope = scope
         self.process = process
         self.guards = guards
-        self.settled = False
+        self.readers = readers if readers is not None else []
+        self.pending_reader = pending_reader
+        self.read_errors = read_errors if read_errors is not None else []
+        self.overflow = overflow
+        self.stop_receipt = stopped_receipt
+        self.settled = (stopped_receipt is not None and stopped_receipt.get('disposition') == 'stopped'
+                        and stopped_receipt.get('active_processes') == 0)
 
     @property
     def job(self):
         return self.scope.job if self.scope is not None else None
 
     def stop(self):
+        if self.settled:
+            return self.stop_receipt
         if self.scope is not None:
             receipt = self.scope.stop()
         else:
@@ -63,15 +73,52 @@ class RetainedNativeMomentOwner:
                        'disposition': 'stopped', 'active_processes': 0}
         if receipt.get('disposition') == 'stopped' and receipt.get('active_processes') == 0:
             self.settled = True
-            self.guards.close()
+            self.stop_receipt = receipt
         return receipt
 
     def close(self):
         if not self.settled:
             raise RuntimeError('Retain the owner until explicit stop proves cessation')
+        if not _settle_io(self.process, self.readers, self.pending_reader):
+            raise RuntimeError('Retain the owner until its parent, readers and streams settle')
+        self.pending_reader = None
         if self.scope is not None:
-            self.scope.close()
+            _close_scope(self.scope)
+            self.scope = None
         self.guards.close()
+        return True
+
+
+def _close_scope(scope):
+    if scope.close() is not True:
+        error_code = c.get_last_error()
+        raise OSError(error_code, 'Owned native helper Job Object handle release was not confirmed')
+
+
+def _settle_io(process, readers, pending_reader):
+    if process is not None:
+        if process.stdin is not None and not process.stdin.closed:
+            process.stdin.close()
+        process.wait(timeout=3)
+    # Public join must confirm an interrupted start, even if ident is visible.
+    if pending_reader is not None:
+        try:
+            pending_reader.join(2)
+        except RuntimeError:
+            return False
+    for reader in readers:
+        if reader is not pending_reader and reader.is_alive():
+            reader.join(2)
+    if pending_reader is not None and pending_reader.is_alive():
+        return False
+    if any(reader.is_alive() for reader in readers):
+        return False
+    if process is not None:
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is not None and not pipe.closed:
+                pipe.close()
+        return all(pipe is None or pipe.closed for pipe in (process.stdin, process.stdout, process.stderr))
+    return True
 
 
 @dataclass(frozen=True)
@@ -348,8 +395,13 @@ def create_native_moment(library_path, moment_id, expected_revision, *, profile_
     process = scope = None
     process_receipt = None
     stop_attempted = False
+    release_attempted = False
+    stopped_receipt = None
     publication_started = False
     readers = []
+    pending_reader = None
+    read_errors = []
+    overflow = None
     primary = None
     guards = ExitStack()
     try:
@@ -402,12 +454,13 @@ def create_native_moment(library_path, moment_id, expected_revision, *, profile_
             )
             scope = ProcessTree(process)
             overflow = threading.Event()
-            read_errors = []
             for pipe, name, bound in ((process.stdout, 'stdout.json', MAX_RECEIPT),
                                       (process.stderr, 'stderr.log', MAX_LOG)):
                 reader = threading.Thread(target=_read_pipe, args=(pipe, directory / name, bound, overflow, read_errors), daemon=True)
-                reader.start()
+                pending_reader = reader
                 readers.append(reader)
+                reader.start()
+                pending_reader = None
             process.stdin.write(b'start\n')
             process.stdin.flush()
             process.stdin.close()
@@ -426,12 +479,12 @@ def create_native_moment(library_path, moment_id, expected_revision, *, profile_
             write_once(directory / 'process.json', {'exit_code': process.returncode, 'scope': process_receipt})
             require(process_receipt.get('disposition') == 'stopped'
                     and process_receipt.get('active_processes') == 0, 'Owned native helper cleanup is unknown')
-            scope.close()
-            scope = None
-            for reader in readers:
-                reader.join(2)
-            require(not any(reader.is_alive() for reader in readers), 'Native helper output readers did not stop')
+            stopped_receipt = dict(process_receipt)
+            require(_settle_io(process, readers, pending_reader), 'Native helper parent, readers or streams did not settle')
             require(not overflow.is_set() and not read_errors, 'Native helper output exceeds its bound or cannot be retained')
+            release_attempted = True
+            _close_scope(scope)
+            scope = None
             require(process.returncode == 0, 'Native helper failed; staged output is retained')
             cancelled(cancel)
             require(output.resolve(strict=True) == output and output.is_file()
@@ -463,18 +516,18 @@ def create_native_moment(library_path, moment_id, expected_revision, *, profile_
                        'sha256': snapshot.sha256, 'request_sha256': request_sha})
             return CreatedNativeMoment(snapshot, directory, request_sha,
                                        directory / 'native-receipt.json', directory / 'process.json')
-    except Exception as error:
+    except BaseException as error:
         primary = error
         state = error.state if isinstance(error, NativeMomentCreationError) else 'failed'
         if publication_started:
             state = 'publication_unknown'
-        cleanup = None
+        cleanup = str(primary) if release_attempted and scope is not None else None
         if scope is not None and not stop_attempted:
             try:
                 stop_attempted = True
                 process_receipt = scope.stop()
                 write_once(directory / 'process.json', {'exit_code': process.poll(), 'scope': process_receipt})
-            except Exception as stop_error:
+            except BaseException as stop_error:
                 cleanup = str(stop_error)
         elif process is not None and scope is None and process.poll() is None:
             # The gate was never released if Job Object attachment failed.
@@ -487,33 +540,53 @@ def create_native_moment(library_path, moment_id, expected_revision, *, profile_
                     'pid': process.pid, 'exit_code': process.returncode,
                     'native_start_gate_released': False,
                 })
-            except Exception as stop_error:
+            except BaseException as stop_error:
                 cleanup = str(stop_error)
         unknown = scope is not None and (process_receipt is None
                   or process_receipt.get('disposition') != 'stopped'
                   or process_receipt.get('active_processes') != 0)
         gate_unknown = process is not None and scope is None and process.poll() is None
         unknown = unknown or gate_unknown
+        io_settled = False
+        if not unknown:
+            try:
+                io_settled = _settle_io(process, readers, pending_reader)
+            except BaseException as io_error:
+                cleanup = str(io_error)
+            if not io_settled:
+                unknown = True
+                cleanup = cleanup or 'Native helper parent, reader or stream settlement remains unconfirmed'
+        if scope is not None and process_receipt is not None and process_receipt.get('disposition') == 'stopped' and process_receipt.get('active_processes') == 0:
+            stopped_receipt = dict(process_receipt)
+            if release_attempted:
+                unknown = True
+            elif not unknown:
+                try:
+                    release_attempted = True
+                    _close_scope(scope)
+                    scope = None
+                except BaseException as release_error:
+                    cleanup = str(release_error)
+                    unknown = True
+            if unknown:
+                process_receipt = {**process_receipt, 'disposition': 'unknown',
+                                   'scope_released': False, 'streams_closed': io_settled,
+                                   'cleanup_error': cleanup}
+                if release_attempted:
+                    process_receipt['release_error'] = cleanup
         if unknown:
             state = 'outcome_unknown'
-        elif scope is not None:
-            scope.close()
-            scope = None
-        for reader in readers:
-            reader.join(2)
-        if process is not None and not readers:
-            for pipe in (process.stdin, process.stdout, process.stderr):
-                if pipe is not None and not pipe.closed:
-                    pipe.close()
+        retained = RetainedNativeMomentOwner(scope, process, guards.pop_all(), stopped_receipt=stopped_receipt,
+            readers=readers, pending_reader=pending_reader, read_errors=read_errors, overflow=overflow) if unknown else None
+        raised = NativeMomentCreationError(str(primary), directory, state=state, owner=retained)
         failure = {'state': state, 'error': str(primary), 'cleanup_error': cleanup,
                    'process': process_receipt, 'publication_started': publication_started,
-                   'staged_output_retained': output.exists()}
+                   'staged_output_retained': output.exists(), 'streams_closed': io_settled,
+                   'pending_reader_start': pending_reader is not None and pending_reader.ident is None}
         try:
             write_once(directory / 'failure.json', failure)
-        except OSError as receipt_error:
+        except BaseException as receipt_error:
             failure['receipt_error'] = str(receipt_error)
-        retained = RetainedNativeMomentOwner(scope, process, guards.pop_all()) if unknown else None
-        raised = NativeMomentCreationError(str(primary), directory, state=state, owner=retained)
         raised.details = failure
         raise raised from primary
     finally:

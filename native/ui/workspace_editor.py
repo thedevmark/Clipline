@@ -56,6 +56,7 @@ class EditorCompanionBinding(QObject):
         self.runner = window.runner
         self.choose_layout = choose_layout or self._choose_layout
         self.busy = False
+        self.caption_dialog = None
         self.cancel = None
         self.cancel_label = 'Cancel opening'
         self.panel = QWidget(window)
@@ -70,6 +71,10 @@ class EditorCompanionBinding(QObject):
         self.save = QPushButton('Save checkpoint')
         self.save.clicked.connect(lambda: self._run(self.controller.checkpoint, 'Saving the edit…'))
         actions.addWidget(self.save)
+        self.captions = QPushButton('Captions')
+        self.captions.clicked.connect(self._captions)
+        self.captions.setVisible(getattr(controller,'_captions',None) is not None)
+        actions.addWidget(self.captions)
         self.close_editor = QPushButton('Save and close')
         self.close_editor.clicked.connect(lambda: self._run(self._save_and_close, 'Saving and closing the edit…',
                                                           cancellable=True, cancel_label='Stop waiting'))
@@ -113,6 +118,8 @@ class EditorCompanionBinding(QObject):
         outcome = self.controller.status()
         available = getattr(self.window, 'action_allowed', lambda owner: True)(self)
         self.save.setEnabled(available and not self.busy and outcome.can_checkpoint)
+        self.captions.setEnabled(available and not self.busy and outcome.state == 'open' and not outcome.requires_reconciliation)
+        if self.caption_dialog is not None:self.caption_dialog.controls()
         self.close_editor.setEnabled(available and not self.busy and outcome.can_checkpoint and outcome.can_close_editor
                                      and callable(getattr(self.controller, 'save_and_close', None)))
         for button, capability in ((self.check_close, 'can_check_close'), (self.recover, 'can_recover_working')):
@@ -218,3 +225,39 @@ class EditorCompanionBinding(QObject):
                 event.ignore()
                 return True
         return super().eventFilter(watched, event)
+
+    def _captions(self):
+        current=self.controller.status()
+        key=(current.moment_id,current.moment_revision,current.working.path if current.working else None)
+        if self.caption_dialog is not None and getattr(self.caption_dialog,'editor_key',None)==key:
+            self.caption_dialog.show();self.caption_dialog.raise_();return
+        if self.caption_dialog is None:
+            from native.ui.workspace_captions import CaptionDialog
+            self.caption_dialog=CaptionDialog(self)
+        self.caption_dialog.editor_key=key
+        self.run_caption(lambda:self.controller.caption_context(current.moment_id,current.moment_revision,cancel=self.cancel),
+                         'Reading the active Moment caption context…',on_finished=self.caption_dialog.refresh,cancellable=True)
+        self.caption_dialog.show()
+
+    def run_caption(self,operation,message,*,on_finished,on_error=None,cancellable=False,on_started=None):
+        # Reuse this binding's actual token. A second binding cannot claim it while
+        # the native editor is open. The same busy state gates every host action.
+        if self.busy or not self._claim():return False
+        self.busy=True;self.cancel=threading.Event() if cancellable else None
+        self.cancel_label='Cancel captions';self.status.setText(message)
+        if self.caption_dialog is not None:self.caption_dialog.status.setText(message)
+        if on_started is not None:on_started()
+        self._refresh()
+        def finish(value):
+            self.busy=False;self.cancel=None
+            self._release_if_safe()
+            self.status.setText(getattr(value,'message',message))
+            on_finished(value);self._refresh()
+        def fail(error):
+            self.busy=False;self.cancel=None
+            self._release_if_safe();self.status.setText(error)
+            if on_error is not None:on_error(error)
+            elif self.caption_dialog is not None:self.caption_dialog.status.setText(error)
+            self._refresh()
+        self.runner.run(lambda job:operation(),on_finished=finish,on_error=fail)
+        return True

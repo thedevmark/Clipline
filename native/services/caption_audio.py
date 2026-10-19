@@ -10,7 +10,10 @@ import hashlib,json,math,os,re
 from pathlib import Path
 import subprocess,sys,threading,time,uuid,wave
 from native.services.caption_worker.evidence import canonical,digest,validate_request,EvidenceError
-from native.services.caption_worker.client import write_once
+from native.services.caption_worker.client import (
+    write_once, ExecutionUncertain, _CapturedProcess, _sample_process,
+    _release_process, _wait_bound, gated_command, gate_frame, start_registered,
+)
 from native.services.caption_worker.process_tree import ProcessTree
 
 RATE=16000
@@ -30,6 +33,7 @@ class PreparedAudio:
     error_code:str|None
     directory:Path
     request_path:Path|None
+    owner:object|None=None
     def load_request(self):
         if self.request_path is None:return None
         value=json.loads(self.request_path.read_text(encoding="utf8"))
@@ -112,14 +116,141 @@ class CaptionAudioPreparer:
         self.ffmpeg=ffmpeg;self.ffprobe=ffprobe;self.python=python
         self.gate=Path(gate) if gate else Path(__file__).with_name("caption_audio_gate.py")
         self._busy=threading.Lock()
+        self._captured = None
+        self._source_guard = None
+        self._directory = None
+        self._last_observation = None
+        self._diagnostic_pending = False
+
+    @property
+    def has_unsettled(self):
+        return (self._captured is not None or self._source_guard is not None
+                or self._diagnostic_pending)
+
+    def _release_source(self):
+        if self._source_guard is not None:
+            kernel, handle = self._source_guard
+            if not kernel.CloseHandle(handle):
+                raise OSError('The original source read guard could not be closed')
+            self._source_guard = None
+
+    def observe_execution(self, *, wait_seconds=0):
+        return self._observe_execution(wait_seconds, stop=False)
+
+    def cleanup_execution(self, *, wait_seconds=5):
+        return self._observe_execution(wait_seconds, stop=True)
+
+    def _observe_execution(self, wait_seconds, *, stop):
+        _wait_bound(wait_seconds)
+        if not self._busy.acquire(False):
+            raise ExecutionUncertain('The original preparation operation is still running', self, self._directory)
+        try:
+            if not self.has_unsettled:
+                return json.loads(canonical(self._last_observation or {
+                    'ceased': True, 'resources_released': True,
+                    'owner_unsettled': False, 'never_launched': True}))
+            captured = self._captured
+            proof = (_sample_process(captured, wait_seconds=wait_seconds, stop=stop)
+                     if captured is not None else self._last_observation or {
+                         'scope': {'disposition': 'never_started', 'active_processes': 0},
+                         'parent_reaped': True, 'readers_stopped': True, 'streams_closed': True,
+                         'ceased': True, 'resources_released': False, 'faults': []})
+            self._diagnostic_pending = True
+            write_once(self._directory / ('live-observation-' + str(uuid.uuid4()) + '.json'), proof)
+            if proof['ceased']:
+                if captured is not None:
+                    _release_process(captured, proof)
+                    self._last_observation = proof
+                    self._captured = None
+                self._release_source()
+                write_once(self._directory / ('live-release-' + str(uuid.uuid4()) + '.json'),
+                           {**proof, 'source_guard_released': True})
+                self._diagnostic_pending = False
+                self._last_observation = proof
+            return json.loads(canonical({**proof, 'owner_unsettled': self.has_unsettled}))
+        except BaseException as exc:
+            raise ExecutionUncertain(exc, self, self._directory) from exc
+        finally:
+            self._busy.release()
 
     def prepare(self,selection,output_root,*,timeout=90,cancel=None):
-        if not self._busy.acquire(False):raise RuntimeError("An audio preparation job is already running")
-        try:return self._prepare(selection,Path(output_root),timeout,cancel or threading.Event())
+        if not self._busy.acquire(False):
+            raise ExecutionUncertain("An audio preparation job is already running", self, self._directory)
+        try:
+            if self.has_unsettled:
+                raise ExecutionUncertain('Settle the original preparation before another launch', self, self._directory)
+            return self._prepare(selection,Path(output_root),timeout,cancel or threading.Event())
+        except BaseException as exc:
+            if self.has_unsettled and not isinstance(exc, ExecutionUncertain):
+                raise ExecutionUncertain(exc, self, self._directory) from exc
+            raise
         finally:self._busy.release()
+
+    def _tool(self, argv, label, *, directory, commands, checkpoint, clock=None):
+        checkpoint();record={"label":label,"argv":argv,"process_scope":{"disposition":"never_started"}};commands.append(record)
+        stdout=directory/(label+".stdout");stderr=directory/(label+".stderr")
+        command=[str(self.python),"-u","-B","-S",str(self.gate)]
+        process=tree=None;threads=[];errors=[];buffers=[bytearray(),bytearray()]
+        try:
+            env=os.environ.copy();env.update(TEMP=str(directory),TMP=str(directory),PYTHONDONTWRITEBYTECODE="1")
+            prefix = gate_frame(command)
+            process=subprocess.Popen(gated_command(self.python),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,start_new_session=os.name!="nt",creationflags=subprocess.CREATE_NO_WINDOW if os.name=="nt" else 0)
+            self._captured = _CapturedProcess(directory, process, None, threads,
+                                             gate_argv=tuple(process.args), gate_released=False)
+            record["process_scope"]={"disposition":"unknown"}
+            tree=ProcessTree(process)
+            self._captured.tree = tree
+            def drain(pipe,path,limit,index):
+                try:
+                    with path.open("xb") as log:
+                        while True:
+                            data=pipe.readline(MAX_CLOCK_LINE+1) if clock is not None and index==1 else pipe.read1(8192)
+                            if not data:break
+                            if clock is not None and index==1:
+                                if len(data)>MAX_CLOCK_LINE:errors.append("OUTPUT_LIMIT");break
+                                try:
+                                    if clock.observe(data):continue
+                                except PreparationError as exc:errors.append(exc.code);break
+                            remaining=limit-len(buffers[index]);log.write(data[:remaining]);log.flush();buffers[index].extend(data[:remaining])
+                            if len(data)>remaining:errors.append("OUTPUT_LIMIT");break
+                except OSError:errors.append("PIPE_FAILURE")
+                finally:pipe.close()
+            for index,(pipe,path,limit) in enumerate(((process.stdout,stdout,MAX_STDOUT),(process.stderr,stderr,MAX_STDERR))):
+                thread=threading.Thread(target=drain,args=(pipe,path,limit,index),daemon=True)
+                start_registered(self._captured, thread)
+            def send():
+                try:
+                    self._captured.gate_released = True
+                    process.stdin.write(prefix + canonical(argv)+b"\n");process.stdin.close()
+                except OSError:errors.append("PIPE_FAILURE")
+            sender=threading.Thread(target=send,daemon=True)
+            start_registered(self._captured, sender)
+            while process.poll() is None:
+                checkpoint()
+                if errors:raise PreparationError(errors[0],"Native tool output or decoded clock failed validation")
+                time.sleep(.02)
+            for thread in threads:thread.join(2)
+            if errors:raise PreparationError(errors[0],"Native tool output or decoded clock failed validation")
+            record["exit_code"]=process.returncode
+            if process.returncode:raise PreparationError("TOOL_FAILED","Native tool returned a nonzero exit code")
+            return bytes(buffers[0])
+        finally:
+            if self._captured is not None:
+                proof = _sample_process(self._captured, wait_seconds=5, stop=True)
+                record.update(process_scope=proof['scope'], exit_code=proof['exit_code'],
+                              streams_closed=proof['streams_closed'])
+                if not proof['ceased']:
+                    raise PreparationError('CLEANUP_FAILED', 'The original tool scope, parent or streams remain uncertain')
+                write_once(directory / ('tool-observation-' + str(uuid.uuid4()) + '.json'), proof)
+                _release_process(self._captured, proof)
+                write_once(directory / ('tool-release-' + str(uuid.uuid4()) + '.json'), proof)
+                self._last_observation = proof
+                self._captured = None
 
     def _prepare(self,selection,root,timeout,cancel):
         directory=root/str(uuid.uuid4());directory.mkdir(parents=True,exist_ok=False)
+        self._directory = directory
+        self._last_observation = None
         started=time.monotonic();commands=[];request=None;error=None;state="failed";artifact=directory/"partial.wav";source_guard=None
         receipt={"schema_version":1,"job_id":directory.name,"state":"running","original_modified":False,"commands":commands,"profile_bounds":{"source_seconds":180,"prepared_seconds":180,"caption_range_seconds":120,"source_bytes":MAX_SOURCE,"audio_origin_us":0}}
         def checkpoint():
@@ -136,61 +267,7 @@ class CaptionAudioPreparer:
             if (before.st_size,before.st_mtime_ns,before.st_ino)!=(after.st_size,after.st_mtime_ns,after.st_ino):raise PreparationError("SOURCE_CHANGED","File changed during verification")
             return h.hexdigest()
         def run(argv,label,clock=None):
-            checkpoint();record={"label":label,"argv":argv,"process_scope":{"disposition":"never_started"}};commands.append(record)
-            stdout=directory/(label+".stdout");stderr=directory/(label+".stderr")
-            command=[str(self.python),"-u","-B","-S",str(self.gate)]
-            process=tree=None;threads=[];errors=[];buffers=[bytearray(),bytearray()]
-            try:
-                env=os.environ.copy();env.update(TEMP=str(directory),TMP=str(directory),PYTHONDONTWRITEBYTECODE="1")
-                process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,start_new_session=os.name!="nt",creationflags=subprocess.CREATE_NO_WINDOW if os.name=="nt" else 0)
-                record["process_scope"]={"disposition":"unknown"}
-                tree=ProcessTree(process)
-                def drain(pipe,path,limit,index):
-                    try:
-                        with path.open("xb") as log:
-                            while True:
-                                data=pipe.readline(MAX_CLOCK_LINE+1) if clock is not None and index==1 else pipe.read1(8192)
-                                if not data:break
-                                if clock is not None and index==1:
-                                    if len(data)>MAX_CLOCK_LINE:errors.append("OUTPUT_LIMIT");break
-                                    try:
-                                        if clock.observe(data):continue
-                                    except PreparationError as exc:errors.append(exc.code);break
-                                remaining=limit-len(buffers[index]);log.write(data[:remaining]);log.flush();buffers[index].extend(data[:remaining])
-                                if len(data)>remaining:errors.append("OUTPUT_LIMIT");break
-                    except OSError:errors.append("PIPE_FAILURE")
-                    finally:pipe.close()
-                for index,(pipe,path,limit) in enumerate(((process.stdout,stdout,MAX_STDOUT),(process.stderr,stderr,MAX_STDERR))):
-                    thread=threading.Thread(target=drain,args=(pipe,path,limit,index),daemon=True);thread.start();threads.append(thread)
-                def send():
-                    try:process.stdin.write(canonical(argv)+b"\n");process.stdin.close()
-                    except OSError:errors.append("PIPE_FAILURE")
-                sender=threading.Thread(target=send,daemon=True);sender.start();threads.append(sender)
-                while process.poll() is None:
-                    checkpoint()
-                    if errors:raise PreparationError(errors[0],"Native tool output or decoded clock failed validation")
-                    time.sleep(.02)
-                for thread in threads:thread.join(2)
-                if errors:raise PreparationError(errors[0],"Native tool output or decoded clock failed validation")
-                record["exit_code"]=process.returncode
-                if process.returncode:raise PreparationError("TOOL_FAILED","Native tool returned a nonzero exit code")
-                return bytes(buffers[0])
-            finally:
-                if tree:record["process_scope"]=tree.stop()
-                elif process and process.poll() is None:process.kill()
-                if process:
-                    try:process.wait(5)
-                    except subprocess.TimeoutExpired:raise PreparationError("CLEANUP_FAILED","Owned tool did not terminate")
-                    record["exit_code"]=process.returncode
-                if tree:tree.close()
-                for thread in threads:thread.join(2)
-                if not any(thread.is_alive() for thread in threads) and process:
-                    for pipe in (process.stdin,process.stdout,process.stderr):
-                        if pipe is not None:pipe.close()
-                record["streams_closed"]=not any(thread.is_alive() for thread in threads) and (
-                    process is None or all(pipe is None or pipe.closed for pipe in (process.stdin,process.stdout,process.stderr)))
-                if not record["streams_closed"] or tree and os.name=="nt" and record["process_scope"]["disposition"]!="stopped":
-                    raise PreparationError("CLEANUP_FAILED","Owned tool scope or streams did not settle")
+            return self._tool(argv,label,directory=directory,commands=commands,checkpoint=checkpoint,clock=clock)
         try:
             if type(timeout) not in (int,float) or not math.isfinite(timeout) or not 0<timeout<=300:raise PreparationError("INVALID_TIMEOUT","Deadline must be finite and in (0,300]")
             if not isinstance(selection,dict):raise PreparationError("INVALID_INPUT","Selection object required")
@@ -219,6 +296,7 @@ class CaptionAudioPreparer:
             tool_hash=fingerprint(ffmpeg,512*1024**2);probe_hash=fingerprint(ffprobe,512*1024**2)
             if profile.get("schema_version")!=1 or Path(profile["ffmpeg"]).resolve()!=ffmpeg or not any(a.get("role")=="ffmpeg" and a.get("sha256")==tool_hash for a in profile.get("assets",[])):raise PreparationError("PROFILE_TOOL_MISMATCH","Preparation FFmpeg must match the cached worker profile")
             source_guard=_source_read_guard(source)
+            self._source_guard = source_guard
             receipt["source_read_policy"]="Windows share-read only; writes/replacement denied during verification and extraction" if source_guard else "pre/post fingerprint checks; concurrent mutation lock not qualified on this platform"
             if fingerprint(source)!=expected:raise PreparationError("SOURCE_CHANGED","Registered source fingerprint differs")
             receipt["source_identity"]={"asset_id":selection["asset_id"],"sha256":expected,"path":str(source),"audio_stream_index":index,"channels":channels,"mix":mix,"mix_evidence":"user_asserted_not_verified" if mix=="isolated_microphone" else "explicit_selection_not_classified"}
@@ -265,13 +343,91 @@ class CaptionAudioPreparer:
         except PreparationError as exc:error=exc.code;receipt["error_message"]=str(exc)
         except EvidenceError as exc:error=exc.code;receipt["error_message"]=str(exc)
         except (OSError,ValueError,TypeError,KeyError,subprocess.SubprocessError,wave.Error,OverflowError) as exc:error="PREPARATION_FAILED";receipt["error_message"]=type(exc).__name__+": "+str(exc)[:500]
-        finally:
-            if source_guard:source_guard[0].CloseHandle(source_guard[1])
         if error:
             state="cancelled" if error=="CANCELLED" else "partial" if artifact.exists() else "failed"
             if artifact.exists():
                 size=artifact.stat().st_size
                 receipt["partial_artifact"]={"path":str(artifact),"bytes":size,"sha256":hashlib.sha256(artifact.read_bytes()).hexdigest() if size<=8*1024**2 else None,"hash_omitted_reason":"oversize_partial" if size>8*1024**2 else None}
         receipt.update(state=state,error_code=error,elapsed_seconds_uncontrolled=time.monotonic()-started,request_sha256=receipt.get("request_sha256"))
+        self._diagnostic_pending = True
         write_once(directory/"receipt.json",receipt)
-        return PreparedAudio(state,error,directory,directory/"request.json" if state=="complete" else None)
+        if self._captured is None:
+            self._release_source()
+            write_once(directory / ('source-release-' + str(uuid.uuid4()) + '.json'),
+                       {'source_guard_released': True, 'last_process_observation': self._last_observation})
+            self._diagnostic_pending = False
+        return PreparedAudio(state,error,directory,directory/"request.json" if state=="complete" else None,
+                             self if self.has_unsettled else None)
+
+    @staticmethod
+    def cover_range(start_us,end_us,duration_us):
+        """Choose representable analysis bounds; never change canonical edit bounds.
+
+        prepare still verifies actual decoded coverage and refuses truncated audio.
+        """
+        _integer(start_us,'Moment start');_integer(end_us,'Moment end');_integer(duration_us,'audio duration',1)
+        start=start_us//125*125;end=(end_us+124)//125*125
+        if not start_us<end_us or end>duration_us or end-start>120_000_000:
+            raise PreparationError('INVALID_RANGE','A wider 16 kHz analysis range cannot cover this Moment within the audio and 120-second limit')
+        return start,end
+
+    def inspect_source(self, source_path, source_sha256, output_root, *, timeout=30, cancel=None):
+        """Inspect real container indices through this preparer's retained tool boundary.
+
+        Metadata is a selection aid. Only prepare verifies the decoded audio clock.
+        """
+        if not self._busy.acquire(False):
+            raise ExecutionUncertain('An audio operation is already running',self,self._directory)
+        try:
+            if self.has_unsettled:
+                raise ExecutionUncertain('Settle the original preparation first',self,self._directory)
+            if type(timeout) not in (int,float) or not math.isfinite(timeout) or not 0<timeout<=60:
+                raise PreparationError('INVALID_TIMEOUT','Inspection requires a finite deadline up to 60 seconds')
+            cancel=cancel or threading.Event();started=time.monotonic()
+            def checkpoint():
+                if cancel.is_set():raise PreparationError('CANCELLED','Audio inspection cancelled')
+                if time.monotonic()-started>timeout:raise PreparationError('TIMEOUT','Audio inspection deadline expired')
+            source=_path(source_path);expected=_sha(source_sha256);probe=_path(self.ffprobe)
+            directory=Path(output_root)/str(uuid.uuid4());directory.mkdir(parents=True,exist_ok=False)
+            self._directory=directory;self._last_observation=None
+            self._source_guard=_source_read_guard(source)
+            def fingerprint(path,maximum):
+                checkpoint();before=path.stat()
+                if before.st_size>maximum:raise PreparationError('INPUT_LIMIT','Inspection input exceeds its bound')
+                h=hashlib.sha256()
+                with path.open('rb') as stream:
+                    for chunk in iter(lambda:stream.read(1024**2),b''):checkpoint();h.update(chunk)
+                if before!=path.stat():raise PreparationError('SOURCE_CHANGED','Inspection input changed')
+                return h.hexdigest()
+            if fingerprint(source,MAX_SOURCE)!=expected:raise PreparationError('SOURCE_CHANGED','Registered source fingerprint differs')
+            probe_hash=fingerprint(probe,512*1024**2);commands=[]
+            raw=self._tool([str(probe),'-v','error','-protocol_whitelist','file','-format_whitelist',FORMATS,'-show_streams','-show_format','-of','json',str(source)],'inspect',directory=directory,commands=commands,checkpoint=checkpoint)
+            value=json.loads(raw);streams=value.get('streams')
+            if not isinstance(streams,list) or len(streams)>128:raise PreparationError('INVALID_PROBE','Bounded stream inventory required')
+            audio=[]
+            for item in streams:
+                if item.get('codec_type')!='audio':continue
+                index=_integer(item['index'],'global stream index',0,64)
+                count=int(item['channels']);rate=int(item['sample_rate'])
+                _integer(count,'channel count',1,32);_integer(rate,'sample rate',1,MAX_SOURCE_RATE)
+                duration=_microseconds(item.get('duration',value.get('format',{}).get('duration')))
+                if not 0<duration<=180_000_000:raise PreparationError('INVALID_RANGE','Audio exceeds the 180 second local profile')
+                if _microseconds(item.get('start_time',0))!=0:raise PreparationError('UNSUPPORTED_CLOCK','Only zero-origin audio is supported')
+                audio.append({'stream_index':index,'channels':list(range(count)),'sample_rate':rate,'duration_us':duration})
+            if len({x['stream_index'] for x in audio})!=len(audio):raise PreparationError('INVALID_PROBE','Duplicate stream indices')
+            if fingerprint(source,MAX_SOURCE)!=expected or fingerprint(probe,512*1024**2)!=probe_hash:raise PreparationError('SOURCE_CHANGED','Inspection inputs changed')
+            result={'source_path':str(source),'source_sha256':expected,'streams':audio,'decoded_clock_verified':False}
+            self._diagnostic_pending=True
+            write_once(directory/'inspection.json',{'schema':1,**result,'commands':commands,'ffprobe_sha256':probe_hash})
+            if self._captured is None:
+                self._release_source();self._diagnostic_pending=False
+            return result
+        except BaseException as exc:
+            # The same preparer owns every captured tool and read guard. Never drop
+            # these on diagnostic failure or an unknown cleanup result.
+            if self._captured is None and not self._diagnostic_pending:
+                self._release_source()
+            if self.has_unsettled and not isinstance(exc,ExecutionUncertain):
+                raise ExecutionUncertain(exc,self,self._directory) from exc
+            raise
+        finally:self._busy.release()

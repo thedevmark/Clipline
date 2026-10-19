@@ -55,7 +55,10 @@ class AudioTests(unittest.TestCase):
         self.assertEqual(len(opened),1)
         self.assertIsNotNone(opened[0].poll())
         self.assertTrue(all(pipe.closed for pipe in (opened[0].stdin,opened[0].stdout,opened[0].stderr)))
-        self.assertEqual(receipt["commands"][0]["process_scope"]["disposition"],"unknown")
+        self.assertEqual(receipt["commands"][0]["process_scope"]["disposition"],"never_started")
+        self.assertEqual(receipt["commands"][0]["process_scope"]["scope"],"unreleased_gate_parent")
+        self.assertFalse(receipt["commands"][0]["process_scope"]["requested_work_started"])
+        self.assertNotIn("active_processes",receipt["commands"][0]["process_scope"])
         self.assertTrue(receipt["commands"][0]["streams_closed"])
     def test_frozen_parent_uses_configured_python_not_gui_executable(self):
         original=m.subprocess.Popen

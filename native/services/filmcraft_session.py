@@ -140,6 +140,7 @@ class NativeSession:
         self=cls();self.working=working;self.editor=editor;self.path=path;self.process=None;self.tree=None;self._bridge=None
         self._stopped=False;self._stop_final=False;self._files=[];self._lock=None;self.child_pid=None
         self._input_guards=ExitStack()
+        self._empty_scope_proof=None;self._scope_released=False;self._scope_release_error=None
         self.directory=Path(runs).resolve()/str(uuid.uuid4())
         self.directory.mkdir(parents=True,exist_ok=False)
         (self.directory/"data").mkdir()
@@ -249,15 +250,28 @@ class NativeSession:
                 if cancel is not None:cancel.wait(min(.025,max(0,deadline-time.monotonic())))
                 else:time.sleep(min(.025,max(0,deadline-time.monotonic())))
         except BaseException as exc:
-            try:write_once(self.directory/"launch-error.json",{"type":type(exc).__name__,"reason":str(exc)[:4000]})
-            except OSError:pass
-            cleanup_error=None
+            raised=SessionError("Native session launch failed",self.directory,owner=self)
+            raised.diagnostic_errors=[]
+            try:reason=str(exc)
+            except BaseException as diagnostic:
+                raised.diagnostic_errors.append(diagnostic)
+                raise raised from exc
+            raised.args=(reason,)
+            try:write_once(self.directory/"launch-error.json",{"type":type(exc).__name__,"reason":reason[:4000]})
+            except OSError as diagnostic:raised.diagnostic_errors.append(diagnostic)
+            except BaseException as diagnostic:
+                raised.diagnostic_errors.append(diagnostic)
+                raise raised from exc
             try:self.stop()
-            except Exception as cleanup:
-                cleanup_error=str(cleanup)[:4000]
-                try:write_once(self.directory/"launch-cleanup-error.json",{"type":type(cleanup).__name__,"reason":cleanup_error})
-                except OSError:pass
-            raise SessionError(str(exc),self.directory,owner=self,cleanup_error=cleanup_error) from exc
+            except BaseException as cleanup:
+                raised.cleanup_exception=cleanup
+                try:raised.cleanup_error=str(cleanup)[:4000]
+                except BaseException as diagnostic:
+                    raised.diagnostic_errors.append(diagnostic)
+                    raised.cleanup_error=type(cleanup).__name__
+                try:write_once(self.directory/"launch-cleanup-error.json",{"type":type(cleanup).__name__,"reason":raised.cleanup_error})
+                except BaseException as diagnostic:raised.diagnostic_errors.append(diagnostic)
+            raise raised from exc
 
     def _lease(self,path):
         import msvcrt
@@ -305,13 +319,27 @@ class NativeSession:
         self._assert_usable()
         return self._bridge
 
+    def _release_scope(self):
+        if getattr(self, "_scope_released", False):
+            return
+        try:
+            released = self.tree.close()
+            if released is not True:
+                error_code = c.get_last_error()
+                raise OSError(error_code, "Owned native Job Object handle release was not confirmed")
+        except Exception as error:
+            self._scope_release_error = error
+            raise
+        self._scope_released = True
+        self._scope_release_error = None
+
     def observe_exit(self):
         """Observe actual cessation; never quit, terminate, or close a live scope.
 
         The caller keeps this owner strongly alive on every unknown result.
         Document settlement remains separate from process-resource cleanup.
         """
-        if self._stop_final:
+        if self._stop_final or getattr(self, "_scope_release_error", None) is not None:
             return self.stop_receipt
         proof = (self.tree.observe() if self.tree is not None else
                  {"disposition": "unknown", "active_processes": None})
@@ -326,12 +354,22 @@ class NativeSession:
         for stream in self._files:
             stream.close()
         result["streams_closed"] = all(stream.closed for stream in self._files)
+        result["scope_released"] = False
+        self._empty_scope_proof = dict(proof)
         # Persist observed evidence before releasing the only queryable scope.
         write_once(self.directory / ("observed-exit-" + str(uuid.uuid4()) + ".json"), result)
         marker = self.path.parent / "editor-owner-uncertain.json"
         marker_data = json.loads(marker.read_text(encoding="utf8"))
         if not isinstance(marker_data, dict) or marker_data.get("run") != str(self.directory):
             raise SessionError("The native working lease identity changed", self.directory, owner=self)
+        try:
+            self._release_scope()
+        except Exception as error:
+            result["scope"] = {**proof, "disposition": "unknown", "release_error": str(error)[:2000]}
+            self.stop_receipt = result
+            write_once(self.directory / ("observed-release-error-" + str(uuid.uuid4()) + ".json"), result)
+            return result
+        result["scope_released"] = True
         marker.unlink()
         if self._lock:
             import msvcrt
@@ -340,7 +378,6 @@ class NativeSession:
             self._lock.close()
             self._lock = None
         self._input_guards.close()
-        self.tree.close()
         self.stop_receipt = result
         self._stop_final = True
         return result
@@ -350,12 +387,13 @@ class NativeSession:
         if self._stop_final:return self.stop_receipt
         self._stopped=True;self._bridge=None
         proof={"disposition":"never_started","active_processes":0}
+        parent_reaped=self.process is None
         try:
             if self.tree:
-                try:proof=self.tree.stop()
+                try:proof=dict(self._empty_scope_proof) if getattr(self,"_empty_scope_proof",None) is not None else self.tree.stop()
                 except Exception as exc:proof={"disposition":"unknown","reason":str(exc)[:2000]}
                 if proof.get("disposition")=="stopped" and proof.get("active_processes")==0:
-                    self.tree.close()
+                    self._empty_scope_proof=dict(proof)
             elif self.process:
                 # A gated process can create no descendants before successful attachment.
                 try:self.process.kill();self.process.wait(timeout=5)
@@ -363,12 +401,20 @@ class NativeSession:
                 proof={"disposition":"unknown","pid":self.process.pid,"reason":"Job Object attachment did not complete"}
             if self.process:
                 if self.process.stdin and not self.process.stdin.closed:self.process.stdin.close()
-                try:self.process.wait(timeout=5)
+                try:
+                    self.process.wait(timeout=5)
+                    parent_reaped=True
                 except subprocess.TimeoutExpired:proof["disposition"]="unknown"
         finally:
             for stream in self._files:stream.close()
+            streams_closed=all(stream.closed for stream in self._files)
+            if self.tree and proof.get("disposition")=="stopped" and proof.get("active_processes")==0 and parent_reaped and streams_closed:
+                try:self._release_scope()
+                except Exception as exc:proof={**proof,"disposition":"unknown","release_error":str(exc)[:2000]}
             marker=self.path.parent/"editor-owner-uncertain.json"
-            self._stop_final=proof["disposition"] in ("stopped","never_started") and proof.get("active_processes")==0
+            self._stop_final=(proof["disposition"] in ("stopped","never_started") and proof.get("active_processes")==0
+                              and parent_reaped and all(stream.closed for stream in self._files)
+                              and (self.tree is None or getattr(self,"_scope_released",False)))
             # Without successful attachment the stdin gate was never released.
             # A reaped gate has no native reader, even though scope admission
             # remains quarantined rather than claiming Job Object proof.
@@ -381,7 +427,7 @@ class NativeSession:
                     if not isinstance(marker_data,dict):raise ValueError("Quarantine marker must be an object")
                     if marker_data.get("run")==str(self.directory):marker.unlink()
                 except (OSError,ValueError,TypeError) as exc:proof["quarantine_release_error"]=str(exc)[:2000]
-            if self._lock:
+            if self._lock and (self._stop_final or gate_reaped):
                 import msvcrt
                 self._lock.seek(0);msvcrt.locking(self._lock.fileno(),msvcrt.LK_UNLCK,1);self._lock.close();self._lock=None
         try:working_hash=digest(self.path) if self.path.exists() else None
@@ -389,7 +435,9 @@ class NativeSession:
             working_hash=None;proof["working_hash_error"]=str(exc)[:2000]
         self.stop_receipt={"schema":1,"scope":proof,"exit_code":self.process.returncode if self.process else None,
             "working_sha256":working_hash,"data_retained":str(self.directory/"data"),
-            "streams_closed":all(x.closed for x in self._files)}
+            "streams_closed":all(x.closed for x in self._files),
+            "scope_released":self.tree is None or getattr(self,"_scope_released",False),
+            "parent_reaped":parent_reaped}
         stop_path=self.directory/"stop.json"
         if stop_path.exists():stop_path=self.directory/("stop-"+str(uuid.uuid4())+".json")
         try:write_once(stop_path,self.stop_receipt)

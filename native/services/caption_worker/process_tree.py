@@ -96,5 +96,7 @@ class ProcessTree:
 
     def close(self):
         if self.job:
-            self.kernel.CloseHandle(self.job)
+            if not self.kernel.CloseHandle(self.job):
+                return False
             self.job=None
+        return True

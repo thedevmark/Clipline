@@ -207,11 +207,12 @@ class CaptionRepairPanel(QWidget):
 class CaptionRepairBinding(QObject):
     """Reuse the application's JobRunner; bound Qt slots receive detached results."""
 
-    def __init__(self, panel, controller, runner=None):
+    def __init__(self, panel, controller, runner=None, *, host_dispatch=None):
         super().__init__(panel)
         self.panel = panel
         self.controller = controller
         self.runner = runner or JobRunner()
+        self.host_dispatch = host_dispatch
         panel.save_requested.connect(self._save)
         panel.apply_requested.connect(self._apply)
         panel.check_requested.connect(self._check)
@@ -219,6 +220,9 @@ class CaptionRepairBinding(QObject):
 
     def _dispatch(self, fn, *args):
         if self.panel.busy:
+            return
+        if self.host_dispatch is not None:
+            self.host_dispatch(fn,*args,on_finished=self._finished,on_error=self._failed)
             return
         self.panel.set_busy(True)
         self.runner.run(lambda job: fn(*args), on_finished=self._finished, on_error=self._failed)

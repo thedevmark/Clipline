@@ -194,6 +194,35 @@ class MomentCaptionSelections:
             selected = self.selected(moment_id, expected_moment_revision)
         return selected
 
+    def accept_selected(self,moment_id,*,expected_moment_revision,expected_selection,expected_revision=0):
+        """CAS the exact authenticated selection and initial accepted head together.
+
+        The service loads and authenticates immutable artifacts before this call.
+        This transaction contains only the existing catalog and word owners.
+        """
+        _uuid(moment_id);_integer(expected_moment_revision)
+        if not isinstance(expected_selection,dict):
+            raise CaptionSelectionError('The exact authenticated selected proposal is required')
+        with _transaction(self.connection):
+            moment=self.library.moment(moment_id)
+            if moment.revision!=expected_moment_revision:
+                raise StaleCaptionSelection('The Moment changed before acceptance')
+            selected=self.selected(moment_id,expected_moment_revision)
+            if selected is None or selected!=expected_selection:
+                raise StaleCaptionSelection('The selected proposal changed before acceptance')
+            job=self.library.jobs.job(selected['job_id'])
+            settlement=self.library.jobs.settlement(selected['job_id'])
+            kit=self.library.kit_record(moment.kit_id,moment.kit_version)
+            asset=self.library.asset(moment.source_asset_id)
+            if (job['kind']!='caption' or job['state']!='completed' or settlement is None
+                    or job['input']['request_ref']!=selected['request_ref']
+                    or settlement['result_ref']!=selected['result_ref']
+                    or (asset.id,asset.sha256,moment.kit_id,moment.kit_version,kit.descriptor_sha256)
+                       !=(selected['source_asset_id'],selected['source_sha256'],selected['kit_id'],selected['kit_version'],selected['kit_descriptor_sha256'])):
+                raise StaleCaptionSelection('Caption acceptance pins changed')
+            return self.library.captions._accept_initial(selected['transcript_id'],selected['hypothesis_id'],
+                alignment_id=selected['alignment_id'],expected_revision=expected_revision,origin='human')
+
     def _validate_context(self, moment, job, request, envelope, transcript_id, hypothesis_id,
                           alignment_id, receipt, request_sha):
         try:

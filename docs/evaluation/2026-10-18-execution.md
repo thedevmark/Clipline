@@ -2,6 +2,8 @@
 
 Updated: 2026-10-19. State: W0-W4 integration executing; full program remains incomplete. Product implementation is now authorized by Mark's instruction to execute the full master plan with agents. Public release, publishing, and paid model use remain separate boundaries.
 
+Current delivery checkpoint: the active-Moment caption workflow is installed in the evaluation product. It uses the existing editor/session owner for source inspection, local generation, explicit proposal acceptance, native application, spelling and timing repair, checkpoint, managed close and reopening. Root's installed affected collection passed 154 tests and 55 subtests; these use boundary doubles and do not establish a complete real workflow. A fresh 18-second Moment and copied styled Creator Kit catalog are prepared under `filmcraft/caption-workflow-product-integration-001/`, with the original catalog and source preserved. The caption manifest pins the current worker. The native caption-inventory GUI build is still running; actual model/native demonstration and output review remain the next delivery gate. Mark's eleven-hour feedback changes execution priority: demonstrate usable editing next, fix concrete blockers only, and stop broad audit loops. Homebase remains optional later.
+
 ## Ownership and preserved baseline
 
 - Product checkout: `C:/Users/mark/.codex/worktrees/clipline-rebuild/clipline`.

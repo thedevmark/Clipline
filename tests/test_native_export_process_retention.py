@@ -208,28 +208,44 @@ def test_reader_start_failure_keeps_original_error_and_releases_stopped_scope(tm
     gate.write_text('import sys,threading\nsys.stdin.readline()\nthreading.Event().wait(20)\n',encoding='utf8')
     execution=runtime_module.ExportExecution({'fixture':'reader-start','reader':failed_reader})
     execution.hold(gate,hash_file(gate));execution.hold(sys.executable,hash_file(sys.executable))
-    original_start=threading.Thread.start;calls=[]
+    original_start=threading.Thread.start;calls=[];known_unstarted=[]
     def fail_selected_reader(thread):
         calls.append(thread)
-        if len(calls)==failed_reader:raise RuntimeError('authored reader start failure')
+        if len(calls)==failed_reader:
+            known_unstarted.append(thread)
+            raise RuntimeError('authored reader start failure')
         return original_start(thread)
     monkeypatch.setattr(threading.Thread,'start',fail_selected_reader)
     try:
-        with pytest.raises(RuntimeError,match='^authored reader start failure$'):
+        with pytest.raises(RuntimeError,match='^authored reader start failure$') as raised:
             OwnedProcess([sys.executable,'-I','-B',str(gate)],tmp_path/'process',threading.Event(),time.monotonic()+10,execution=execution)
         monkeypatch.setattr(threading.Thread,'start',original_start)
         assert len(execution.processes)==1
         child=execution.processes[0]
+        assert raised.value.owner is child
+        stopped=execution.stop()
+        assert not stopped['closed'] and execution.guards
+        assert not child.closed and child.process.poll() is not None and child.tree.job is not None
+        assert child.proof['disposition']=='unknown' and child.proof['streams_closed'] is False
+        assert not child.gate_released and len(child.threads)==failed_reader
+        pending=known_unstarted[0]
+        assert pending is child._starting_reader and pending is child.threads[-1]
+        assert pending.ident is None and not pending.is_alive()
+        # Only this fixture knows start never reached the OS. Its first actual start
+        # reads EOF from the already stopped gate; production cleanup never starts it.
+        original_start(pending);pending.join(2)
+        assert not pending.is_alive()
         stopped=execution.stop()
         assert stopped['closed'] and execution.guards=={}
-        assert child.closed and child.process.poll() is not None and child.tree.job is None
+        assert child.closed and child.tree.job is None
         assert child.proof['disposition']=='stopped' and child.proof['active_processes']==0
-        assert child.proof['streams_closed'] is True and not child.gate_released
-        assert len(child.threads)==failed_reader-1
+        assert child.proof['streams_closed'] is True and len(child.threads)==failed_reader
         assert all(pipe.closed for pipe in (child.process.stdin,child.process.stdout,child.process.stderr))
         with gate.open('ab'):pass
     finally:
         monkeypatch.setattr(threading.Thread,'start',original_start)
-        # Preserve the RED result without leaving its private stopped scope open.
-        for child in execution.processes:child.threads=[thread for thread in child.threads if thread.ident is not None]
+        # Complete this explicitly known-unstarted fixture reader without dropping it.
+        for thread in known_unstarted:
+            if thread.ident is None:original_start(thread)
+            thread.join(2)
         assert execution.stop()['closed'],'reader-start fixture must release every private handle'

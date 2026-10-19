@@ -277,17 +277,26 @@ class AcceptedTranscriptStore:
         if expected_revision!=0 or type(expected_revision) is not int or origin!="human":
             raise TranscriptError("Explicit initial human acceptance requires base revision zero")
         with _transaction(self.connection):
-            if self.head(transcript_id)!=0: raise StaleRevision("Accepted transcript already exists")
-            h=self.proposal(transcript_id,hypothesis_id,"hypothesis")
-            a=self.proposal(transcript_id,alignment_id,"alignment") if alignment_id else None
-            if a and a["hypothesis_run_id"]!=hypothesis_id: raise TranscriptError("Alignment targets another hypothesis")
-            words=[]
-            for i,hw in enumerate(h["words"]):
-                timing={k:a["words"][i]["timing"][k] for k in ("start_us","end_us","status")} if a else {"start_us":None,"end_us":None,"status":"unresolved"}
-                provenance={"kind":"alignment_proposal","proposal_id":a["run_id"],"hypothesis_word_id":hw["id"]} if a else {"kind":"unresolved","reason":"alignment_not_selected"}
-                words.append({"id":str(uuid.uuid4()),"text":hw["text"],"timing":timing,"timing_provenance":provenance,"text_origin":"machine_accepted","parent_word_ids":[],"machine_refs":[{"hypothesis_id":hypothesis_id,"word_id":hw["id"]}]})
-            event={"operation":"initial_accept","origin":origin,"target_word_ids":[],"before_text":"","after_text":" ".join(w["text"] for w in words),"hypothesis_id":hypothesis_id,"alignment_id":alignment_id,"manual_timing":None,"source_span":h["range"]}
-            self._commit(transcript_id,0,words,event)
+            return self._accept_initial(transcript_id,hypothesis_id,alignment_id=alignment_id,
+                                        expected_revision=expected_revision,origin=origin)
+
+    def _accept_initial(self,transcript_id,hypothesis_id,*,alignment_id=None,expected_revision=0,origin="human"):
+        """Same acceptance body for a caller's atomic selection CAS; no nested transaction."""
+        if not self.connection.in_transaction:
+            raise TranscriptError("Initial acceptance requires an active caller-owned transaction")
+        if expected_revision!=0 or type(expected_revision) is not int or origin!="human":
+            raise TranscriptError("Explicit initial human acceptance requires base revision zero")
+        if self.head(transcript_id)!=0: raise StaleRevision("Accepted transcript already exists")
+        h=self.proposal(transcript_id,hypothesis_id,"hypothesis")
+        a=self.proposal(transcript_id,alignment_id,"alignment") if alignment_id else None
+        if a and a["hypothesis_run_id"]!=hypothesis_id: raise TranscriptError("Alignment targets another hypothesis")
+        words=[]
+        for i,hw in enumerate(h["words"]):
+            timing={k:a["words"][i]["timing"][k] for k in ("start_us","end_us","status")} if a else {"start_us":None,"end_us":None,"status":"unresolved"}
+            provenance={"kind":"alignment_proposal","proposal_id":a["run_id"],"hypothesis_word_id":hw["id"]} if a else {"kind":"unresolved","reason":"alignment_not_selected"}
+            words.append({"id":str(uuid.uuid4()),"text":hw["text"],"timing":timing,"timing_provenance":provenance,"text_origin":"machine_accepted","parent_word_ids":[],"machine_refs":[{"hypothesis_id":hypothesis_id,"word_id":hw["id"]}]})
+        event={"operation":"initial_accept","origin":origin,"target_word_ids":[],"before_text":"","after_text":" ".join(w["text"] for w in words),"hypothesis_id":hypothesis_id,"alignment_id":alignment_id,"manual_timing":None,"source_span":h["range"]}
+        self._commit(transcript_id,0,words,event)
         return self.revision(transcript_id,1)
 
     def edit(self,transcript_id,*,expected_revision,operation,target_word_ids,replacements,origin="human"):

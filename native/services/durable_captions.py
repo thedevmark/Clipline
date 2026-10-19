@@ -16,9 +16,10 @@ import threading
 import uuid
 
 from native.core.durable_jobs import DurableJobs, JobError, StaleTransition, VerificationRequired
+from native.core.creator_library import CreatorLibrary
 from native.services.caption_audio import PreparedAudio
 from native.services.caption_worker.backend import verify_source_audio
-from native.services.caption_worker.client import write_once
+from native.services.caption_worker.client import CaptionClient, write_once, failure_message
 from native.services.caption_worker.evidence import canonical, digest, hash_file, validate_request
 
 
@@ -42,6 +43,12 @@ class DurableCaptionRunner:
         self.jobs=DurableJobs(library.connection,settlement_verifier=self._verify)
         self._attestations={}
         self._busy=threading.Lock()
+        self._interrupted_job = None
+        self._retained_client = None
+        self._active_job = None
+        self._active_client = None
+        self._retained_execution = None
+        self._retained_watcher = None
         row=library.connection.execute("PRAGMA database_list").fetchone()
         if not row or not row[2]:raise CaptionJobError("A persistent Creator Library is required")
         self.database=Path(row[2])
@@ -114,17 +121,168 @@ class DurableCaptionRunner:
         except Exception as exc:
             faults.append(type(exc).__name__);cancel.set()
 
-    def run_next(self,*,cancel=None,timeout=180):
+    @property
+    def has_unsettled(self):
+        client = self._retained_client or self._active_client or self.client
+        return bool(getattr(client, 'has_unsettled', False)
+                    or self._retained_watcher is not None and self._retained_watcher.is_alive())
+
+    @property
+    def retained_owner(self):
+        return self._retained_client
+
+    @property
+    def interrupted_job(self):
+        """Last retained claim, not an inferred current database head."""
+        return json.loads(canonical(self._interrupted_job)) if self._interrupted_job else None
+
+    def observe_execution(self, *, wait_seconds=0):
+        return self._observe_owner(wait_seconds, cleanup=False)
+
+    def cleanup_execution(self, *, wait_seconds=5):
+        # Process cleanup is not durable settlement or output promotion.
+        return self._observe_owner(wait_seconds, cleanup=True)
+
+    def _observe_owner(self, wait_seconds, *, cleanup):
+        client = self._retained_client or self._active_client or self.client
+        if not self._busy.acquire(False):
+            error = CaptionJobError('The caption controller operation is still running')
+            error.owner = client
+            raise error
+        try:
+            action = client.cleanup_execution if cleanup else client.observe_execution
+            proof = action(wait_seconds=wait_seconds, expected_execution=self._retained_execution)
+            watcher_stopped = self._retained_watcher is None or not self._retained_watcher.is_alive()
+            return {**proof, 'controller_watchers_stopped': watcher_stopped,
+                    'owner_unsettled': bool(client.has_unsettled or not watcher_stopped)}
+        except BaseException as exc:
+            if not hasattr(exc, 'owner'):exc.owner = client
+            raise
+        finally:
+            self._busy.release()
+
+    def _retain(self, job, watcher=None):
+        self._interrupted_job = json.loads(canonical(job))
+        self._retained_client = self._active_client or self.client
+        self._retained_execution = getattr(self._retained_client, 'current_execution', None)
+        if watcher is not None:self._retained_watcher = watcher
+
+    def reconcile_execution(self, job_id, *, expected_revision):
+        """Explicitly fail/cancel this live owner's interrupted work; never complete it."""
+        if not self._busy.acquire(False):
+            error = CaptionJobError('This controller already runs an operation')
+            error.owner = self._retained_client or self._active_client or self.client
+            raise error
+        try:
+            _uuid(job_id)
+            if type(expected_revision) is not int or expected_revision < 0:
+                raise CaptionJobError('An explicit nonnegative DB revision is required')
+            retained, client, execution = self._interrupted_job, self._retained_client, self._retained_execution
+            if (retained is None or retained['id'] != job_id or client is None
+                    or type(client) is not CaptionClient or client is not self.client or execution is None):
+                raise VerificationRequired('Only the retained original live execution can reconcile')
+            if self._retained_watcher is not None and self._retained_watcher.is_alive():
+                raise VerificationRequired('The original cancellation watcher has not stopped')
+            # The initial generation's SQLite connection may already be closed
+            # or belong to another background thread. Never reassign self.library.
+            with CreatorLibrary(self.database) as library:
+                jobs = DurableJobs(library.connection, settlement_verifier=self._verify)
+                current = jobs.job(job_id)
+                if current['revision'] != expected_revision:
+                    raise StaleTransition('The retained claim DB revision changed')
+                pins = ('id', 'claim_token', 'owner_id', 'intent_sha256', 'output_set_id', 'input', 'launch_ref')
+                if any(current[key] != retained[key] for key in pins):
+                    raise VerificationRequired('The current claim differs from the original execution')
+                if current['state'] not in ('running', 'cancel-requested', 'interrupted'):
+                    raise StaleTransition('The retained execution is no longer unsettled')
+                envelope = self._read('requests', current['input']['request_ref'])
+                request = validate_request(envelope['request'])
+                directory = self.directory / 'executions' / current['output_set_id'] / request['run_id']
+                launch = self._read('launches', current['launch_ref'])
+                if (execution is not client.current_execution or execution.run_id != request['run_id']
+                        or execution.request_sha256 != digest(request) or execution.directory != directory.resolve()
+                        or execution.command_sha256 != launch['worker_command_sha256']
+                        or any(launch[key] != current[key] for key in
+                               ('claim_token', 'intent_sha256', 'output_set_id'))
+                        or launch['job_id'] != job_id or launch['request_ref'] != current['input']['request_ref']):
+                    raise VerificationRequired('The live execution/request/launch identity changed')
+                # This holds the original client's existing operation lock, so
+                # no unrelated direct run can replace its identity before CAS.
+                with client.settlement_observation(execution) as proof:
+                    if current['state'] in ('running', 'cancel-requested'):
+                        current = jobs.mark_interrupted(job_id, expected_revision=current['revision'],
+                                                        reason='cleanup_uncertain')
+                        self._interrupted_job = json.loads(canonical(current))
+                    outcome = 'cancelled' if current['cancel_requested'] else 'failed'
+                    outputs = 'quarantined' if directory.exists() else 'absent'
+                    receipt_path = directory / 'receipt.json'
+                    receipt_hash = None
+                    if receipt_path.is_file():
+                        with receipt_path.open('rb') as stream:
+                            receipt_bytes = stream.read(65537)
+                        if len(receipt_bytes) > 65536:
+                            raise CaptionJobError('The parent receipt exceeds its 64 KiB bound')
+                        receipt_hash = hashlib.sha256(receipt_bytes).hexdigest()
+                    summary = {'schema': 1, 'job_id': job_id, 'claim_token': current['claim_token'],
+                        'intent_sha256': current['intent_sha256'], 'output_set_id': current['output_set_id'],
+                        'request_ref': current['input']['request_ref'], 'outcome': outcome,
+                        'outputs_disposition': outputs, 'process_disposition': proof['scope']['disposition'],
+                        'fault': {'type': 'ExplicitLiveReconciliation', 'message': 'Outputs were not promoted'},
+                        'run_id': request['run_id'], 'receipt_sha256': receipt_hash,
+                        'worker_state': None, 'worker_error': None,
+                        'live_execution_nonce': execution.nonce, 'process_observation': proof}
+                    reference = self._write('results', str(uuid.uuid4()), summary)
+                    attestation = {'job_id': job_id, 'claim_token': current['claim_token'],
+                        'intent_sha256': current['intent_sha256'], 'output_set_id': current['output_set_id'],
+                        'process_disposition': proof['scope']['disposition'], 'outputs_disposition': outputs,
+                        'result_ref': reference, 'evidence_ref': reference}
+                    self._attestations[current['claim_token']] = attestation
+                    try:
+                        settled = jobs.reconcile(job_id, expected_revision=current['revision'],
+                            claim_token=current['claim_token'], outcome=outcome, evidence_ref=reference)
+                    finally:
+                        self._attestations.pop(current['claim_token'], None)
+            self._interrupted_job = self._retained_client = self._retained_execution = None
+            self._retained_watcher = None
+            return json.loads(canonical(settled))
+        except BaseException as exc:
+            if not hasattr(exc, 'owner'):exc.owner = self._retained_client or self._active_client or self.client
+            raise
+        finally:
+            self._busy.release()
+
+    def run_next(self,*,cancel=None,timeout=180,job_id=None):
         if type(timeout) not in (int,float) or not math.isfinite(timeout) or not 0<timeout<=900:
             raise CaptionJobError("A finite worker deadline in (0,900] is required")
-        if not self._busy.acquire(False):raise CaptionJobError("This controller already runs a job")
-        try:return self._run_next(cancel or threading.Event(),timeout)
-        finally:self._busy.release()
+        if not self._busy.acquire(False):
+            error = CaptionJobError("This controller already runs a job")
+            error.owner = self._retained_client or self.client
+            raise error
+        try:
+            if job_id is not None:_uuid(job_id)
+            if self.has_unsettled or self._interrupted_job is not None:
+                error = CaptionJobError('The original caption execution or interrupted claim needs settlement')
+                error.owner = self._retained_client or self.client
+                raise error
+            result = self._run_next(cancel or threading.Event(),timeout,job_id)
+            return json.loads(canonical(result)) if result is not None else None
+        except BaseException as exc:
+            if self._active_job is not None or self.has_unsettled or self._interrupted_job is not None:
+                if self._interrupted_job is None and self._active_job is not None:self._retain(self._active_job)
+                if self._retained_client is None:self._retained_client = self._active_client or self.client
+                if not hasattr(exc, 'owner'):exc.owner = self._retained_client
+            raise
+        finally:
+            self._active_job = None
+            self._active_client = None
+            self._busy.release()
 
-    def _run_next(self,cancel,timeout):
+    def _run_next(self,cancel,timeout,job_id=None):
         if cancel.is_set():return None
-        job=self.jobs.claim_next(owner_id=self.owner_id,kinds=["caption"])
+        job=self.jobs.claim_next(owner_id=self.owner_id,kinds=["caption"],job_id=job_id)
         if job is None:return None
+        self._active_job = job
+        self._active_client = self.client
         launched=False;result=None;fault=None;process_disposition="never_started"
         done=threading.Event();faults=[];watcher=None
         output=self.directory/"executions"/job["output_set_id"]
@@ -142,7 +300,9 @@ class DurableCaptionRunner:
                 "output_set_id":job["output_set_id"],"request_ref":job["input"]["request_ref"],
                 "worker_command_sha256":digest(self.client.command)})
             job=self.jobs.record_launch_intent(job["id"],expected_revision=job["revision"],claim_token=job["claim_token"],launch_ref=launch)
+            self._active_job = job
             watcher=threading.Thread(target=self._watch,args=(job,cancel,done,faults),daemon=True)
+            self._retained_watcher = watcher
             watcher.start()
             launched=True
             result=self.client.run(request,output,timeout=timeout,cancel=cancel)
@@ -161,19 +321,23 @@ class DurableCaptionRunner:
             artifacts={kind:result.load(kind) for kind in ("hypothesis","alignment")}
             if result.state=="complete" and (receipt["worker_exit_code"]!=0 or any(value is None for value in artifacts.values())):
                 raise CaptionJobError("Complete output lacks verified machine evidence")
-        except Exception as exc:fault={"type":type(exc).__name__,"message":str(exc)[:500]}
+        except Exception as exc:fault={"type":type(exc).__name__,"message":failure_message(exc)[:500]}
         finally:
             done.set()
             if watcher:watcher.join(3)
         current=self.jobs.job(job["id"])
-        if faults or watcher and watcher.is_alive() or launched and (fault is not None or process_disposition=="unknown"):
+        if faults or watcher and watcher.is_alive() or launched and (fault is not None or process_disposition=="unknown" or self.has_unsettled):
+            self._retain(current, watcher)
             if current["state"] in ("running","cancel-requested"):
                 current=self.jobs.mark_interrupted(current["id"],expected_revision=current["revision"],reason="cleanup_uncertain" if not faults else "owner_lost")
+            self._retain(current, watcher)
             self._write("uncertain",job["claim_token"],{"job_id":job["id"],"fault":fault,"controller_faults":faults,"resource_holds_retained":True})
             return current
         if cancel.is_set() and current["state"]=="running":
             current=self.jobs.request_cancel(current["id"],expected_revision=current["revision"])
-        if current["state"]=="interrupted":return current
+        if current["state"]=="interrupted":
+            self._retain(current, watcher)
+            return current
         outcome="cancelled" if current["cancel_requested"] else "completed" if result is not None and result.state=="complete" and fault is None else "failed"
         disposition="verified" if outcome=="completed" else "quarantined" if output.exists() else "absent"
         summary={"schema":1,"job_id":job["id"],"claim_token":job["claim_token"],
@@ -194,7 +358,9 @@ class DurableCaptionRunner:
         except StaleTransition:
             current=self.jobs.job(job["id"])
             if current["claim_token"]==job["claim_token"] and current["state"] in ("running","cancel-requested"):
-                return self.jobs.mark_interrupted(current["id"],expected_revision=current["revision"],reason="owner_lost")
+                current = self.jobs.mark_interrupted(current["id"],expected_revision=current["revision"],reason="owner_lost")
+            if current['state'] == 'interrupted':
+                self._retain(current, watcher)
             return current
         finally:self._attestations.pop(job["claim_token"],None)
 
@@ -210,7 +376,7 @@ class DurableCaptionRunner:
         if summary["outcome"]=="completed":
             envelope=self._read("requests",job["input"]["request_ref"])
             self._bind(envelope,job["input"])
-        if summary["run_id"] is not None:
+        if summary["run_id"] is not None and summary["receipt_sha256"] is not None:
             path=self.directory/"executions"/job["output_set_id"]/summary["run_id"]/"receipt.json"
             if hash_file(path)!=summary["receipt_sha256"]:
                 raise VerificationRequired("The parent output receipt changed")

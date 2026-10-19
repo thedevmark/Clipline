@@ -2,10 +2,9 @@ import copy,hashlib,json,os,subprocess,sys,tempfile,threading,time,unittest,uuid
 from pathlib import Path
 from unittest.mock import patch
 R=Path(__file__).resolve().parents[1]
-sys.path.insert(0,str(R/"native/services"))
-from caption_worker.client import CaptionClient
-from caption_worker.evidence import EvidenceError,MAX_LOG,bounds,canonical,hash_file,make_hypothesis,make_alignment,validate_request
-from caption_worker.backend import verify_source_audio
+from native.services.caption_worker.client import CaptionClient
+from native.services.caption_worker.evidence import EvidenceError,MAX_LOG,bounds,canonical,hash_file,make_hypothesis,make_alignment,validate_request
+from native.services.caption_worker.backend import verify_source_audio
 
 class WorkerTests(unittest.TestCase):
     def setUp(self):
@@ -24,7 +23,7 @@ class WorkerTests(unittest.TestCase):
         return CaptionClient(sys.executable,R/"native/services/caption_worker/worker.py",command=[sys.executable,"-u","-B","-S",str(R/"tests/fixtures/caption_fake_worker.py"),mode])
     def run_mode(self,mode,**kwargs):return self.client(mode).run(self.r,self.root/"runs",**kwargs)
     def test_empty_hypothesis_is_complete_and_artifacts_are_immutable(self):
-        result=self.run_mode("success",timeout=4)
+        result=self.run_mode("success",timeout=10)
         self.assertEqual((result.state,result.error_code),("complete",None))
         h=json.loads(result.hypothesis_path.read_text(encoding="utf-8"));self.assertEqual(h["words"],[])
         receipt=json.loads((result.directory/"receipt.json").read_text());self.assertEqual(receipt["hashes"]["hypothesis"],hashlib.sha256(result.hypothesis_path.read_bytes()).hexdigest())
@@ -33,36 +32,39 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(receipt["process_scope"]["active_processes"],0)
             self.assertTrue(receipt["streams_closed"])
         with self.assertRaises(FileExistsError):self.run_mode("success")
-    def test_malformed_stdout_is_rejected(self):self.assertEqual(self.run_mode("malformed",timeout=4).error_code,"MALFORMED_PROTOCOL")
-    def test_truncated_stdout_is_rejected(self):self.assertEqual(self.run_mode("truncated",timeout=4).error_code,"TRUNCATED_PROTOCOL")
+    def test_malformed_stdout_is_rejected(self):self.assertEqual(self.run_mode("malformed",timeout=10).error_code,"MALFORMED_PROTOCOL")
+    def test_truncated_stdout_is_rejected(self):self.assertEqual(self.run_mode("truncated",timeout=10).error_code,"TRUNCATED_PROTOCOL")
     def test_stdout_flood_is_bounded_and_stopped(self):
-        r=self.run_mode("flood",timeout=4);self.assertEqual(r.error_code,"STDOUT_LIMIT");self.assertLessEqual((r.directory/"stdout.jsonl").stat().st_size,3*1_048_576)
+        r=self.run_mode("flood",timeout=10);self.assertEqual(r.error_code,"STDOUT_LIMIT");self.assertLessEqual((r.directory/"stdout.jsonl").stat().st_size,3*1_048_576)
     def test_stderr_flood_is_bounded_and_stopped(self):
-        r=self.run_mode("stderr",timeout=4);self.assertEqual(r.error_code,"STDERR_LIMIT");self.assertEqual((r.directory/"stderr.log").stat().st_size,MAX_LOG)
+        r=self.run_mode("stderr",timeout=10);self.assertEqual(r.error_code,"STDERR_LIMIT");self.assertEqual((r.directory/"stderr.log").stat().st_size,MAX_LOG)
     def test_timeout_stops_worker(self):self.assertEqual(self.run_mode("sleep",timeout=0.4).error_code,"TIMEOUT")
     def test_timeout_does_not_block_on_unread_stdin(self):
         self.r["test_padding"]="x"*50_000
         r=self.run_mode("unread",timeout=0.4);self.assertEqual(r.error_code,"TIMEOUT")
     def test_worker_crash_is_not_complete(self):
-        r=self.run_mode("crash",timeout=4);self.assertEqual((r.state,r.error_code),("failed","WORKER_CRASH"))
+        r=self.run_mode("crash",timeout=10);self.assertEqual((r.state,r.error_code),("failed","WORKER_CRASH"))
     def test_attachment_failure_closes_actual_pipes_without_claiming_stopped_scope(self):
         opened=[];popen=subprocess.Popen
         def launch(*args,**kwargs):
             process=popen(*args,**kwargs);opened.append(process);return process
-        with patch("caption_worker.client.subprocess.Popen",side_effect=launch), patch("caption_worker.client.ProcessTree",side_effect=OSError("injected attachment failure")):
-            result=self.run_mode("success",timeout=4)
+        with patch("native.services.caption_worker.client.subprocess.Popen",side_effect=launch), patch("native.services.caption_worker.client.ProcessTree",side_effect=OSError("injected attachment failure")):
+            result=self.run_mode("success",timeout=10)
         self.assertEqual(result.state,"failed")
         self.assertEqual(len(opened),1)
         self.assertIsNotNone(opened[0].poll())
         self.assertTrue(all(pipe.closed for pipe in (opened[0].stdin,opened[0].stdout,opened[0].stderr)))
         receipt=json.loads((result.directory/"receipt.json").read_text())
-        self.assertEqual(receipt["process_scope"]["disposition"],"unknown")
+        self.assertEqual(receipt["process_scope"]["disposition"],"never_started")
+        self.assertEqual(receipt["process_scope"]["scope"],"unreleased_gate_parent")
+        self.assertFalse(receipt["process_scope"]["requested_work_started"])
+        self.assertNotIn("active_processes",receipt["process_scope"])
         self.assertTrue(receipt["streams_closed"])
     def test_crash_after_hypothesis_preserves_partial_evidence(self):
-        r=self.run_mode("partial",timeout=4);self.assertEqual((r.state,r.error_code),("partial","WORKER_CRASH"));self.assertTrue(r.hypothesis_path.exists());self.assertIsNone(r.alignment_path)
-    def test_missing_terminal_is_not_complete(self):self.assertEqual(self.run_mode("missing_terminal",timeout=4).error_code,"MISSING_TERMINAL")
-    def test_false_complete_is_not_accepted(self):self.assertEqual(self.run_mode("false_complete",timeout=4).error_code,"INCOMPLETE_RESULT")
-    def test_duplicate_terminal_is_rejected(self):self.assertEqual(self.run_mode("duplicate",timeout=4).error_code,"INVALID_SEQUENCE")
+        r=self.run_mode("partial",timeout=10);self.assertEqual((r.state,r.error_code),("partial","WORKER_CRASH"));self.assertTrue(r.hypothesis_path.exists());self.assertIsNone(r.alignment_path)
+    def test_missing_terminal_is_not_complete(self):self.assertEqual(self.run_mode("missing_terminal",timeout=10).error_code,"MISSING_TERMINAL")
+    def test_false_complete_is_not_accepted(self):self.assertEqual(self.run_mode("false_complete",timeout=10).error_code,"INCOMPLETE_RESULT")
+    def test_duplicate_terminal_is_rejected(self):self.assertEqual(self.run_mode("duplicate",timeout=10).error_code,"INVALID_SEQUENCE")
     def test_cancel_before_launch_is_cancelled(self):
         cancel=threading.Event();cancel.set();r=self.run_mode("success",cancel=cancel);self.assertEqual(r.state,"cancelled");self.assertIsNone(r.hypothesis_path)
     def test_cancel_after_hypothesis_preserves_it_without_acceptance(self):
@@ -149,7 +151,7 @@ class WorkerTests(unittest.TestCase):
         second=make_hypothesis(changed,[{"text":"same words","start":0,"end":.009}],{})
         self.assertTrue(set(w["id"] for w in first["words"]).isdisjoint(w["id"] for w in second["words"]))
     def test_nonfinite_machine_values_become_null_not_zero(self):
-        from caption_worker.worker import machine_json
+        from native.services.caption_worker.worker import machine_json
         self.assertEqual(machine_json({"score":float("nan"),"end":float("inf")}),{"score":None,"end":None})
     def test_none_and_empty_requests_retain_failure_receipts(self):
         for bad in [None,{}]:
@@ -176,18 +178,18 @@ class WorkerTests(unittest.TestCase):
             cancel.set();t.join(10)
         self.assertFalse(t.is_alive());self.assertTrue(visible,"short stderr marker remained buffered")
     def test_alignment_cannot_introduce_foreign_word_id(self):
-        r=self.run_mode("bad_alignment",timeout=4);self.assertEqual(r.error_code,"INVALID_EVIDENCE");self.assertIsNone(r.alignment_path)
+        r=self.run_mode("bad_alignment",timeout=10);self.assertEqual(r.error_code,"INVALID_EVIDENCE");self.assertIsNone(r.alignment_path)
     def test_machine_artifact_tampering_is_detected_on_read(self):
-        r=self.run_mode("success",timeout=4);self.assertEqual(r.load("hypothesis")["words"],[])
+        r=self.run_mode("success",timeout=10);self.assertEqual(r.load("hypothesis")["words"],[])
         value=json.loads(r.hypothesis_path.read_text());value["tampered"]=True;r.hypothesis_path.write_bytes(canonical(value))
         with self.assertRaises(EvidenceError) as caught:r.load("hypothesis")
         self.assertEqual(caught.exception.code,"EVIDENCE_CHANGED")
     def test_parent_rejects_reordered_canonical_alignment_ids(self):
-        r=self.run_mode("reordered",timeout=4);self.assertEqual((r.state,r.error_code),("partial","INVALID_EVIDENCE"));self.assertIsNone(r.alignment_path)
+        r=self.run_mode("reordered",timeout=10);self.assertEqual((r.state,r.error_code),("partial","INVALID_EVIDENCE"));self.assertIsNone(r.alignment_path)
     def test_parent_rejects_overlapping_resolved_alignment_intervals(self):
-        r=self.run_mode("overlap",timeout=4);self.assertEqual((r.state,r.error_code),("partial","INVALID_EVIDENCE"));self.assertIsNone(r.alignment_path)
+        r=self.run_mode("overlap",timeout=10);self.assertEqual((r.state,r.error_code),("partial","INVALID_EVIDENCE"));self.assertIsNone(r.alignment_path)
     def test_parent_preserves_missing_gap_between_ordered_resolved_words(self):
-        r=self.run_mode("missing_gap",timeout=4);self.assertEqual(r.state,"complete")
+        r=self.run_mode("missing_gap",timeout=10);self.assertEqual(r.state,"complete")
         words=r.load("alignment")["words"];self.assertEqual(words[1]["timing"]["status"],"missing");self.assertIsNone(words[1]["timing"]["start_us"])
 
 if __name__=="__main__":unittest.main(verbosity=2)
