@@ -362,6 +362,29 @@ def test_inspection_uses_same_preparer_tool_with_real_global_index(tmp_path,monk
     assert len(calls)==1 and calls[0][1]=='inspect' and '-show_streams' in calls[0][0]
 
 
+def test_inspection_ignores_access_time_changed_by_reading(tmp_path,monkeypatch):
+    from pathlib import Path
+    from types import SimpleNamespace
+    source=tmp_path/'source.bin';source.write_bytes(b'authored source')
+    probe=tmp_path/'probe.bin';probe.write_bytes(b'authored binary')
+    expected=hash_file(source)
+    preparer=CaptionAudioPreparer(probe,probe,python=probe)
+    original=Path.stat;calls={source:0,probe:0}
+    def stat(path,*args,**kwargs):
+        value=original(path,*args,**kwargs)
+        if path not in calls:return value
+        calls[path]+=1
+        fields={key:getattr(value,key) for key in dir(value) if key.startswith('st_')}
+        fields['st_atime']+=calls[path]
+        fields['st_atime_ns']+=calls[path]*1000000000
+        return SimpleNamespace(**fields)
+    monkeypatch.setattr(Path,'stat',stat)
+    monkeypatch.setattr(preparer,'_tool',lambda *args,**kw:json.dumps({'streams':[{'index':7,'codec_type':'audio','sample_rate':'48000','channels':2,'duration':'4'}]}).encode())
+    result=preparer.inspect_source(source,expected,tmp_path/'inspection')
+    assert result['streams'][0]['stream_index']==7
+    assert not preparer.has_unsettled
+
+
 def test_inspection_diagnostic_failure_retains_original_source_guard_until_observation(tmp_path,monkeypatch):
     import native.services.caption_audio as audio
     source=tmp_path/'source.bin';source.write_bytes(b'source');probe=tmp_path/'probe.bin';probe.write_bytes(b'probe')

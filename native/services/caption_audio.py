@@ -397,7 +397,9 @@ class CaptionAudioPreparer:
                 h=hashlib.sha256()
                 with path.open('rb') as stream:
                     for chunk in iter(lambda:stream.read(1024**2),b''):checkpoint();h.update(chunk)
-                if before!=path.stat():raise PreparationError('SOURCE_CHANGED','Inspection input changed')
+                after=path.stat()
+                if (before.st_size,before.st_mtime_ns,before.st_ino)!=(after.st_size,after.st_mtime_ns,after.st_ino):
+                    raise PreparationError('SOURCE_CHANGED','Inspection input changed')
                 return h.hexdigest()
             if fingerprint(source,MAX_SOURCE)!=expected:raise PreparationError('SOURCE_CHANGED','Registered source fingerprint differs')
             probe_hash=fingerprint(probe,512*1024**2);commands=[]
