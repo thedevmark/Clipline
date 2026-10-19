@@ -13,7 +13,7 @@ from native.services.twitch_intake_client import PROFILE, classify_probe
 
 @dataclass(frozen=True)
 class SavedSource:
-    clip: TwitchClip
+    clip: TwitchClip | None
     asset: Asset
     binding: dict
     facts: dict
@@ -105,6 +105,44 @@ class SourceMomentPreparation:
     def __init__(self, workspace):
         self.workspace = workspace
         self.directory = workspace.directory / 'source-intake'
+        self.local_probe = None
+        self._local_sources = {}
+
+    @property
+    def has_unsettled(self):
+        return self.local_probe is not None and self.local_probe.has_unsettled
+
+    def settle_local(self, *, stop=False):
+        self.workspace.require_background()
+        if self.local_probe is None:
+            return {'owner_unsettled':False,'resources_released':True}
+        operation = self.local_probe.cleanup_execution if stop else self.local_probe.observe_execution
+        return operation(wait_seconds=5 if stop else 0)
+
+    def inspect_local(self, asset_id):
+        self.workspace.require_background()
+        self._local_sources.pop(asset_id,None)
+        with self.workspace._library() as library:
+            asset = library.asset(asset_id)
+            require(asset.bytes <= PROFILE['max_bytes'], 'This local profile supports files up to 2 GiB.')
+            asset = library.verify_asset(asset_id)
+        if self.local_probe is None:
+            from native.services.local_video_probe import LocalVideoProbe
+            self.local_probe = LocalVideoProbe()
+        facts = self.local_probe.inspect_video(asset,self.workspace.directory/'local-source-inspection')
+        duration_us = validate_source_facts(facts)
+        binding = {'kind':'local','asset_id':asset.id}
+        ticket = digest({'binding':binding,'asset':asdict(asset),'facts':facts})
+        source = SavedSource(None,asset,binding,facts,duration_us,ticket)
+        self._local_sources[asset_id] = source
+        return PreparationContext(source,self.workspace.page('kits'))
+
+    def _local_source(self, library, asset_id):
+        require(not self.has_unsettled, 'Settle the original source inspection before creating a Moment.')
+        source = self._local_sources.get(asset_id)
+        require(source is not None, 'Inspect this local source before preparing a Moment.')
+        require(library.verify_asset(asset_id) == source.asset, 'The local source changed. Inspect it again.')
+        return source
 
     def _source(self, library, clip_id):
         binding, asset, job, settlement = library.admitted_twitch_source(clip_id)
@@ -185,11 +223,12 @@ class SourceMomentPreparation:
         selected = self.kit(kit_id, selected_version)
         return page, selected
 
-    def create(self, *, clip_id, expected_source_ticket, title, source_in_us, source_out_us,
+    def create(self, *, clip_id=None, asset_id=None, expected_source_ticket, title, source_in_us, source_out_us,
                kit_id, kit_version, profile_id, scene_key, expected_kit_sha256):
         with self.workspace._library() as library:
             try:
-                source = self._source(library, clip_id)
+                require((clip_id is None) != (asset_id is None), 'Choose one exact saved source.')
+                source = self._source(library, clip_id) if clip_id is not None else self._local_source(library,asset_id)
                 require(source.ticket == expected_source_ticket,
                         'The selected source facts changed. Cancel and inspect the saved source again.')
                 descriptor = library.kit(kit_id, kit_version)
@@ -199,6 +238,10 @@ class SourceMomentPreparation:
                     library.verify_asset(descriptor['asset_refs']['native_template'])
                 except (OSError, LibraryError) as exc:
                     raise LibraryError('The selected Kit template is missing or changed. Restore it, or select another Kit version.') from exc
+                if asset_id is not None:
+                    return library.create_local_moment(title=title, source_in_us=source_in_us, source_out_us=source_out_us,
+                        kit_id=kit_id,kit_version=kit_version,profile_id=profile_id,scene_key=scene_key,
+                        expected_kit_sha256=expected_kit_sha256,expected_asset=source.asset,verified_source_facts=source.facts)
                 return library.create_twitch_moment(title=title, source_in_us=source_in_us, source_out_us=source_out_us,
                     kit_id=kit_id, kit_version=kit_version, profile_id=profile_id, scene_key=scene_key,
                     expected_kit_sha256=expected_kit_sha256, expected_binding=source.binding,

@@ -56,13 +56,14 @@ class MomentPreparationDialog(QDialog):
         layout.addWidget(heading)
         source = context.source
         video = source.facts['video']
-        self.source_label = label(f'Twitch clip: {source.clip.id}\nSaved source: {Path(source.asset.path).name}\n'
+        origin = f'Twitch clip: {source.clip.id}' if source.clip else 'Local shared video'
+        self.source_label = label(f'{origin}\nSaved source: {Path(source.asset.path).name}\n'
             f'File duration bound: {source.duration_us / 1_000_000:.6f} seconds · {video["width"]} × {video["height"]}')
         self.source_label.setToolTip(source.asset.path)
         self.source_label.setAccessibleName('Selected admitted source')
         layout.addWidget(self.source_label)
         fields = QFormLayout()
-        self.title = QLineEdit((source.clip.title or 'Untitled Moment')[:512])
+        self.title = QLineEdit(((source.clip.title if source.clip else Path(source.asset.path).stem) or 'Untitled Moment')[:512])
         self.title.setMaxLength(512)
         fields.addRow('Moment &title', self.title)
         self.start, self.end = QDoubleSpinBox(), QDoubleSpinBox()
@@ -125,7 +126,7 @@ class MomentPreparationDialog(QDialog):
         if self.kits.count():
             self._kit_changed()
         else:
-            self.message.setText('Create a Creator Kit first, then prepare this saved clip again.')
+            self.message.setText('Create a Creator Kit first, then prepare this saved source again.')
         self._controls()
 
     def _controls(self):
@@ -248,10 +249,14 @@ class MomentPreparationDialog(QDialog):
             return
         profile,scene,_,_ = self.scenes.currentData()
         choice = self.choice
-        arguments = dict(clip_id=self.context.source.clip.id, expected_source_ticket=self.context.source.ticket,
+        arguments = dict(expected_source_ticket=self.context.source.ticket,
             title=self.title.text(), source_in_us=start, source_out_us=end,
             kit_id=choice.kit_id, kit_version=choice.version, expected_kit_sha256=choice.descriptor_sha256,
             profile_id=profile, scene_key=scene)
+        if self.context.source.clip:
+            arguments['clip_id'] = self.context.source.clip.id
+        else:
+            arguments['asset_id'] = self.context.source.asset.id
         self.busy = True
         self.message.setText('Verifying the saved source and creating the Moment…')
         self._controls()
@@ -294,25 +299,44 @@ class MomentPreparationBinding:
         self.prepare.setProperty('primary', True)
         self.prepare.clicked.connect(self._prepare)
         row.addWidget(self.prepare)
+        self.check = QPushButton('Check source')
+        self.stop = QPushButton('Stop inspection')
+        self.check.clicked.connect(lambda:self._settle(False))
+        self.stop.clicked.connect(lambda:self._settle(True))
+        row.addWidget(self.check);row.addWidget(self.stop)
         row.addStretch()
         window.content_layout.insertWidget(window.content_layout.indexOf(window.twitch)+1,self.panel)
         self._gate_changed()
 
     def _gate_changed(self):
-        self.panel.setVisible(self.window.kind == 'clips')
-        self.prepare.setEnabled(not self.active and self.window.action_allowed(self)
-                                and self.window.kind == 'clips' and self.window.selected_entry() is not None)
+        pending = self.service.has_unsettled
+        self.panel.setVisible(self.window.kind in ('clips','assets') or pending)
+        self.prepare.setEnabled(not self.active and not pending and self.window.action_allowed(self)
+                                and self.window.kind in ('clips','assets') and self.window.selected_entry() is not None)
+        for button in (self.check,self.stop):
+            button.setVisible(pending);button.setEnabled(pending and not self.active)
+
+    def _settle(self,stop):
+        if self.active or not self.service.has_unsettled:return
+        self.active=True;self._gate_changed()
+        def finished(proof):
+            self.active=False
+            if not self.service.has_unsettled:self.window.release_action(self)
+            self.window.message.setText('Source inspection settled. Prepare the selected source again.' if not self.service.has_unsettled else 'The original source inspection remains unresolved. Check or stop it again.')
+            self._gate_changed()
+        try:self.window.runner.run(lambda job:self.service.settle_local(stop=stop),on_finished=finished,on_error=self._failed)
+        except Exception as exc:self._failed(str(exc))
 
     def _prepare(self):
         entry = self.window.selected_entry()
-        if self.active or self.window.kind != 'clips' or entry is None or not self.window.acquire_action(self):
+        if self.active or self.service.has_unsettled or self.window.kind not in ('clips','assets') or entry is None or not self.window.acquire_action(self):
             return
         self.active = True
-        clip_id = entry.id
+        source_id, local = entry.id, self.window.kind == 'assets'
         self._gate_changed()
-        self.window.message.setText('Checking the selected saved source and its intake result…')
+        self.window.message.setText('Inspecting local video… H.264 MP4, up to 180 seconds and 2 GiB; optional mono/stereo AAC.' if local else 'Checking the selected saved source and its intake result…')
         try:
-            self.window.runner.run(lambda job:self.service.inspect(clip_id),on_finished=self._show,on_error=self._failed)
+            self.window.runner.run(lambda job:self.service.inspect_local(source_id) if local else self.service.inspect(source_id),on_finished=self._show,on_error=self._failed)
         except Exception as exc:
             self._failed(str(exc))
 
@@ -326,11 +350,12 @@ class MomentPreparationBinding:
         self.active = False
         self.window.release_action(self)
         if dialog.created is not None:
-            self.window.message.setText('Moment saved with its selected Twitch clip and Kit version. Select Open edit to continue.')
+            self.window.message.setText('Moment saved with its selected source and Kit version. Select Open edit to continue.')
             self.window.load_view('moments',dialog.created.id)
         dialog.deleteLater()
 
     def _failed(self, error):
         self.active = False
-        self.window.release_action(self)
+        if not self.service.has_unsettled:self.window.release_action(self)
         self.window.message.setText(error)
+        self._gate_changed()

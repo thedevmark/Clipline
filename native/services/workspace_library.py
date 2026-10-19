@@ -98,15 +98,17 @@ class WorkspaceLibrary:
                     asset = library.asset(moment.source_asset_id)
                     kit = library.kit(moment.kit_id, moment.kit_version)
                     origin = library.moment_origin(moment.id)
-                    source_label = (f'Twitch {origin["clip_id"]} · {Path(asset.path).name}'
-                                    if origin else Path(asset.path).name)
+                    local = origin is not None and origin.get('kind') == 'local'
+                    source_label = (f'Local · {Path(asset.path).name}' if local else
+                                    f'Twitch {origin["clip_id"]} · {Path(asset.path).name}' if origin else Path(asset.path).name)
                     origin_detail = (f'\nTwitch clip: {origin["clip_id"]}\n'
                         f'{origin["selected_metadata"]["source_url"]}\n'
                         f'Intake-selected title: {origin["selected_metadata"]["title"]}\n'
                         f'Prepared Kit version: {origin["kit_version"]}\n'
                         f'Prepared OBS scene: {origin["scene_key"]}\n'
                         f'Intake result: {origin["result_id"]}\nIntake result SHA256: {origin["result_sha256"]}'
-                        if origin else '')
+                        if origin and not local else
+                        f'\nLocal shared file\nPrepared Kit version: {origin["kit_version"]}\nPrepared OBS scene: {origin["scene_key"]}' if local else '')
                     interval = f'{duration(moment.source_in_us)}–{duration(moment.source_out_us)}'
                     entries.append(LibraryEntry(
                         moment.id, moment.revision,

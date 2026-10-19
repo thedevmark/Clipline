@@ -312,6 +312,7 @@ class CreatorLibrary:
             self._install_twitch_source_schema()
             self.jobs = DurableJobs(self.connection)
             self._install_moment_origin_schema()
+            self._install_local_origin_schema()
             install_moment_caption_schema(self.connection)
             self.caption_selections = MomentCaptionSelections(self)
         except Exception:
@@ -401,6 +402,16 @@ class CreatorLibrary:
                     statement = ''
             if statement.strip():
                 raise LibraryError('Incomplete Moment origin migration')
+
+    def _install_local_origin_schema(self):
+        with self._write():
+            statements = (
+                "CREATE TABLE IF NOT EXISTS moment_local_origins (moment_id TEXT PRIMARY KEY REFERENCES moments(id), asset_id TEXT NOT NULL REFERENCES assets(id), source_sha256 TEXT NOT NULL, source_bytes INTEGER NOT NULL, source_facts TEXT NOT NULL, kit_id TEXT NOT NULL, kit_version INTEGER NOT NULL, kit_descriptor_sha256 TEXT NOT NULL, profile_id TEXT NOT NULL, scene_key TEXT NOT NULL, FOREIGN KEY(kit_id,kit_version) REFERENCES kit_versions(kit_id,version))",
+                "CREATE TRIGGER IF NOT EXISTS moment_local_origins_no_update BEFORE UPDATE ON moment_local_origins BEGIN SELECT RAISE(ABORT,'Moment local origins are immutable'); END",
+                "CREATE TRIGGER IF NOT EXISTS moment_local_origins_no_delete BEFORE DELETE ON moment_local_origins BEGIN SELECT RAISE(ABORT,'Moment local origins are immutable'); END",
+                "CREATE TRIGGER IF NOT EXISTS moment_local_origins_match BEFORE INSERT ON moment_local_origins WHEN NOT EXISTS (SELECT 1 FROM moments JOIN assets ON assets.id=moments.source_asset_id WHERE moments.id=NEW.moment_id AND moments.source_asset_id=NEW.asset_id AND assets.sha256=NEW.source_sha256 AND assets.bytes=NEW.source_bytes AND moments.kit_id=NEW.kit_id AND moments.kit_version=NEW.kit_version) OR EXISTS(SELECT 1 FROM moment_twitch_origins WHERE moment_id=NEW.moment_id) BEGIN SELECT RAISE(ABORT,'Local origin must match the Moment source and Kit'); END",
+            )
+            for statement in statements:self.connection.execute(statement)
 
     def twitch_clip(self, clip_id: str) -> TwitchClip:
         _name(clip_id, "clip ID")
@@ -666,11 +677,48 @@ class CreatorLibrary:
                 record.descriptor_sha256, profile_id, scene_key))
         return self.moment(moment_id)
 
+    def create_local_moment(self, *, title, source_in_us, source_out_us, kit_id, kit_version,
+                            profile_id, scene_key, expected_kit_sha256, expected_asset, verified_source_facts):
+        # Background source verification precedes this SQL-only admission transaction.
+        facts = json.loads(_json(verified_source_facts))
+        try:
+            duration = facts['duration']
+            if not isinstance(duration,str) or len(duration)>64:raise ValueError()
+            fraction = Fraction(duration)*1_000_000
+            if not 0 < fraction <= 180_000_000:raise ValueError()
+            bound = fraction.numerator//fraction.denominator
+        except (TypeError,KeyError,ValueError,ZeroDivisionError) as exc:
+            raise LibraryError('Verified local source duration is unavailable.') from exc
+        if type(source_out_us) is not int or source_out_us > bound:
+            raise LibraryError('The Moment end exceeds the verified local source duration.')
+        with self._write():
+            asset = self.asset(expected_asset.id)
+            if asset != expected_asset:raise RevisionConflict('The local source binding changed. Inspect it again.')
+            record = self.kit_record(kit_id,kit_version)
+            kit = self.kit(kit_id,kit_version)
+            if record.descriptor_sha256 != expected_kit_sha256:
+                raise RevisionConflict('The selected Kit descriptor differs. Select its exact version again.')
+            if kit['properties'] or set(kit['asset_refs']) != {'native_template'}:
+                raise LibraryError('Choose a native Creator Kit version.')
+            if len([p for p in kit['layout_profiles'] if p['id']==profile_id and p['scene_key']==scene_key]) != 1:
+                raise LibraryError('Choose an exact saved OBS scene profile from the selected Kit version.')
+            moment_id = self._insert_moment(title=title,source_asset_id=asset.id,source_in_us=source_in_us,
+                source_out_us=source_out_us,kit_id=kit_id,kit_version=kit_version)
+            self.connection.execute('INSERT INTO moment_local_origins VALUES(?,?,?,?,?,?,?,?,?,?)',
+                (moment_id,asset.id,asset.sha256,asset.bytes,_json(facts),kit_id,kit_version,
+                 record.descriptor_sha256,profile_id,scene_key))
+        return self.moment(moment_id)
+
     def moment_origin(self, moment_id):
         self.moment(moment_id)
         row = self.connection.execute('SELECT * FROM moment_twitch_origins WHERE moment_id=?', (moment_id,)).fetchone()
         if row is None:
-            return None
+            local = self.connection.execute('SELECT * FROM moment_local_origins WHERE moment_id=?',(moment_id,)).fetchone()
+            if local is None:return None
+            value = dict(local)
+            value['kind'] = 'local'
+            value['source_facts'] = json.loads(value['source_facts'])
+            return value
         value = dict(row)
         for field in ('selected_metadata', 'source_facts'):
             value[field] = json.loads(value[field])
