@@ -862,10 +862,38 @@ diff --git a/crates/engine/src/autosave.rs b/crates/engine/src/autosave.rs
                      }
                  }
                  Ok(path)
+diff --git a/crates/engine/src/captions.rs b/crates/engine/src/captions.rs
+--- a/crates/engine/src/captions.rs
++++ b/crates/engine/src/captions.rs
+@@ -177,7 +177,8 @@
+     })
+ }
+ 
+-fn track_json(s: &Session, t: &CaptionTrack, index: usize) -> Value {
++/// Time-free track identity and native style, independent of the active sequence.
++pub(crate) fn track_summary_json(t: &CaptionTrack, index: usize) -> Value {
+     json!({
+         "id": t.id.0,
+         "label": format!("C{}", index + 1),
+@@ -193,8 +194,13 @@
+             "align": format!("{:?}", t.style.align).to_lowercase(), "anchor": format!("{:?}", t.style.anchor).to_lowercase(),
+             "margin": t.style.margin, "lineSpacing": t.style.line_spacing, "outline": t.style.outline, "outlineColor": hex(t.style.outline_color),
+         },
+-        "captions": t.captions.iter().map(|c| caption_json(s, c)).collect::<Vec<_>>(),
+     })
++}
++
++fn track_json(s: &Session, t: &CaptionTrack, index: usize) -> Value {
++    let mut track = track_summary_json(t, index);
++    track["captions"] = json!(t.captions.iter().map(|c| caption_json(s, c)).collect::<Vec<_>>());
++    track
+ }
+ 
+ fn export(s: &mut Session, p: &Value) -> Result<Value> {
 diff --git a/crates/engine/src/commands.rs b/crates/engine/src/commands.rs
 --- a/crates/engine/src/commands.rs
 +++ b/crates/engine/src/commands.rs
-@@ -1,4445 +1,4489 @@
+@@ -1,4445 +1,4490 @@
 -//! The command registry. Ids follow Premiere's menu structure; every menu item, panel button,
 -//! shortcut and timeline gesture maps to exactly one of these.
 -
@@ -9606,6 +9634,7 @@ diff --git a/crates/engine/src/commands.rs b/crates/engine/src/commands.rs
 +        "markers": q.markers.iter().map(|m| json!({"id": m.id.0, "start": m.start.0, "duration": m.duration.0, "kind": format!("{:?}", m.kind), "name": m.name, "comment": m.comment, "color": m.color.name()})).collect::<Vec<_>>(),
 +        "video": q.video_tracks.iter().map(tr).collect::<Vec<_>>(),
 +        "audio": q.audio_tracks.iter().map(tr).collect::<Vec<_>>(),
++        "captionTracks": q.caption_tracks.iter().enumerate().map(|(i, t)| crate::captions::track_summary_json(t, i)).collect::<Vec<_>>(),
 +        "selection": s.state.selection.iter().map(|c| c.0).collect::<Vec<_>>(),
 +        "transitionSelection": s.state.transition_selection.iter().map(|t| t.0).collect::<Vec<_>>(),
 +        "gapSelection": s.state.gap_selection.map(|g| json!({"track": g.track.0, "start": g.range.start.0, "end": g.range.end().0})),
@@ -15293,6 +15322,149 @@ diff --git a/crates/engine/src/project_tools.rs b/crates/engine/src/project_tool
      s.services.write_file(&path, &filmcraft_format::encode(&sub, false)).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
      Ok(json!({"path": path, "items": keep.iter().map(|i| i.0).collect::<Vec<_>>()}))
  }
+diff --git a/crates/engine/tests/clipline_caption_inventory.rs b/crates/engine/tests/clipline_caption_inventory.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/engine/tests/clipline_caption_inventory.rs
+@@ -0,0 +1,138 @@
++//! Public readback discovers inactive tracks without changing the user's editor.
++
++use filmcraft_engine::Session;
++use serde_json::json;
++
++fn caption_inventory_fixture() -> (Session, filmcraft_project::ItemId, filmcraft_project::ItemId, filmcraft_project::ItemId) {
++    use filmcraft_project::{Caption, CaptionAlign, CaptionAnchor, CaptionFormat, CaptionStyle, CaptionTrack, ClipId, SequenceSettings, TrackId};
++    use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
++    let mut s = Session::default();
++    let ids = s.edit("Inventory fixture", |p, st| {
++        let active = p.new_sequence("Active 25 fps", SequenceSettings { frame_rate: FrameRate::FPS_25, drop_frame: false, ..Default::default() }, 1, 1, None);
++        let target = p.new_sequence("Inactive drop-frame", SequenceSettings { frame_rate: FrameRate::FPS_29_97, drop_frame: true, ..Default::default() }, 1, 1, None);
++        let empty = p.new_sequence("Empty captions", SequenceSettings::default(), 1, 1, None);
++        let mut a = CaptionTrack::new(TrackId(p.alloc_id()), "Active captions".into(), CaptionFormat::Cea608);
++        a.style.font = "Active font".into();
++        a.captions.push(Caption {
++            id: ClipId(p.alloc_id()), start: Tick(61 * TICKS_PER_SECOND), duration: Tick(TICKS_PER_SECOND),
++            text: "Active cue".into(), speaker: Some("Active speaker".into()), cue_id: None, settings: "align:start".into(),
++        });
++        let mut b = CaptionTrack::new(TrackId(p.alloc_id()), "Français – styled".into(), CaptionFormat::Cea708);
++        b.language = "fr-CA".into();
++        b.locked = true;
++        b.enabled = false;
++        b.sync_lock = false;
++        b.style = CaptionStyle {
++            font: "Native Ω font".into(), size: 48.0, color: [1, 2, 3, 4], background: false,
++            background_color: [5, 6, 7, 8], align: CaptionAlign::Right, anchor: CaptionAnchor::Top,
++            margin: 0.125, line_spacing: 1.5, outline: 2.5, outline_color: [9, 10, 11, 12],
++        };
++        let rate = FrameRate::FPS_29_97;
++        b.captions.push(Caption {
++            id: ClipId(p.alloc_id()), start: rate.tick_of(1800), duration: rate.tick_of(30),
++            text: "Inactive cue – never serialized by discovery".into(), speaker: None, cue_id: None, settings: String::new(),
++        });
++        let c = CaptionTrack::new(TrackId(p.alloc_id()), "Second styled track".into(), CaptionFormat::Teletext);
++        st.active_sequence = Some(active);
++        st.open_sequences = vec![active];
++        st.caption_selection = vec![a.captions[0].id];
++        st.playheads.insert(active, Tick(TICKS_PER_SECOND));
++        st.playheads.insert(target, rate.tick_of(25));
++        p.sequence_mut(active).unwrap().caption_tracks = vec![a];
++        p.sequence_mut(target).unwrap().caption_tracks = vec![b, c];
++        Ok((active, target, empty))
++    }).unwrap();
++    // Keep both undo and redo populated, so a query cannot silently replace history.
++    s.execute("captions.setTrack", json!({"track":"C1", "name":"Temporary name"})).unwrap();
++    s.execute("edit.undo", json!({})).unwrap();
++    assert!(!s.history.undo.is_empty() && !s.history.redo.is_empty());
++    (s, ids.0, ids.1, ids.2)
++}
++
++fn caption_inventory_snapshot(s: &Session) -> serde_json::Value {
++    let history = |entries: &[(String, std::sync::Arc<filmcraft_project::Project>)]| {
++        entries.iter().map(|(label, project)| json!({"label":label, "project":&**project})).collect::<Vec<_>>()
++    };
++    json!({
++        "project": &*s.project, "editor": s.state, "view": s.project_view(),
++        "undo": history(&s.history.undo), "redo": history(&s.history.redo),
++        "historyLimit": s.history.limit, "mergeKey": s.history.merge_key,
++        "revision": s.revision, "savedRevision": s.saved_revision,
++        "path": s.path, "loadedSchema": s.loaded_schema, "journal": s.journal, "events": s.events,
++    })
++}
++
++#[test]
++fn sequence_inspect_caption_inventory_reads_inactive_styles_without_clock_or_mutation() {
++    let (mut s, active, target, _) = caption_inventory_fixture();
++    let listed = s.execute("captions.list", json!({})).unwrap();
++    assert_eq!(listed["tracks"][0]["name"], "Active captions");
++    assert_eq!(listed["tracks"][0]["style"]["font"], "Active font");
++    assert_eq!(listed["tracks"][0]["captions"][0]["in"], "00:01:01:00");
++    assert_eq!(listed["tracks"][0]["captions"][0]["out"], "00:01:02:00");
++    assert_eq!(listed["tracks"][0]["captions"][0]["settings"], "align:start");
++    let before = caption_inventory_snapshot(&s);
++    let project = s.project.clone();
++    let js = s.execute("sequence.inspect", json!({"item":target.0})).unwrap();
++    assert_eq!(js["id"], target.0);
++    assert_eq!(js["settings"]["frame_rate"], serde_json::to_value(filmcraft_time::FrameRate::FPS_29_97).unwrap());
++    let tracks = js["captionTracks"].as_array().expect("queried sequence reports caption-track inventory");
++    let q = s.project.sequence(target).unwrap();
++    assert_eq!(tracks.len(), 2);
++    assert_eq!(tracks[0], json!({
++        "id":q.caption_tracks[0].id.0, "label":"C1", "name":"Français – styled", "format":"CEA-708", "language":"fr-CA",
++        "enabled":false, "locked":true, "syncLock":false,
++        "style":{"font":"Native Ω font", "size":48.0, "color":"#01020304", "background":false,
++            "backgroundColor":"#05060708", "align":"right", "anchor":"top", "margin":0.125,
++            "lineSpacing":1.5, "outline":2.5, "outlineColor":"#090a0b0c"}
++    }));
++    assert_eq!(tracks[1]["id"], q.caption_tracks[1].id.0);
++    assert_eq!(tracks[1]["label"], "C2");
++    assert_eq!(tracks[1]["name"], "Second styled track");
++    assert_eq!(tracks[1]["format"], "Teletext");
++    assert_eq!(tracks[1]["language"], "en");
++    assert_eq!(tracks[1]["enabled"], true);
++    assert_eq!(tracks[1]["locked"], false);
++    assert_eq!(tracks[1]["syncLock"], true);
++    assert_ne!(tracks[0]["style"], tracks[1]["style"]);
++    for track in tracks {
++        assert_eq!(track.as_object().unwrap().len(), 9, "summary has no cue text, timing, selection or inferred profile");
++        assert!(track.get("captions").is_none());
++        assert!(track.get("rules").is_none());
++        assert!(track.get("defaultSettings").is_none());
++    }
++    assert_eq!(s.state.active_sequence, Some(active));
++    assert_eq!(s.execute("captions.list", json!({})).unwrap(), listed, "active caption list is unchanged, including cue clocks");
++    assert_eq!(caption_inventory_snapshot(&s), before);
++    assert!(std::sync::Arc::ptr_eq(&project, &s.project));
++}
++
++#[test]
++fn sequence_inspect_caption_inventory_empty_and_explicit_without_active_sequence() {
++    let (mut s, active, target, empty) = caption_inventory_fixture();
++    let before = caption_inventory_snapshot(&s);
++    let active_result = s.execute("sequence.inspect", json!({})).unwrap();
++    assert_eq!(active_result["id"], active.0);
++    assert_eq!(active_result["captionTracks"][0]["name"], "Active captions");
++    assert_eq!(s.execute("sequence.inspect", json!({"item":empty.0})).unwrap()["captionTracks"], json!([]));
++    assert_eq!(caption_inventory_snapshot(&s), before);
++    s.state.active_sequence = None;
++    s.state.open_sequences.clear();
++    let before = caption_inventory_snapshot(&s);
++    let explicit = s.execute("sequence.inspect", json!({"item":target.0})).unwrap();
++    assert_eq!(explicit["captionTracks"].as_array().unwrap().len(), 2);
++    assert_eq!(s.execute("captions.list", json!({})).unwrap(), json!({"tracks":[]}));
++    assert!(matches!(s.execute("sequence.inspect", json!({})), Err(filmcraft_engine::EngineError::NoSequence)));
++    assert_eq!(caption_inventory_snapshot(&s), before);
++}
++
++#[test]
++fn sequence_inspect_caption_inventory_rejects_missing_and_nonsequence_targets() {
++    let (mut s, _, _, _) = caption_inventory_fixture();
++    let before = caption_inventory_snapshot(&s);
++    // The root bin and a never-allocated item are valid numeric IDs, but not sequences.
++    for target in [s.project.root.id.0, s.project.next_id] {
++        assert!(matches!(s.execute("sequence.inspect", json!({"item":target})), Err(filmcraft_engine::EngineError::NoSequence)));
++        assert_eq!(caption_inventory_snapshot(&s), before);
++    }
++}
 diff --git a/crates/engine/tests/clipline_caption_projection.rs b/crates/engine/tests/clipline_caption_projection.rs
 new file mode 100644
 --- /dev/null

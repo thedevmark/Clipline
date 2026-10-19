@@ -7,7 +7,7 @@
   "archive_bytes": 21093176,
   "archive_sha256": "851a166241377875964251523594bb85c14171c740aa0d32b476ddeeb78d27e3",
   "patch_file": "clipline-native-edits.patch",
-  "patch_sha256": "b7e1587965af7e488cb432c133547936a128577822f74734766c224875338f89",
+  "patch_sha256": "ad27019dc151583a58176b6f1dab0355b3f34ddf3102890f0947005f068d3a6c",
   "patched_files_sha256": {
     "Cargo.lock": "3ab1978e3d9211244ac9f2b2b637f859bb317c6059085e5ab576e37257383f11",
     "apps/clipline-creator-kit/Cargo.toml": "2ca4b3f9d5024f62e432c9a62e84224a0543a51004ccb03c937e62d6e1ffc12c",
@@ -20,7 +20,8 @@
     "crates/engine/Cargo.toml": "de882235618e1f062074518e334c0bc974d68a990816c51c437fa6f7c295f8f4",
     "crates/engine/src/accepted_captions.rs": "904793f7bee52ab2acc9fb59156de427dd7d3d25dc50484523dac3209f3d4a76",
     "crates/engine/src/autosave.rs": "f6a1669164882f96e5aa7e8e14823a93628d1ffe01b319e2c5f0f5c2d497e28b",
-    "crates/engine/src/commands.rs": "c32b2839a5c91357f7fa1c922cc8ceec6613be053e25374b59b2134c5d70059c",
+    "crates/engine/src/captions.rs": "24df12899b2903ba2b42884452a4a38802bf794e65be29a2c20a87cb5e054f01",
+    "crates/engine/src/commands.rs": "e303b831f669cea67c67bb3fe042359a3989e5dd8149ce4f10156175fb077039",
     "crates/engine/src/creator_kit.rs": "123f4c8ef9f64072a6b136f29173373bb6c09dccd1fcea036097acd19c415dd4",
     "crates/engine/src/export_snapshot.rs": "ee562f71efe3fbafa395c9572bc49ee442e67d695bc3ea7e48de21daad4902ce",
     "crates/engine/src/export_tools.rs": "761189df9e5026b177f96b4c293bf274c395070b95517f95d793e441fc543bac",
@@ -31,6 +32,7 @@
     "crates/engine/src/mixer.rs": "6b1c3a133c07afc8fcbbc0fb58267f781705374847d9e26c6fe6dda9bf7c6e88",
     "crates/engine/src/project_manager.rs": "295fa0aaa49dc4d2a422f176f83324a7d3247a449983fc6822919f565fa4884c",
     "crates/engine/src/project_tools.rs": "2945d0399a06ca9a766ff9e376db66fcebf50470d21f71a1b222269053bf5a0c",
+    "crates/engine/tests/clipline_caption_inventory.rs": "85cfa423b46fbd91634cbcd8b7a585eec8f446aea223f847fcfbd60848581875",
     "crates/engine/tests/clipline_caption_projection.rs": "ca72fb886257537df4ecec33b5804e2226ad5a1344c6871af39e16c96bebcfea",
     "crates/engine/tests/clipline_export_snapshot.rs": "2f1da3bf49ba1d9a1c6d77e6c817788f6722df11ee654a9dac849dfc3e505675",
     "crates/engine/tests/clipline_linked_commands.rs": "7875968d189ead58d8d92cac3a8394c84b066545822780f56cd78bbb51760e25",
@@ -41,6 +43,6 @@
     "crates/ui-egui/src/lib.rs": "24a3cd2c8861dfb1f293bb3099c430ccc4c2d0d6939cba00beae03769ddee943",
     "crates/ui-egui/src/panels/clip_dialogs.rs": "39cb69f8c6f6fdb1b6031ab380b08a0b041700464fdbc9ecdd54174a2c6e4f7d"
   },
-  "scope": "Native linked gameplay/facecam editing, document validation and atomic snapshots, accepted source-clock caption projection to three compositions, and validated committed playback publication. Full editor integration remains incomplete. Adds a native scratch-Session Creator Kit capture/instantiate helper with pinned creation identity receipts and supported static audio preservation. This does not add a second timeline, full Kit updates, or a UI command registry. Adds the dedicated headless immutable export snapshot module/helper, outside the GUI registry. Unified source identity only; combined build and real export qualification remain separate gates. Adds opt-in managed native exit evidence and correlated native Save/Don't Save/Cancel observation. Final document evidence remains separate from original process-scope cessation and canonical publication. Full integration and release qualification remain separate gates.",
+  "scope": "Native linked gameplay/facecam editing, document validation and atomic snapshots, accepted source-clock caption projection to three compositions, and validated committed playback publication. Full editor integration remains incomplete. Adds a native scratch-Session Creator Kit capture/instantiate helper with pinned creation identity receipts and supported static audio preservation. This does not add a second timeline, full Kit updates, or a UI command registry. Adds the dedicated headless immutable export snapshot module/helper, outside the GUI registry. Unified source identity only; combined build and real export qualification remain separate gates. Adds opt-in managed native exit evidence and correlated native Save/Don't Save/Cancel observation. Final document evidence remains separate from original process-scope cessation and canonical publication. Full integration and release qualification remain separate gates. Adds read-only caption-track and native-style inventory through explicit sequence.inspect, reusing captions.list serialization. Track creation, wrapping rules and caption acceptance remain separate existing owners.",
   "archive_url_provenance": "Conventional tag archive reconstruction endpoint; original request URL was not retained. Verified archive ZIP comment equals upstream_commit."
 }
