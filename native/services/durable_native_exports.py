@@ -179,19 +179,20 @@ class DurableNativeExports:
                     if row[1] or row[0]=='interrupted':cancel.set()
                     done.wait(.05)
         except Exception as exc:faults.append(str(exc)[:500]);cancel.set()
-    def run_next(self,*,cancel=None,timeout=900):
+    def run_next(self,*,cancel=None,timeout=900,job_id=None):
         if threading.current_thread() is threading.main_thread():raise ExportJobError('Run native export persistence/hash work on the background owner')
         if type(timeout) not in (int,float) or not math.isfinite(timeout) or not 0<timeout<=3600:raise ExportJobError('Finite export deadline within one hour required before admission')
+        if job_id is not None:identifier(job_id)
         if not self._busy.acquire(False):raise ExportJobError('This render owner is busy')
-        try:return self._run(cancel or threading.Event(),timeout)
+        try:return self._run(cancel or threading.Event(),timeout,job_id)
         except Exception as exc:
             live=tuple(owner for owner in self._executions.values() if not owner.closed)
             if live:raise ExportOwnershipError('Export bookkeeping failed while live ownership remains: '+str(exc)[:1000],live) from exc
             raise
         finally:self._busy.release()
-    def _run(self,cancel,timeout):
+    def _run(self,cancel,timeout,job_id=None):
         if cancel.is_set():return None
-        job=self.jobs.claim_next(owner_id=self.owner_id,kinds=['render'])
+        job=self.jobs.claim_next(owner_id=self.owner_id,kinds=['render'],job_id=job_id)
         if job is None:return None
         runtime=None;fault=None;launched=False;done=threading.Event();faults=[];watcher=None;execution=self.directory/'executions'/job['output_set_id'];scope_owner=None;cleanup=None
         try:

@@ -56,6 +56,7 @@ class EditorCompanionBinding(QObject):
         self.runner = window.runner
         self.choose_layout = choose_layout or self._choose_layout
         self.busy = False
+        self.export_dialog = None
         self.caption_dialog = None
         self.cancel = None
         self.cancel_label = 'Cancel opening'
@@ -69,21 +70,24 @@ class EditorCompanionBinding(QObject):
         body.addWidget(self.status)
         actions = QHBoxLayout()
         self.save = QPushButton('Save checkpoint')
-        self.save.clicked.connect(lambda: self._run(self.controller.checkpoint, 'Saving the edit…'))
+        self.save.clicked.connect(lambda: self._run(self.controller.checkpoint, 'Saving the edit...'))
         actions.addWidget(self.save)
         self.captions = QPushButton('Captions')
         self.captions.clicked.connect(self._captions)
         self.captions.setVisible(getattr(controller,'_captions',None) is not None)
         actions.addWidget(self.captions)
+        self.export = QPushButton("Export both formats")
+        self.export.clicked.connect(self._export)
+        self.export.setVisible(getattr(controller,"_exports",None) is not None)
         self.close_editor = QPushButton('Save and close')
-        self.close_editor.clicked.connect(lambda: self._run(self._save_and_close, 'Saving and closing the edit…',
+        self.close_editor.clicked.connect(lambda: self._run(self._save_and_close, 'Saving and closing the edit...',
                                                           cancellable=True, cancel_label='Stop waiting'))
         actions.addWidget(self.close_editor)
         self.check_close = QPushButton('Check close')
-        self.check_close.clicked.connect(lambda: self._run(self.controller.check_close, 'Checking whether the editor closed…'))
+        self.check_close.clicked.connect(lambda: self._run(self.controller.check_close, 'Checking whether the editor closed...'))
         actions.addWidget(self.check_close)
         self.recover = QPushButton('Recover saved working edit')
-        self.recover.clicked.connect(lambda: self._run(self.controller.recover_working, 'Recovering the saved working edit…'))
+        self.recover.clicked.connect(lambda: self._run(self.controller.recover_working, 'Recovering the saved working edit...'))
         actions.addWidget(self.recover)
         self.cleanup = QPushButton('Stop retained process')
         self.cleanup.clicked.connect(self._cleanup)
@@ -93,6 +97,7 @@ class EditorCompanionBinding(QObject):
         actions.addWidget(self.cancel_open)
         actions.addStretch()
         body.addLayout(actions)
+        body.addWidget(self.export)
         layout = getattr(window, 'content_layout', None)
         if layout is None:
             layout = window.centralWidget().layout()
@@ -118,7 +123,11 @@ class EditorCompanionBinding(QObject):
         outcome = self.controller.status()
         available = getattr(self.window, 'action_allowed', lambda owner: True)(self)
         self.save.setEnabled(available and not self.busy and outcome.can_checkpoint)
-        self.captions.setEnabled(available and not self.busy and outcome.state == 'open' and not outcome.requires_reconciliation)
+        self.export.setEnabled(available and not self.busy and outcome.can_checkpoint)
+        if self.export_dialog is not None:self.export_dialog.controls()
+        exporting=getattr(self.controller,'_exports',None)
+        self.captions.setEnabled(available and not self.busy and outcome.state == 'open' and not outcome.requires_reconciliation
+                                 and not (exporting is not None and exporting.unsettled))
         if self.caption_dialog is not None:self.caption_dialog.controls()
         self.close_editor.setEnabled(available and not self.busy and outcome.can_checkpoint and outcome.can_close_editor
                                      and callable(getattr(self.controller, 'save_and_close', None)))
@@ -142,7 +151,7 @@ class EditorCompanionBinding(QObject):
         if self.busy or not self.window.editor_available or not self._claim():
             return
         self.busy = True
-        self.status.setText('Loading the selected Creator Kit…')
+        self.status.setText('Loading the selected Creator Kit...')
         self._refresh()
         self.runner.run(
             lambda job: self.window.library.moment_edit_context(moment_id, revision),
@@ -171,7 +180,7 @@ class EditorCompanionBinding(QObject):
         profile, scene = selected
         self._run(lambda: self.controller.open(moment_id, revision, profile_id=profile, scene_key=scene,
                                               cancel=self.cancel),
-                  'Opening the selected edit…', cancellable=True)
+                  'Opening the selected edit...', cancellable=True)
 
     def _run(self, operation, message, *, cancellable=False, cancel_label='Cancel opening'):
         if self.busy or not self._claim():
@@ -192,13 +201,13 @@ class EditorCompanionBinding(QObject):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel)
         if choice == QMessageBox.StandardButton.Yes:
-            self._run(self.controller.cleanup, 'Stopping the retained process…')
+            self._run(self.controller.cleanup, 'Stopping the retained process...')
 
     def _cancel_open(self):
         if self.cancel is not None:
             self.cancel.set()
             self.status.setText('Stopping the wait. The editor can still finish closing.'
-                                if self.cancel_label == 'Stop waiting' else 'Cancelling the editor opening…')
+                                if self.cancel_label == 'Stop waiting' else 'Cancelling the editor opening...')
             self._refresh()
 
     def _finished(self, outcome):
@@ -226,6 +235,12 @@ class EditorCompanionBinding(QObject):
                 return True
         return super().eventFilter(watched, event)
 
+    def _export(self):
+        if self.export_dialog is None:
+            from native.ui.workspace_exports import ExportDialog
+            self.export_dialog=ExportDialog(self)
+        self.export_dialog.controls();self.export_dialog.show();self.export_dialog.raise_()
+
     def _captions(self):
         current=self.controller.status()
         key=(current.moment_id,current.moment_revision,current.working.path if current.working else None)
@@ -236,7 +251,7 @@ class EditorCompanionBinding(QObject):
             self.caption_dialog=CaptionDialog(self)
         self.caption_dialog.editor_key=key
         self.run_caption(lambda:self.controller.caption_context(current.moment_id,current.moment_revision,cancel=self.cancel),
-                         'Reading the active Moment caption context…',on_finished=self.caption_dialog.refresh,cancellable=True)
+                         'Reading the active Moment caption context...',on_finished=self.caption_dialog.refresh,cancellable=True)
         self.caption_dialog.show()
 
     def run_caption(self,operation,message,*,on_finished,on_error=None,cancellable=False,on_started=None):

@@ -104,7 +104,7 @@ class WorkspaceEditorController:
 
     def __init__(self, workspace, *, helper, editor, python,
                  creation_timeout_seconds=120, readiness_seconds=30, managed_exit=False,
-                 close_wait_seconds=10, caption_runtime=None):
+                 close_wait_seconds=10, caption_runtime=None, export_runtime=None):
         require(type(workspace) is WorkspaceLibrary, 'Use the canonical WorkspaceLibrary owner')
         require(type(helper) is QualifiedCreatorKitHelper and type(editor) is QualifiedEditor,
                 'Explicit qualified helper and editor configuration are required')
@@ -130,6 +130,10 @@ class WorkspaceEditorController:
         self._profile_id = self._scene_key = None
         self._blocked_reason = None
         self._view = EditorOutcome('idle', 'No native editor is open.')
+        self._exports = None
+        if export_runtime is not None:
+            from native.services.workspace_exports import WorkspaceExports
+            self._exports = WorkspaceExports(self, export_runtime)
         self._captions = None
         if caption_runtime is not None:
             from native.services.workspace_captions import WorkspaceCaptions
@@ -145,7 +149,8 @@ class WorkspaceEditorController:
         return (self._view.state == 'open' and self._session is not None
                 and self._retained_owner is None and self._blocked_reason is None
                 and not self._quit_attempted
-                and not (self._captions is not None and self._captions.unsettled))
+                and not (self._captions is not None and self._captions.unsettled)
+                and not (self._exports is not None and self._exports.unsettled))
 
     def _view_update(self, state, message, *, error=UNCHANGED, owner=None, receipt=None):
         with self._state_lock:
@@ -156,7 +161,8 @@ class WorkspaceEditorController:
                 can_close_editor=self._session is not None and self._retained_owner is None and self._blocked_reason is None and not self._busy,
                 can_cleanup=self._retained_owner is not None and not self._busy,
                 app_close_allowed=not self._busy and self._session is None and self._retained_owner is None
-                    and not (self._captions is not None and self._captions.unsettled),
+                    and not (self._captions is not None and self._captions.unsettled)
+                    and not (self._exports is not None and self._exports.unsettled),
                 error_type=(self._view.error_type if error is UNCHANGED else
                             type(error).__name__ if error is not None else None),
                 stop_receipt=immutable(receipt) if receipt is not None else self._view.stop_receipt)
@@ -170,7 +176,7 @@ class WorkspaceEditorController:
                     and self._blocked_reason is not None and not self._publication_attempted and not self._busy)
             return self._view
 
-    def _run(self, operation):
+    def _run(self, operation, *, export_cleanup=False):
         if threading.current_thread() is threading.main_thread():
             return replace(self.status(), state='blocked', message='Editor operations require a background owner.',
                            error_type='RuntimeError')
@@ -181,6 +187,8 @@ class WorkspaceEditorController:
         self._view_update(self._view.state, self._view.message)
         refusal = None
         try:
+            if self._exports is not None and self._exports.unsettled and not export_cleanup:
+                raise OperationRefused("Stop the retained export before another editor operation")
             operation()
         except OperationRefused as error:
             refusal = str(error)
@@ -402,33 +410,35 @@ class WorkspaceEditorController:
         return self._run(operation)
 
     def checkpoint(self):
-        def operation():
-            self._caption_normal_admission()
-            if not self._document_is_open():
-                raise OperationRefused('A verified open editor is required')
-            self._assert_facts(verify=True)
-            self._assert_publication_base()
-            revision, links = self._inspect()
+        return self._run(self._checkpoint_open)
+
+    def _checkpoint_open(self):
+        self._caption_normal_admission()
+        if not self._document_is_open():
+            raise OperationRefused('A verified open editor is required')
+        self._assert_facts(verify=True)
+        self._assert_publication_base()
+        revision, links = self._inspect()
+        self._assert_facts()
+        try:
+            details = {}
+            snapshot, working = publish_checkpoint(self._store, self._session.bridge, self._view.working,
+                native_revision=revision, links_revisions=links, engine_version=self.editor.version,
+                capture_details=details)
+            self._view = replace(self._view, snapshot=snapshot, working=working)
+            self._session.working = working
+            if self.managed_exit:
+                content_hash = details['validation'].get('projectContentSHA256')
+                require(sha(content_hash), 'The qualified native content fingerprint is absent')
+                self._checkpoint_digest = content_hash
+                self._lifecycle.update(state='open', generation=snapshot.generation, revision=snapshot.revision,
+                                       checkpoint_content_sha256=content_hash)
             self._assert_facts()
-            try:
-                details = {}
-                snapshot, working = publish_checkpoint(self._store, self._session.bridge, self._view.working,
-                    native_revision=revision, links_revisions=links, engine_version=self.editor.version,
-                    capture_details=details)
-                self._view = replace(self._view, snapshot=snapshot, working=working)
-                self._session.working = working
-                if self.managed_exit:
-                    content_hash = details['validation'].get('projectContentSHA256')
-                    require(sha(content_hash), 'The qualified native content fingerprint is absent')
-                    self._checkpoint_digest = content_hash
-                    self._lifecycle.update(state='open', generation=snapshot.generation, revision=snapshot.revision,
-                                           checkpoint_content_sha256=content_hash)
-                self._assert_facts()
-            except Exception as error:
-                self._blocked_reason = str(error)
-                raise
-            self._view_update('open', 'Native checkpoint saved.', error=None)
-        return self._run(operation)
+        except Exception as error:
+            self._blocked_reason = str(error)
+            raise
+        self._view_update('open', 'Native checkpoint saved.', error=None)
+        return revision, links
 
     def _cleanup_owner(self):
         owner, kind = self._retained_owner, self._retained_kind
@@ -498,7 +508,7 @@ class WorkspaceEditorController:
                 'The final native document contains an unadmitted source dependency')
 
     def _settle_exit(self):
-        self._caption_normal_admission()
+        self._caption_normal_admission(refresh_native=False)
         session = self._session or self._retained_owner
         require(session is not None and self._retained_kind in (None, 'session'),
                 'The original native session owner is required')
@@ -645,9 +655,9 @@ class WorkspaceEditorController:
             self._settle_exit()
         return self._run(operation)
 
-    def _caption_normal_admission(self):
+    def _caption_normal_admission(self, *, refresh_native=True):
         if self._captions is not None:
-            if not self._captions.unsettled:self._captions.refresh_barrier()
+            if refresh_native and not self._captions.unsettled:self._captions.refresh_barrier()
             if self._captions.unsettled:
                 raise OperationRefused('Settle the retained caption operation or use its exact Check editor before checkpoint or normal close')
 

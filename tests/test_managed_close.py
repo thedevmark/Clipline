@@ -189,6 +189,20 @@ class SafeCloseTests(unittest.TestCase):
         self.assertFalse((self.store.directory / 'editor-lifecycle.json').exists())
         self.assert_writable()
 
+    def test_caption_admission_does_not_query_the_editor_after_quit(self):
+        self.assertEqual(self.open().state, 'open')
+        session = self.sessions[0]
+        def refresh():
+            if session.closed:
+                raise session_module.SessionUnavailable('The native editor is not usable')
+        captions = SimpleNamespace(unsettled=False, refresh_barrier=refresh)
+        with patch.object(self.controller, '_captions', captions):
+            outcome = self.save_close()
+        self.assertEqual(outcome.state, 'closed', outcome.message)
+        self.assertTrue(outcome.app_close_allowed)
+        self.assertEqual(session.quit_calls, 1)
+        self.assertEqual(session.stops, 0)
+
     def test_late_prompt_save_publishes_exact_final_saved_artifact(self):
         self.open()
         self.sessions[0].quit_mode = 'late_save'

@@ -14,10 +14,10 @@ class EditorRuntime:
     python: Path
     managed_exit: bool = False
 
-    def controller(self, workspace, *, caption_runtime=None):
+    def controller(self, workspace, *, caption_runtime=None, export_runtime=None):
         from native.services.workspace_editor import WorkspaceEditorController
         return WorkspaceEditorController(workspace, helper=self.helper, editor=self.editor,
-                                         python=self.python, managed_exit=self.managed_exit, caption_runtime=caption_runtime)
+                                         python=self.python, managed_exit=self.managed_exit, caption_runtime=caption_runtime, export_runtime=export_runtime)
 
 
 def _object(pairs):
