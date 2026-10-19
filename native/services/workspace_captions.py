@@ -12,6 +12,7 @@ from native.services.caption_worker.client import CaptionClient
 from native.services.durable_captions import DurableCaptionRunner
 from native.services.moment_captions import MomentCaptionSelector
 from native.services.caption_timing import TimingRepairController, TimingInputError
+from native.services.caption_runtime import configured_caption_runtimes
 from native.services.native_captions import read_native_pin
 from native.core.moment_captions import _evidence
 import hashlib, os
@@ -44,11 +45,16 @@ class CaptionOutcome:
     can_generate: bool = False
     can_accept: bool = False
     can_cleanup: bool = False
+    profile_choices: tuple = ()
+    profile_sha256: str | None = None
 
 
 class WorkspaceCaptions:
     def __init__(self, editor, runtime):
-        self.editor, self.runtime = editor, runtime
+        self.editor = editor
+        self.runtimes = configured_caption_runtimes(runtime)
+        self.runtime = self.runtimes[0]
+        runtime = self.runtime
         self.directory = editor.workspace.directory / 'captions'
         self.preparer = CaptionAudioPreparer(runtime.ffmpeg[0],runtime.ffprobe[0],python=runtime.python[0])
         self.client = CaptionClient(runtime.python[0],runtime.worker[0])
@@ -171,11 +177,25 @@ class WorkspaceCaptions:
         if self._adapter.barrier.exists():self._native_uncertain=True
         return self._adapter
 
-    def context(self,moment_id,revision,*,cancel=None):
+    def context(self,moment_id,revision,*,cancel=None,profile_sha256=None):
         def operation():
             e=self._admit();f=e._facts
             require((moment_id,revision)==(f.moment.id,f.moment.revision),'Select the active Moment revision')
-            self.runtime.verify()
+            require(profile_sha256 is None or not self.unsettled,
+                    'Settle the retained caption operation before changing profiles.')
+            previous_repair = self._view.repair if self._context == self._identity() else None
+            selected = self.runtime
+            if profile_sha256 is not None:
+                choices = [r for r in self.runtimes if r.profile[1] == profile_sha256]
+                require(len(choices) == 1, 'Choose one of the configured caption profiles.')
+                selected = choices[0]
+            selected.verify()
+            if selected is not self.runtime:
+                # Dispatch admits a switch only after the prior owners settle.
+                self.preparer = CaptionAudioPreparer(selected.ffmpeg[0],selected.ffprobe[0],python=selected.python[0])
+                self.client = CaptionClient(selected.python[0],selected.worker[0])
+                self.runner = None
+                self.runtime = selected
             owner,choices=self._discover()
             native_pin=read_native_pin(e._session.bridge,owner)
             metadata=e._session.bridge.execute('metadata.get',{'item':owner})['metadata'].get('clipline.acceptedCaptions.v1')
@@ -194,10 +214,16 @@ class WorkspaceCaptions:
                 self._tracks=[self._track(g,g['tracks'][0]['id']) for g in choices] if all(len(g['tracks'])==1 for g in choices) else None
             self._view=CaptionOutcome('ready','Choose the audio and caption tracks, then generate a proposal.',
                 context_token=self._token,title=f.moment.title,source_range=(f.moment.source_in_us,f.moment.source_out_us),
-                profile_name=self.runtime.display_name,track_choices=tuple(copy(choices)),tracks=tuple(copy(self._tracks or [])))
+                profile_name=self.runtime.display_name,track_choices=tuple(copy(choices)),tracks=tuple(copy(self._tracks or [])),
+                profile_choices=tuple({'sha256':r.profile[1],'name':r.display_name} for r in self.runtimes),
+                profile_sha256=self.runtime.profile[1])
             # Reopen follows the exact native accepted pin; never infer a newer canonical head.
             if native_pin is not None:
-                repair=self._repair_adapter().load(native_pin['transcript_id'],native_pin['revision'])
+                repair_revision = native_pin['revision']
+                if (profile_sha256 is not None and previous_repair is not None
+                        and previous_repair.transcript_id == native_pin['transcript_id']):
+                    repair_revision = previous_repair.revision
+                repair=self._repair_adapter().load(native_pin['transcript_id'],repair_revision)
                 self._remember_repair(repair)
             with CreatorLibrary(e.workspace.database) as library:
                 saved=library.caption_selections.selected(moment_id,revision)
@@ -286,7 +312,7 @@ class WorkspaceCaptions:
                     expected_selection_revision=expected_choice,job_id=job['id'],**refs)
                 proposal=self._proposal(library,selected)
                 self._selection_revision=selected['selection_revision']
-            return self._outcome('proposal','Review these generated words. Accepted corrections remain unchanged.',proposal=proposal,repair=None,can_accept=True,can_generate=True)
+            return self._outcome('proposal','Review these generated words. Accepted corrections remain unchanged.',proposal=proposal,can_accept=True,can_generate=True)
         return self.dispatch(operation)
 
     def accept(self,token,job_id,transcript_id,hypothesis_id,alignment_id,*,expected_revision=0,tracks=None):

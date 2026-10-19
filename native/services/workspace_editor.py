@@ -664,8 +664,8 @@ class WorkspaceEditorController:
     def caption_status(self):
         return self._captions.status() if self._captions is not None else None
 
-    def caption_context(self,expected_moment_id,expected_moment_revision,*,cancel=None):
-        return self._captions.context(expected_moment_id,expected_moment_revision,cancel=cancel)
+    def caption_context(self,expected_moment_id,expected_moment_revision,*,cancel=None,profile_sha256=None):
+        return self._captions.context(expected_moment_id,expected_moment_revision,cancel=cancel,profile_sha256=profile_sha256)
 
     def generate_captions(self,context_token,selection,*,cancel=None):
         return self._captions.generate(context_token,selection,cancel=cancel)

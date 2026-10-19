@@ -65,3 +65,19 @@ def load_caption_runtime(path):
     if rules['minDurationUs'] > rules['maxDurationUs'] or not isinstance(settings,str) or len(settings)>1024 or any(ord(c)<32 for c in settings):
         raise ValueError('Invalid explicit caption projection settings')
     return CaptionRuntime(title,*programs,json.dumps(projection,allow_nan=False),json.dumps(assets,allow_nan=False))
+
+
+def configured_caption_runtimes(value):
+    runtimes = tuple(value) if isinstance(value, (tuple, list)) else (value,)
+    if not 1 <= len(runtimes) <= 4:
+        raise ValueError('Configure between one and four local caption profiles.')
+    pins = [runtime.profile[1] for runtime in runtimes]
+    if len(set(pins)) != len(pins):
+        raise ValueError('Each configured caption profile must have a different identity.')
+    return runtimes
+
+
+def load_caption_runtimes(paths):
+    if not 1 <= len(paths) <= 4:
+        raise ValueError('Configure between one and four local caption profiles.')
+    return configured_caption_runtimes(tuple(load_caption_runtime(path) for path in paths))

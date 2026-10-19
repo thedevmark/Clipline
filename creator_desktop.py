@@ -17,7 +17,7 @@ def main(argv=None):
                         help='Explicit qualified local editor/helper identities for the native companion')
     parser.add_argument('--intake-runtime-manifest', type=Path,
                         help='Explicit qualified local source-download identities and public Twitch client ID')
-    parser.add_argument('--caption-runtime-manifest',type=Path,help='Explicit local caption worker/profile/tool identities; no automatic installation')
+    parser.add_argument('--caption-runtime-manifest',type=Path,action='append',help='Explicit local caption runtime; repeat for selectable profiles, with no automatic installation')
     parser.add_argument("--export-runtime-manifest",type=Path,help="Explicit qualified native dual-export identities")
     args = parser.parse_args(argv)
     editor_runtime = intake_runtime = caption_runtime = export_runtime = None
@@ -36,8 +36,8 @@ def main(argv=None):
             parser.error('The source-download runtime configuration could not be loaded.')
     if args.caption_runtime_manifest is not None:
         if editor_runtime is None:parser.error('Caption workflow requires the active native editor runtime.')
-        from native.services.caption_runtime import load_caption_runtime
-        try:caption_runtime=load_caption_runtime(args.caption_runtime_manifest)
+        from native.services.caption_runtime import load_caption_runtimes
+        try:caption_runtime=load_caption_runtimes(args.caption_runtime_manifest)
         except Exception:parser.error('The caption runtime configuration could not be loaded.')
     if args.export_runtime_manifest is not None:
         if editor_runtime is None:parser.error("Export requires the active native editor runtime.")

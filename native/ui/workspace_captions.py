@@ -32,6 +32,8 @@ class CaptionDialog(QDialog):
         self.status=label('Loading the active Moment…');body.addWidget(self.status)
         self.tabs=QTabWidget();body.addWidget(self.tabs,1)
         review=QWidget();layout=QVBoxLayout(review);layout.setSpacing(4)
+        self.profile_choice=QComboBox();self.profile_choice.setAccessibleName('Transcription profile for the next proposal')
+        self.profile_choice.currentIndexChanged.connect(self._profile_changed);layout.addWidget(self.profile_choice)
         self.profile=label();layout.addWidget(self.profile)
         self.audio=QComboBox();self.audio.setAccessibleName('Actual source audio stream and channels');layout.addWidget(self.audio)
         self.tracks=QWidget();self.tracks_layout=QVBoxLayout(self.tracks);self.tracks_layout.setContentsMargins(0,0,0,0);layout.addWidget(self.tracks)
@@ -39,7 +41,7 @@ class CaptionDialog(QDialog):
         self.text.setAccessibleName('Generated proposal text');layout.addWidget(self.text,1)
         self.evidence=label();layout.addWidget(self.evidence)
         row=QHBoxLayout()
-        self.reload_context=QPushButton('Reload context');self.reload_context.clicked.connect(self._reload_context);row.addWidget(self.reload_context)
+        self.reload_context=QPushButton('Reload context');self.reload_context.clicked.connect(lambda:self._reload_context());row.addWidget(self.reload_context)
         self.generate=QPushButton('Generate locally');self.generate.clicked.connect(self._generate);row.addWidget(self.generate)
         self.accept=QPushButton('Accept these words');self.accept.clicked.connect(self._accept);row.addWidget(self.accept)
         self.cancel=QPushButton('Cancel generation');self.cancel.clicked.connect(host._cancel_open);row.addWidget(self.cancel)
@@ -84,7 +86,14 @@ class CaptionDialog(QDialog):
         if outcome.analysis_range and outcome.analysis_range!=outcome.source_range:
             text+=f' · Analysis: {source_seconds(outcome.analysis_range[0])}–{source_seconds(outcome.analysis_range[1])}'
         self.range.setText(text);self.status.setText(outcome.message)
-        self.profile.setText(outcome.profile_name+' · Local evaluation profile; words and timing need your review.')
+        self.profile.setText(outcome.profile_name+' · Profile for the next proposal. Accepted corrections stay unchanged.')
+        self.profile_choice.blockSignals(True)
+        self.profile_choice.clear()
+        for choice in outcome.profile_choices:
+            self.profile_choice.addItem(choice['name'],choice['sha256'])
+            if choice['sha256']==outcome.profile_sha256:self.profile_choice.setCurrentIndex(self.profile_choice.count()-1)
+        self.profile_choice.blockSignals(False)
+        self.profile_choice.setVisible(len(outcome.profile_choices)>1)
         if previous is None or previous.context_token!=outcome.context_token:
             self.audio.clear()
             for stream in outcome.streams:
@@ -128,22 +137,33 @@ class CaptionDialog(QDialog):
         self.observe.setVisible(bool(out and out.can_cleanup));self.cleanup.setVisible(bool(out and out.can_cleanup))
         self.observe.setEnabled(not busy);self.cleanup.setEnabled(not busy)
         self.reload_context.setEnabled(not busy and not bool(out and out.requires_reconciliation and out.can_cleanup))
+        self.profile_choice.setEnabled(bool(out and not busy and not dirty and not out.requires_reconciliation))
         self.audio.setEnabled(not busy)
         for button in self.monitor_buttons:button.setEnabled(bool(out and out.context_token and not busy and not out.requires_reconciliation))
         for box in self.track_boxes:box.setEnabled(not busy and not bool(out and out.repair))
         self.repair.set_busy(busy)
         self.repair.table.setEnabled(not busy and not dirty)
 
-    def _reload_context(self):
+    def _profile_changed(self):
+        pin=self.profile_choice.currentData()
+        if self.outcome is not None and pin is not None and pin!=self.outcome.profile_sha256:
+            self._reload_context(profile_sha256=pin)
+
+    def _reload_context(self,*,profile_sha256=None):
         word=self.repair.selected_word()
         dirty=word is not None and (self.repair.spelling.text()!=word.text
             or self.repair.start_time.text()!=source_seconds(word.start_us)
             or self.repair.end_time.text()!=source_seconds(word.end_us))
         if dirty and QMessageBox.question(self,'Discard unsaved draft?',
             'Reloading caption context discards the unsaved spelling or timing draft. Continue?',
-            QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.Cancel,QMessageBox.StandardButton.Cancel)!=QMessageBox.StandardButton.Yes:return
+            QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.Cancel,QMessageBox.StandardButton.Cancel)!=QMessageBox.StandardButton.Yes:
+            self.refresh(self.outcome,preserve_draft=True);return
         current=self.host.controller.status()
-        self.host.run_caption(lambda:self.host.controller.caption_context(current.moment_id,current.moment_revision,cancel=self.host.cancel),
+        def load_context():
+            kwargs={'cancel':self.host.cancel}
+            if profile_sha256 is not None:kwargs['profile_sha256']=profile_sha256
+            return self.host.controller.caption_context(current.moment_id,current.moment_revision,**kwargs)
+        self.host.run_caption(load_context,
             'Reloading the active caption context…',on_finished=self.refresh,cancellable=True)
 
     def _generate(self):
