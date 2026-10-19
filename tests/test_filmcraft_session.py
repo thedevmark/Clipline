@@ -88,6 +88,53 @@ class OwnerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"changed"):
             n.NativeSession.start(self.store,self.working,bad,python=Path(sys.executable),runs=self.root/"runs")
         self.assertFalse((self.root/"runs").exists())
+
+    def test_launch_command_file_is_protected_before_gate_creation(self):
+        original=n.subprocess.Popen
+        attempted=[]
+        def inspect_launch(argv,*args,**kwargs):
+            intent=Path(argv[-1])
+            if intent.name=="intent.json":
+                encoded=intent.read_bytes()
+                try:
+                    with intent.open("r+b") as stream:stream.write(encoded)
+                except PermissionError:attempted.append("denied")
+                else:attempted.append("mutable")
+            return original(argv,*args,**kwargs)
+        with patch.object(n.subprocess,"Popen",inspect_launch):s=self.launch()
+        self.assertEqual(attempted,["denied"])
+        self.assertTrue(s.bridge.execute("project.inspect")["fixtureOnly"])
+
+    def test_unknown_stop_retains_input_guard_and_queryable_job_until_verified(self):
+        s=self.launch()
+        intent=s.directory/"intent.json"
+        original=s.tree.stop
+        def unknown():
+            proof=original();proof["disposition"]="unknown";proof["active_processes"]=None
+            return proof
+        with patch.object(s.tree,"stop",unknown):s.stop()
+        self.assertIsNotNone(s.tree.job)
+        with self.assertRaises(PermissionError):
+            with intent.open("r+b") as stream:stream.write(b" ")
+        final=s.stop()
+        self.assertEqual(final["scope"]["disposition"],"stopped")
+        self.assertEqual(final["scope"]["active_processes"],0)
+        self.assertIsNone(s.tree.job)
+        with intent.open("r+b") as stream:stream.write(b" ")
+        self.assertFalse((self.working.path.parent/"editor-owner-uncertain.json").exists())
+
+    def test_launch_intent_changed_before_guard_refuses_without_process(self):
+        original=n.NativeSession._guard_input
+        def before_guard(owner,path):
+            if path.name=="intent.json":
+                with path.open("ab") as stream:stream.write(b" ")
+            return original(owner,path)
+        with patch.object(n.NativeSession,"_guard_input",before_guard), \
+                patch.object(n.subprocess,"Popen") as launch:
+            with self.assertRaisesRegex(n.SessionError,"intent changed") as caught:self.launch()
+        launch.assert_not_called()
+        self.assertEqual(caught.exception.owner.stop_receipt["scope"]["disposition"],"never_started")
+        self.assert_preserved()
     def test_stale_publication_base_does_not_launch(self):
         self.store.publish(b"new opaque generation",expected_generation=self.seed.generation,revision=2,engine="filmcraft",engine_version="fixture",suffix=".fcproj")
         with self.assertRaisesRegex(ValueError,"base changed"):self.launch()

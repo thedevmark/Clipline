@@ -6,6 +6,7 @@ That does not remove the check/connect race or authenticate later bridge calls.
 No timeline, save retry, process adoption, or crash reconciliation lives here.
 """
 from __future__ import annotations
+from contextlib import ExitStack
 from dataclasses import dataclass
 import ctypes as c
 from ctypes import wintypes as w
@@ -15,6 +16,7 @@ import socket, subprocess, sys, time, uuid
 from native.services.filmcraft_bridge import FilmcraftBridge, EditorUnavailable, OutcomeUnknown
 from native.services.native_checkpoint import WorkingCopy, MAX_DOCUMENT
 from native.services.caption_worker.process_tree import ProcessTree
+from native.services.caption_audio import _source_read_guard
 
 class SessionError(RuntimeError):
     def __init__(self, reason, directory=None, *, owner=None, cleanup_error=None):
@@ -46,9 +48,11 @@ def digest(path):
     return h.hexdigest()
 
 def write_once(path, value):
-    with path.open("x",encoding="utf8") as stream:
-        json.dump(value,stream,ensure_ascii=False,allow_nan=False,indent=2)
+    encoded=json.dumps(value,ensure_ascii=False,allow_nan=False,indent=2).encode("utf8")
+    with path.open("xb") as stream:
+        stream.write(encoded)
         stream.flush();os.fsync(stream.fileno())
+    return encoded
 
 def listener_pids(port):
     """Read IPv4 LISTEN owner PIDs from the Windows TCP table; no PID adoption."""
@@ -124,7 +128,8 @@ class NativeSession:
         if current is None or current.engine!="filmcraft" or current.generation!=working.base_generation or current.revision!=working.base_revision:
             raise ValueError("The working copy publication base changed")
         self=cls();self.working=working;self.editor=editor;self.path=path;self.process=None;self.tree=None;self._bridge=None
-        self._stopped=False;self._files=[];self._lock=None;self.child_pid=None
+        self._stopped=False;self._stop_final=False;self._files=[];self._lock=None;self.child_pid=None
+        self._input_guards=ExitStack()
         self.directory=Path(runs).resolve()/str(uuid.uuid4())
         self.directory.mkdir(parents=True,exist_ok=False)
         (self.directory/"data").mkdir()
@@ -140,12 +145,18 @@ class NativeSession:
                 reserve.bind(("127.0.0.1",0));self.port=reserve.getsockname()[1]
                 argv=editor.command(self.port,self.directory/"data",path)
                 gate=Path(__file__).with_name("filmcraft_launch_gate.py")
-                write_once(self.directory/"intent.json",{"schema":1,"working":str(path),"working_sha256":self.initial_hash,
+                for launch_input in dict.fromkeys((editor.path,python,gate)):
+                    self._guard_input(launch_input)
+                editor.verify()
+                intent=write_once(self.directory/"intent.json",{"schema":1,"working":str(path),"working_sha256":self.initial_hash,
                     "base_generation":working.base_generation,"base_revision":working.base_revision,
                     "editor":{"path":str(editor.path),"sha256":editor.sha256,"version":editor.version},
                     "helper":{"python":str(python),"python_sha256":digest(python),"gate_sha256":digest(gate)},
                     "argv":argv,"child_receipt":str(self.directory/"child.json"),
                     "control_authentication":"none","port_binding_race":"unresolved"})
+                self._guard_input(self.directory/"intent.json")
+                if (self.directory/"intent.json").read_bytes()!=intent:
+                    raise SessionError("Native launch intent changed before admission")
                 out=(self.directory/"stdout.log").open("xb");self._files.append(out)
                 err=(self.directory/"stderr.log").open("xb");self._files.append(err)
                 env=os.environ.copy()
@@ -237,6 +248,11 @@ class NativeSession:
             self._lock.close();self._lock=None
             raise SessionError("A prior uncertain process scope requires reconciliation",self.directory)
 
+    def _guard_input(self,path):
+        protected=_source_read_guard(path)
+        if protected is not None:
+            self._input_guards.callback(protected[0].CloseHandle,protected[1])
+
     def _assert_usable(self):
         if self._stopped or self._bridge is None or self.process.poll() is not None:
             raise SessionError("The native editor is not usable",self.directory)
@@ -250,14 +266,15 @@ class NativeSession:
 
     def stop(self):
         """Terminate only the owned scope. Keep working bytes, recovery data and receipts."""
-        if self._stopped:return self.stop_receipt
+        if self._stop_final:return self.stop_receipt
         self._stopped=True;self._bridge=None
         proof={"disposition":"never_started","active_processes":0}
         try:
             if self.tree:
                 try:proof=self.tree.stop()
                 except Exception as exc:proof={"disposition":"unknown","reason":str(exc)[:2000]}
-                finally:self.tree.close()
+                if proof.get("disposition")=="stopped" and proof.get("active_processes")==0:
+                    self.tree.close()
             elif self.process:
                 # A gated process can create no descendants before successful attachment.
                 try:self.process.kill();self.process.wait(timeout=5)
@@ -270,7 +287,14 @@ class NativeSession:
         finally:
             for stream in self._files:stream.close()
             marker=self.path.parent/"editor-owner-uncertain.json"
-            if proof["disposition"] in ("stopped","never_started"):
+            self._stop_final=proof["disposition"] in ("stopped","never_started") and proof.get("active_processes")==0
+            # Without successful attachment the stdin gate was never released.
+            # A reaped gate has no native reader, even though scope admission
+            # remains quarantined rather than claiming Job Object proof.
+            gate_reaped=self.tree is None and self.process is not None and self.process.poll() is not None
+            if self._stop_final or gate_reaped:
+                self._input_guards.close()
+            if self._stop_final:
                 try:
                     marker_data=json.loads(marker.read_text(encoding="utf8"))
                     if not isinstance(marker_data,dict):raise ValueError("Quarantine marker must be an object")
@@ -285,6 +309,8 @@ class NativeSession:
         self.stop_receipt={"schema":1,"scope":proof,"exit_code":self.process.returncode if self.process else None,
             "working_sha256":working_hash,"data_retained":str(self.directory/"data"),
             "streams_closed":all(x.closed for x in self._files)}
-        try:write_once(self.directory/"stop.json",self.stop_receipt)
+        stop_path=self.directory/"stop.json"
+        if stop_path.exists():stop_path=self.directory/("stop-"+str(uuid.uuid4())+".json")
+        try:write_once(stop_path,self.stop_receipt)
         except OSError as exc:raise SessionError("Native stop evidence could not be retained",self.directory) from exc
         return self.stop_receipt

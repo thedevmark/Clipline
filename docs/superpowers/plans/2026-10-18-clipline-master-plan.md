@@ -232,7 +232,7 @@ Retain a single chosen prototype and its evidence. If no foundation satisfies co
 
 ### Acceptance and handoff
 
-For every R01-R18 row, retain implementation owner, check command/manual path, revision, evidence location, outcome, and unresolved limitations. Carry forward the technical specification's A01-A20 checks and add Kit/version/relink, archive-scale, caption-repair, silence/overlap, transition handles, creative-policy provenance, and CTA tests.
+For every R01-R19 row, retain implementation owner, check command/manual path, revision, evidence location, outcome, and unresolved limitations. Carry forward the technical specification's A01-A20 checks and add Kit/version/relink, archive-scale, caption-repair, silence/overlap, transition handles, creative-policy provenance, and CTA tests.
 
 Independent reviews occur at schema/command boundaries, caption integration, creative-to-export integration, and the release candidate. A reviewer must distinguish source-confirmed from test-confirmed behavior. Do not call a locally verified media file a posted clip. Homebase folder delivery, Homebase ingestion, platform submission, and live published behavior need their own receipts.
 
