@@ -20,6 +20,7 @@ from typing import Any
 from native.core.twitch_inbox import TwitchClip, timestamp_identity
 from native.core.accepted_transcript import AcceptedTranscriptStore, install_schema as install_caption_schema
 from native.core.durable_jobs import DurableJobs, install_schema as install_job_schema
+from native.core.moment_captions import MomentCaptionSelections, install_schema as install_moment_caption_schema
 
 
 class LibraryError(ValueError):
@@ -311,6 +312,8 @@ class CreatorLibrary:
             self._install_twitch_source_schema()
             self.jobs = DurableJobs(self.connection)
             self._install_moment_origin_schema()
+            install_moment_caption_schema(self.connection)
+            self.caption_selections = MomentCaptionSelections(self)
         except Exception:
             self.connection.close()
             raise

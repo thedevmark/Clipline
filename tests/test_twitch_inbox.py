@@ -131,10 +131,11 @@ class TwitchLibraryTests(unittest.TestCase):
             old.execute("INSERT INTO kits VALUES ('kit-existing',1)")
             old.execute("INSERT INTO kit_versions VALUES ('kit-existing',1,?)", ('{"name":"Existing Kit"}',))
             old.commit()
-        from native.core import accepted_transcript, durable_jobs
+        from native.core import accepted_transcript, durable_jobs, moment_captions
         migration_paths = {
             Path(accepted_transcript.__file__).with_name("caption_schema.sql"),
             Path(durable_jobs.__file__).with_name("durable_jobs_schema.sql"),
+            Path(moment_captions.__file__).with_name("moment_caption_schema.sql"),
         }
         original_open = Path.open
 

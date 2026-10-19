@@ -12,12 +12,14 @@ if sys.stdin.buffer.readline(32) != b'start\n':
 listener = socket.socket()
 listener.bind(('127.0.0.1', 0))
 listener.listen(8)
-(root / 'ready.json').write_text(json.dumps({'port': listener.getsockname()[1]}))
 state = {'pin': data['pin'], 'input': data['projection'], 'revision': 12}
 
 def persist():
     (root / 'state.json').write_text(json.dumps(state))
 persist()
+ready = root / 'ready.json.part'
+ready.write_text(json.dumps({'port': listener.getsockname()[1]}))
+os.replace(ready, root / 'ready.json')
 while True:
     conn, _ = listener.accept()
     with conn:

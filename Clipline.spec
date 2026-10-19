@@ -36,6 +36,7 @@ datas = [
     ("THIRD_PARTY_NOTICES.txt", "."),
     ("native/core/caption_schema.sql", "native/core"),
     ("native/core/durable_jobs_schema.sql", "native/core"),
+    ("native/core/moment_caption_schema.sql", "native/core"),
     ("native/services/caption_audio_gate.py", "native/services"),
     ("native/services/filmcraft_launch_gate.py", "native/services"),
 ]
