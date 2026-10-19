@@ -1,4 +1,5 @@
+# Preserve fingerprinted patch bytes, including qualified CRLF source content.
 # Patch context uses a required single space on unchanged blank lines.
-*.patch text eol=lf whitespace=-blank-at-eol
+*.patch -text whitespace=-blank-at-eol
 # The explicit runtime binds the native source pin's exact bytes.
 pin.json text eol=lf
