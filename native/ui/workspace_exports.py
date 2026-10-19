@@ -24,7 +24,7 @@ class ExportDialog(QDialog):
         buttons=QHBoxLayout();self.start=QPushButton('Save and export both');self.start.clicked.connect(self._start);buttons.addWidget(self.start)
         self.stop=QPushButton('Stop retained export');self.stop.clicked.connect(self._cleanup);buttons.addWidget(self.stop)
         self.cancel=QPushButton('Cancel export');self.cancel.clicked.connect(self._cancel);buttons.addWidget(self.cancel)
-        self.done=QPushButton('Done');self.done.clicked.connect(self.accept);buttons.addWidget(self.done);body.addLayout(buttons)
+        self.done_button=QPushButton('Done');self.done_button.clicked.connect(self.accept);buttons.addWidget(self.done_button);body.addLayout(buttons)
         self.controls()
 
     def _choose(self):
@@ -40,7 +40,7 @@ class ExportDialog(QDialog):
         self.stop.setVisible(service.unsettled);self.stop.setEnabled(available and not b.busy and service.unsettled)
         self.cancel.setVisible(b.busy and b.cancel_label=='Cancel export')
         self.cancel.setEnabled(b.cancel is not None and not b.cancel.is_set())
-        self.done.setEnabled(not b.busy)
+        self.done_button.setEnabled(not b.busy)
 
     def _start(self):
         if not self.folder.text().strip():self.status.setText('Choose an output folder first.');return
