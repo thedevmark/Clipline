@@ -30,7 +30,7 @@ class JobTests(unittest.TestCase):
     def finish(self,job,outcome="completed"):
         return self.store.finish(job["id"],expected_revision=job["revision"],claim_token=job["claim_token"],outcome=outcome,evidence_ref=ref())
     def test_same_library_schema_and_original_preserved(self):
-        self.assertEqual(self.lib.connection.execute("PRAGMA user_version").fetchone()[0],3)
+        self.assertEqual(self.lib.connection.execute("PRAGMA user_version").fetchone()[0],4)
         m.install_schema(self.lib.connection)
         self.submit();self.assertEqual(self.source.read_bytes(),b"shared original fixture")
         self.assertEqual(self.lib.connection.execute("SELECT count(*) FROM assets").fetchone()[0],1)

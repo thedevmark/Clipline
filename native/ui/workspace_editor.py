@@ -1,4 +1,5 @@
 """Bind one canonical native editor owner to the persistent library companion."""
+from collections import Counter
 import threading
 from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtWidgets import (
@@ -23,8 +24,19 @@ class LayoutSelection(QDialog):
         body.addWidget(kit)
         self.layouts = QComboBox()
         self.layouts.setAccessibleName('Creator Kit layout')
+        self.layouts.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.layouts.setMinimumContentsLength(24)
+        scene_counts = Counter(scene for _,scene in context.profiles)
         for profile, scene in context.profiles:
-            self.layouts.addItem(profile, (profile, scene))
+            text = f'{profile} · {scene}' if scene_counts[scene] > 1 else scene
+            self.layouts.addItem(text, (profile, scene))
+            self.layouts.setItemData(self.layouts.count()-1, f'{scene}\nProfile: {profile}', Qt.ItemDataRole.ToolTipRole)
+        selected = getattr(context, 'selected_layout', None)
+        if selected is not None:
+            for index in range(self.layouts.count()):
+                if self.layouts.itemData(index) == selected:
+                    self.layouts.setCurrentIndex(index)
+                    break
         body.addWidget(QLabel('Layout'))
         body.addWidget(self.layouts)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Open | QDialogButtonBox.StandardButton.Cancel)

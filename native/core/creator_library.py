@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from fractions import Fraction
 import hashlib
 import json
 import math
@@ -143,6 +144,37 @@ CREATE TRIGGER twitch_clip_sources_no_delete BEFORE DELETE ON twitch_clip_source
 PRAGMA user_version=3;
 """
 
+_MOMENT_ORIGIN_SCHEMA = """
+CREATE TABLE moment_twitch_origins (
+ moment_id TEXT PRIMARY KEY REFERENCES moments(id),
+ clip_id TEXT NOT NULL REFERENCES twitch_clip_sources(clip_id),
+ asset_id TEXT NOT NULL REFERENCES assets(id), source_sha256 TEXT NOT NULL, source_bytes INTEGER NOT NULL,
+ selected_metadata TEXT NOT NULL, profile_sha256 TEXT NOT NULL,
+ result_id TEXT NOT NULL, result_sha256 TEXT NOT NULL,
+ job_id TEXT NOT NULL REFERENCES durable_job_intents(id), source_facts TEXT NOT NULL,
+ kit_id TEXT NOT NULL, kit_version INTEGER NOT NULL, kit_descriptor_sha256 TEXT NOT NULL,
+ profile_id TEXT NOT NULL, scene_key TEXT NOT NULL,
+ FOREIGN KEY(kit_id,kit_version) REFERENCES kit_versions(kit_id,version)
+);
+CREATE TRIGGER moment_twitch_origins_no_update BEFORE UPDATE ON moment_twitch_origins BEGIN
+ SELECT RAISE(ABORT,'Moment Twitch origins are immutable'); END;
+CREATE TRIGGER moment_twitch_origins_no_delete BEFORE DELETE ON moment_twitch_origins BEGIN
+ SELECT RAISE(ABORT,'Moment Twitch origins are immutable'); END;
+CREATE TRIGGER moment_twitch_origins_match BEFORE INSERT ON moment_twitch_origins
+WHEN NOT EXISTS (
+ SELECT 1 FROM moments, twitch_clip_sources
+ WHERE moments.id=NEW.moment_id AND moments.source_asset_id=NEW.asset_id
+ AND moments.kit_id=NEW.kit_id AND moments.kit_version=NEW.kit_version
+ AND twitch_clip_sources.clip_id=NEW.clip_id AND twitch_clip_sources.asset_id=NEW.asset_id
+ AND twitch_clip_sources.selected_metadata=NEW.selected_metadata
+ AND twitch_clip_sources.profile_sha256=NEW.profile_sha256
+ AND twitch_clip_sources.result_id=NEW.result_id AND twitch_clip_sources.result_sha256=NEW.result_sha256
+ AND twitch_clip_sources.job_id=NEW.job_id
+)
+BEGIN SELECT RAISE(ABORT,'Moment origin must match the admitted source and initial Kit'); END;
+PRAGMA user_version=4;
+"""
+
 
 def _json(value: Any) -> str:
     def validate_keys(item):
@@ -264,7 +296,7 @@ class CreatorLibrary:
                     if sqlite3.complete_statement(statement):
                         self.connection.execute(statement)
                         statement = ""
-            elif version not in (2, 3):
+            elif version not in (2, 3, 4):
                 raise LibraryError(f"Unsupported library schema version {version}")
             self.connection.execute("COMMIT")
         except Exception:
@@ -278,6 +310,7 @@ class CreatorLibrary:
             install_job_schema(self.connection)
             self._install_twitch_source_schema()
             self.jobs = DurableJobs(self.connection)
+            self._install_moment_origin_schema()
         except Exception:
             self.connection.close()
             raise
@@ -337,7 +370,7 @@ class CreatorLibrary:
     def _install_twitch_source_schema(self) -> None:
         with self._write():
             version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-            if version == 3:
+            if version in (3, 4):
                 return
             if version != 2:
                 raise LibraryError("Twitch source migration requires schema2")
@@ -349,6 +382,22 @@ class CreatorLibrary:
                     statement = ""
             if statement.strip():
                 raise LibraryError("Incomplete Twitch source migration")
+
+    def _install_moment_origin_schema(self) -> None:
+        with self._write():
+            version = self.connection.execute('PRAGMA user_version').fetchone()[0]
+            if version == 4:
+                return
+            if version != 3:
+                raise LibraryError('Moment origin migration requires schema3')
+            statement = ''
+            for line in _MOMENT_ORIGIN_SCHEMA.splitlines(keepends=True):
+                statement += line
+                if sqlite3.complete_statement(statement):
+                    self.connection.execute(statement)
+                    statement = ''
+            if statement.strip():
+                raise LibraryError('Incomplete Moment origin migration')
 
     def twitch_clip(self, clip_id: str) -> TwitchClip:
         _name(clip_id, "clip ID")
@@ -535,18 +584,94 @@ class CreatorLibrary:
 
     def create_moment(self, *, title: str, source_asset_id: str, source_in_us: int,
                       source_out_us: int, kit_id: str, kit_version: int, overrides: dict | None = None) -> Moment:
+        with self._write():
+            moment_id = self._insert_moment(title=title, source_asset_id=source_asset_id,
+                source_in_us=source_in_us, source_out_us=source_out_us,
+                kit_id=kit_id, kit_version=kit_version, overrides=overrides)
+        return self.moment(moment_id)
+
+    def _insert_moment(self, *, title, source_asset_id, source_in_us, source_out_us,
+                       kit_id, kit_version, overrides=None):
         title = _name(title, "moment title")
         if type(source_in_us) is not int or type(source_out_us) is not int or not 0 <= source_in_us < source_out_us:
             raise LibraryError("Source interval requires ordered nonnegative integer microseconds")
         overrides = _properties({} if overrides is None else overrides)
         moment_id = str(uuid.uuid4())
+        self.asset(source_asset_id); kit = self.kit(kit_id, kit_version)
+        if set(overrides) - set(kit["properties"]):
+            raise LibraryError("Local overrides must name existing Kit properties")
+        self.connection.execute("INSERT INTO moments(id,title,source_asset_id,source_in_us,source_out_us,kit_id,kit_version,overrides) VALUES (?,?,?,?,?,?,?,?)",
+                                (moment_id, title, source_asset_id, source_in_us, source_out_us, kit_id, kit_version, _json(overrides)))
+        return moment_id
+
+    def admitted_twitch_source(self, clip_id):
+        """SQL admission only. The caller must separately verify the bounded artifacts and files."""
+        binding = self.twitch_source(clip_id)
+        if binding is None:
+            raise LibraryError('Download and admit the selected Twitch source before preparing a Moment.')
+        selected = TwitchClip(**binding['selected_metadata'])
+        job = self.jobs.job(binding['job_id'])
+        settlement = self.jobs.settlement(binding['job_id'])
+        reference = {'id': binding['result_id'], 'sha256': binding['result_sha256']}
+        if (selected.id != clip_id or job['kind'] != 'io' or job['state'] != 'completed'
+                or job['cancel_requested'] or not job['launch_ref']
+                or job['input']['profile_sha256'] != binding['profile_sha256'] or job['input']['assets']
+                or binding['result_id'] != job['output_set_id'] or not isinstance(settlement, dict)
+                or any(settlement.get(key) != job[field] for key, field in (
+                    ('job_id','id'), ('claim_token','claim_token'),
+                    ('intent_sha256','intent_sha256'), ('output_set_id','output_set_id')))
+                or settlement.get('process_disposition') != 'stopped'
+                or settlement.get('outputs_disposition') != 'verified'
+                or settlement.get('result_ref') != reference or settlement.get('evidence_ref') != reference):
+            raise LibraryError('The saved source is not bound to its completed intake job and verified result.')
+        return binding, self.asset(binding['asset_id']), job, settlement
+
+    def create_twitch_moment(self, *, title, source_in_us, source_out_us, kit_id, kit_version,
+                            profile_id, scene_key, expected_kit_sha256,
+                            expected_binding, expected_asset, verified_source_facts):
+        """Atomically attach the chosen clip origin after background artifact/file verification."""
+        facts = json.loads(_json(verified_source_facts))
+        try:
+            duration = facts['duration']
+            if not isinstance(duration, str) or len(duration) > 64:
+                raise ValueError()
+            bound = Fraction(duration) * 1_000_000
+            if not 0 < bound <= 180_000_000:
+                raise ValueError()
+            duration_us = bound.numerator // bound.denominator
+        except (TypeError, KeyError, ValueError, ZeroDivisionError) as exc:
+            raise LibraryError('Verified source duration is unavailable.') from exc
+        if type(source_out_us) is not int or source_out_us > duration_us:
+            raise LibraryError('The Moment end exceeds the verified source duration bound.')
         with self._write():
-            self.asset(source_asset_id); kit = self.kit(kit_id, kit_version)
-            if set(overrides) - set(kit["properties"]):
-                raise LibraryError("Local overrides must name existing Kit properties")
-            self.connection.execute("INSERT INTO moments(id,title,source_asset_id,source_in_us,source_out_us,kit_id,kit_version,overrides) VALUES (?,?,?,?,?,?,?,?)",
-                                    (moment_id, title, source_asset_id, source_in_us, source_out_us, kit_id, kit_version, _json(overrides)))
+            binding, asset, _, _ = self.admitted_twitch_source(expected_binding['clip_id'])
+            if binding != expected_binding or asset != expected_asset:
+                raise RevisionConflict('The selected source binding changed. Inspect the source again.')
+            record = self.kit_record(kit_id, kit_version)
+            kit = self.kit(kit_id, kit_version)
+            if record.descriptor_sha256 != expected_kit_sha256:
+                raise RevisionConflict('The selected Kit descriptor differs. Select its exact version again.')
+            profiles = [p for p in kit['layout_profiles'] if p['id'] == profile_id and p['scene_key'] == scene_key]
+            if len(profiles) != 1:
+                raise LibraryError('Choose an exact saved OBS scene profile from the selected Kit version.')
+            moment_id = self._insert_moment(title=title, source_asset_id=asset.id,
+                source_in_us=source_in_us, source_out_us=source_out_us, kit_id=kit_id, kit_version=kit_version)
+            self.connection.execute('INSERT INTO moment_twitch_origins VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', (
+                moment_id, binding['clip_id'], asset.id, asset.sha256, asset.bytes,
+                _json(binding['selected_metadata']), binding['profile_sha256'], binding['result_id'],
+                binding['result_sha256'], binding['job_id'], _json(facts), kit_id, kit_version,
+                record.descriptor_sha256, profile_id, scene_key))
         return self.moment(moment_id)
+
+    def moment_origin(self, moment_id):
+        self.moment(moment_id)
+        row = self.connection.execute('SELECT * FROM moment_twitch_origins WHERE moment_id=?', (moment_id,)).fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        for field in ('selected_metadata', 'source_facts'):
+            value[field] = json.loads(value[field])
+        return value
 
     @staticmethod
     def _moment(row: sqlite3.Row) -> Moment:

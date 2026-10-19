@@ -233,6 +233,8 @@ class CreatorLibraryWindow(QMainWindow):
         layout.addWidget(self.message)
         from native.ui.creator_kit_setup import KitSetupBinding
         self.kit_binding = KitSetupBinding(self)
+        from native.ui.source_moment_preparation import MomentPreparationBinding
+        self.moment_preparation_binding = MomentPreparationBinding(self)
         self.load_view('clips')
 
     def selected_entry(self):
@@ -260,7 +262,7 @@ class CreatorLibraryWindow(QMainWindow):
             self._controls()
 
     def _controls(self):
-        for name in ('editor_binding', 'intake_binding', 'kit_binding'):
+        for name in ('editor_binding', 'intake_binding', 'kit_binding', 'moment_preparation_binding'):
             binding = getattr(self, name, None)
             if binding is not None:
                 binding._gate_changed()
@@ -330,6 +332,11 @@ class CreatorLibraryWindow(QMainWindow):
         self.hint.setText(EMPTY[self.kind] if not self.model.entries else '')
         self.hint.setVisible(not self.model.entries)
         self._filter(self.search.text())
+        if page.kind == 'moments' and page.after == 0 and page.context is not None:
+            for row, entry in enumerate(self.model.entries):
+                if entry.id == page.context:
+                    self.table.selectRow(self.proxy.mapFromSource(self.model.index(row,0)).row())
+                    break
         self._controls()
 
     def _page_error(self, error, request):

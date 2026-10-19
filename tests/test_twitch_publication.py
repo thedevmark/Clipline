@@ -79,7 +79,7 @@ def test_completion_publishes_exact_binding_and_reopen(sample):
         assert bound['result_id'] == s['result']['id'] and s['jobs'].resources() == []
     with CreatorLibrary(s['lib'].connection.execute('PRAGMA database_list').fetchone()[2]) as reopened:
         assert reopened.twitch_source(s['clip'].id) == bound
-        assert reopened.connection.execute('PRAGMA user_version').fetchone()[0] == 3
+        assert reopened.connection.execute('PRAGMA user_version').fetchone()[0] == 4
         for sql in ('UPDATE twitch_clip_sources SET clip_id=clip_id', 'DELETE FROM twitch_clip_sources'):
             with pytest.raises(sqlite3.IntegrityError): reopened.connection.execute(sql)
 
@@ -219,7 +219,7 @@ def test_migration_keeps_existing_asset_and_schema_evidence(tmp_path, old_versio
     c.commit(); c.close()
     with CreatorLibrary(db) as lib:
         assert lib.asset(identity).path=='old'
-        assert lib.connection.execute('PRAGMA user_version').fetchone()[0]==3
+        assert lib.connection.execute('PRAGMA user_version').fetchone()[0]==4
 
 
 def test_migration_failure_preserves_version2_and_future_rejected(tmp_path, monkeypatch):
@@ -242,6 +242,9 @@ def test_populated_v2_migration_preserves_all_other_owner_tables(sample):
     tid=str(uuid.uuid4())
     c.execute('INSERT INTO caption_transcripts VALUES(?,?,?,?,?)',(tid,asset.id,asset.sha256,'{}','fixture'))
     c.execute("INSERT INTO caption_revisions VALUES(?,1,NULL,?,'fixture')",(tid,'[]'))
+    # Build an actual schema2 fixture before capturing its old-owner records.
+    assert c.execute('SELECT count(*) FROM moment_twitch_origins').fetchone()[0]==0
+    c.execute('DROP TABLE moment_twitch_origins')
     names=[row[0] for row in c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN ('sqlite_sequence','twitch_clip_sources')")]
     before={name:[tuple(row) for row in c.execute('SELECT * FROM '+name)] for name in names}
     c.execute('DROP TABLE twitch_clip_sources'); c.execute('PRAGMA user_version=2')

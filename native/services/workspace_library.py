@@ -39,6 +39,7 @@ class MomentEditContext:
     kit_name: str
     kit_version: int
     profiles: tuple[tuple[str, str], ...]
+    selected_layout: tuple[str, str] | None = None
 
 
 def duration(us):
@@ -86,18 +87,33 @@ class WorkspaceLibrary:
                        if clip.has_vod_context else 'VOD context unavailable'),
                 ) for clip in page['items'])
             elif kind == 'moments':
-                page = library.list_moments(after=after, limit=limit)
+                cursor = after
+                if after == 0 and context is not None:
+                    library.moment(context)
+                    row = library.connection.execute('SELECT sequence FROM moments WHERE id=?',(context,)).fetchone()
+                    cursor = row[0] - 1
+                page = library.list_moments(after=cursor, limit=limit)
                 entries = []
                 for moment in page['items']:
                     asset = library.asset(moment.source_asset_id)
                     kit = library.kit(moment.kit_id, moment.kit_version)
+                    origin = library.moment_origin(moment.id)
+                    source_label = (f'Twitch {origin["clip_id"]} · {Path(asset.path).name}'
+                                    if origin else Path(asset.path).name)
+                    origin_detail = (f'\nTwitch clip: {origin["clip_id"]}\n'
+                        f'{origin["selected_metadata"]["source_url"]}\n'
+                        f'Intake-selected title: {origin["selected_metadata"]["title"]}\n'
+                        f'Prepared Kit version: {origin["kit_version"]}\n'
+                        f'Prepared OBS scene: {origin["scene_key"]}\n'
+                        f'Intake result: {origin["result_id"]}\nIntake result SHA256: {origin["result_sha256"]}'
+                        if origin else '')
                     interval = f'{duration(moment.source_in_us)}–{duration(moment.source_out_us)}'
                     entries.append(LibraryEntry(
                         moment.id, moment.revision,
-                        (moment.title, Path(asset.path).name, f'{kit["name"]} · v{moment.kit_version}', interval),
+                        (moment.title, source_label, f'{kit["name"]} · v{moment.kit_version}', interval),
                         f'{moment.title}\nSource: {asset.path}\nSource range: {interval}\n'
                         f'Kit: {kit["name"]} · version {moment.kit_version}\n'
-                        f'Moment: {moment.id}\nRevision: {moment.revision}',
+                        f'Moment: {moment.id}\nRevision: {moment.revision}' + origin_detail,
                     ))
                 entries = tuple(entries)
             elif kind in ('kits', 'versions'):
@@ -134,8 +150,11 @@ class WorkspaceLibrary:
             if moment.revision != expected_revision:
                 raise RevisionConflict('The selected Moment changed. Reload it before opening the edit.')
             kit = library.kit(moment.kit_id, moment.kit_version)
+            origin = library.moment_origin(moment_id)
+            selected = ((origin['profile_id'], origin['scene_key']) if origin
+                        and (origin['kit_id'], origin['kit_version']) == (moment.kit_id, moment.kit_version) else None)
             return MomentEditContext(moment.title, kit['name'], moment.kit_version,
-                tuple((profile['id'], profile['scene_key']) for profile in kit['layout_profiles']))
+                tuple((profile['id'], profile['scene_key']) for profile in kit['layout_profiles']), selected)
 
     def verify_file(self, asset_id):
         with self._library() as library:

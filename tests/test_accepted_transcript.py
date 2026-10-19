@@ -52,7 +52,7 @@ class AcceptedTests(unittest.TestCase):
         with patch.object(Path,"open",side_effect=AssertionError("must not read media")):
             other=self.store.create(self.identity)
             self.assertEqual(self.store.identity(other),self.identity)
-        self.assertEqual(self.lib.connection.execute("PRAGMA user_version").fetchone()[0],3)
+        self.assertEqual(self.lib.connection.execute("PRAGMA user_version").fetchone()[0],4)
         self.assertEqual(self.lib.connection.execute("SELECT count(*) FROM assets").fetchone()[0],1)
         m.install_schema(self.lib.connection)
         self.assertEqual(self.source.read_bytes(),b"shared media unchanged")

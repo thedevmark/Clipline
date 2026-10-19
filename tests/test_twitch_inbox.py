@@ -145,7 +145,7 @@ class TwitchLibraryTests(unittest.TestCase):
 
         with patch.object(Path, "open", migration_only):
             with CreatorLibrary(self.db) as library:
-                self.assertEqual(library.connection.execute("PRAGMA user_version").fetchone()[0], 3)
+                self.assertEqual(library.connection.execute("PRAGMA user_version").fetchone()[0], 4)
                 self.assertEqual(library.asset("asset-existing").sha256, "a" * 64)
                 self.assertEqual(library.kit("kit-existing", 1)["name"], "Existing Kit")
                 self.assertEqual(library.list_twitch_clips()["items"], [])
