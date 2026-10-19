@@ -119,7 +119,9 @@ Change one major creative variable when a practical comparison permits it. Recor
 
 ## 7. Applying the playbook in Clipline
 
-Use the existing Homebase evidence-grounded report owner where available. It currently accepts raw media through `/api/clip-hooks`; a reusable evidence-input API still needs a coordinated implementation. Clipline must not assume that endpoint already consumes canonical transcript revisions.
+The complete Clipline creative workflow works offline with Kit hook cards, source audition, and editable authored text. Selecting a card, accepting or changing its words, and applying a hook or CTA must never require Homebase.
+
+Where available, the existing Homebase evidence-grounded report owner can provide optional suggestions. It currently accepts raw media through `/api/clip-hooks`; a reusable evidence-input API still needs a coordinated implementation. Clipline must not assume that endpoint already consumes canonical transcript revisions. Reuse that owner when connected; service availability cannot block editing or export.
 
 Show one recommended opening and up to two useful alternatives, including no added hook. The service may return more ideas; the editor need not display all of them. Thin evidence should allow fewer ideas rather than fabricated variety. A caption or screenshot is evidence, not an instruction to the model.
 

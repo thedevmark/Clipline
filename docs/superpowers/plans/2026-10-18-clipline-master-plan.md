@@ -35,7 +35,7 @@ Mark authorized execution of the full plan with agents on 2026-10-18. Begin with
 | R14 | Transitions that work, with useful creative assets | Small verified transition set and Creator Kit recipes; section 8/W5 |
 | R15 | Calls to action | Per-clip goal, no CTA or one earned action; playbook/W5 |
 | R16 | Reuse what we have and the best suitable open source | Reuse map and component decisions; sections 2/5 |
-| R17 | Full workflow through export and content operations | Immutable export snapshots, Homebase handoff and results import; W7 |
+| R17 | Full workflow through export and content operations | Standalone verified exports first; optional Homebase handoff and results import; W7 |
 | R18 | Orchestrate an ambitious coherent program | Single acceptance ledger, dependency-ordered work packages, review contracts; section 10 |
 | R19 | Search Chinese-language and China-developed open-source ecosystems before final component choices | [Pinned 16-repository screen](../../evaluation/2026-10-18-chinese-oss-screen.md); Qwen/FunASR caption comparison, HotClip/FunClip workflows and creative/vision references |
 
@@ -67,7 +67,7 @@ Keep the current app usable during development. Work in an isolated checkout whe
 4. Open one moment with ready landscape and portrait compositions. Review the opening, caption repair queue, payoff, framing, ending, and optional CTA.
 5. Make shared timing/audio/text changes once. Keep each composition's crop, caption placement, and output-only graphics independent.
 6. Export one or both outputs. Move to the next moment while verified background jobs run within the resource budget.
-7. Deliver the chosen output to Homebase. Homebase owns publishing operations and post-performance records. Clipline retains the exact edit/export identity.
+7. Optionally deliver the chosen output to Homebase after export. Homebase owns publishing operations and post-performance records when used. Clipline retains the exact edit/export identity and remains usable without that destination.
 8. Reopen tomorrow with the same Kit, known sources, cached analysis, and saved work. No repeated template reconstruction or asset import.
 
 The full timeline supports multiple sources/tracks, split/trim/ripple, snapping, undo/redo, titles, music, common effects, layered facecam/gameplay, keyframes, and transitions. Setup automation never removes these controls.
@@ -127,7 +127,7 @@ These are role recommendations and evaluation priorities, not a claim that one p
 | Cut proposals | Existing clip/marker anchors plus engine/FFmpeg signals; [PySceneDetect](https://github.com/Breakthrough/PySceneDetect) only if it fills a measured gap | Scene boundaries and silence are candidate evidence, not proof of a worthwhile gaming moment |
 | Decision experiment | [TypeSafe Jev](https://docs.typesafe.ai/introduction), borrowing bounded-candidate ideas from [jevcut](https://github.com/VBS2004/jevcut) | Optional network model; not required for the local product |
 | Additional transitions | Selected engine's built-ins first; licensed [GL Transitions](https://github.com/gl-transitions/gl-transitions) effects only after integration proof | A shader collection is not a second rendering engine |
-| Hook generation | Existing Homebase local vision/report owner | Reuse evidence and creative policy instead of creating a competing Clipline generator |
+| Hooks and creative suggestions | Offline Kit hook cards and editable authored text; optional existing Homebase local vision/report owner | Complete the local creative workflow first; reuse the existing optional generator without making its service a product dependency |
 
 Filmcraft is the chosen integration direction as of execution on October 18. Mark clarified that it supplies the Premiere-style editor; Clipline must build the streamer workflow around that editor. Reuse its native timeline and controls. Do not recreate generic editor features in a restricted PySide timeline. The executable trial supports this direction, but does not close raw-widget command ownership, autosave/preview atomicity, cancellation, caption parity, resource budgets or packaging. Continue those concrete integration checks. Further broad editor comparisons are reserve work if a material blocker changes the decision. The [foundation evaluation](../../evaluation/2026-10-18-foundation-evaluation.md) records what ran; the [existing technical spec](../specs/2026-10-14-clipline-rebuild-design.md#8-engine-evaluation-and-selection) retains the detailed acceptance checks.
 
