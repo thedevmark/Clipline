@@ -1,4 +1,3 @@
-diff --git a/Cargo.lock b/Cargo.lock
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -845,6 +845,28 @@
@@ -40,8 +39,6 @@ diff --git a/Cargo.lock b/Cargo.lock
   "web-time",
  ]
  
-diff --git a/apps/clipline-creator-kit/Cargo.toml b/apps/clipline-creator-kit/Cargo.toml
-new file mode 100644
 --- /dev/null
 +++ b/apps/clipline-creator-kit/Cargo.toml
 @@ -0,0 +1,14 @@
@@ -59,8 +56,6 @@ new file mode 100644
 +[dependencies]
 +filmcraft-engine = { workspace = true }
 +serde_json = { workspace = true }
-diff --git a/apps/clipline-creator-kit/README.md b/apps/clipline-creator-kit/README.md
-new file mode 100644
 --- /dev/null
 +++ b/apps/clipline-creator-kit/README.md
 @@ -0,0 +1,14 @@
@@ -78,8 +73,6 @@ new file mode 100644
 +```
 +
 +It reads bounded JSON bytes and delegates document creation to the native owner. The canonical caller admits explicit Moment/Kit/source/template records, owns the gated process and verifies compact creation receipts. Successful files require ProjectStore publication. Creation receipts do not overwrite canonical records or become later timeline authority. Stderr, nonzero exits, partial outputs and unknown process/publication states require explicit reconciliation; the helper adds no automatic retry, command registry, general batch API or Python timeline.
-diff --git a/apps/clipline-creator-kit/src/main.rs b/apps/clipline-creator-kit/src/main.rs
-new file mode 100644
 --- /dev/null
 +++ b/apps/clipline-creator-kit/src/main.rs
 @@ -0,0 +1,24 @@
@@ -107,8 +100,6 @@ new file mode 100644
 +    println!("{}", serde_json::to_string(&result)?);
 +    Ok(())
 +}
-diff --git a/apps/clipline-export-snapshot/Cargo.toml b/apps/clipline-export-snapshot/Cargo.toml
-new file mode 100644
 --- /dev/null
 +++ b/apps/clipline-export-snapshot/Cargo.toml
 @@ -0,0 +1,21 @@
@@ -133,8 +124,6 @@ new file mode 100644
 +filmcraft-render = { workspace = true }
 +filmcraft-time = { workspace = true }
 +wgpu = { version = "30", default-features = false, features = ["wgsl", "dx12"] }
-diff --git a/apps/clipline-export-snapshot/src/main.rs b/apps/clipline-export-snapshot/src/main.rs
-new file mode 100644
 --- /dev/null
 +++ b/apps/clipline-export-snapshot/src/main.rs
 @@ -0,0 +1,96 @@
@@ -234,7 +223,6 @@ new file mode 100644
 +    }
 +    Ok(())
 +}
-diff --git a/apps/filmcraft/src/args.rs b/apps/filmcraft/src/args.rs
 --- a/apps/filmcraft/src/args.rs
 +++ b/apps/filmcraft/src/args.rs
 @@ -18,6 +18,7 @@
@@ -307,7 +295,6 @@ diff --git a/apps/filmcraft/src/args.rs b/apps/filmcraft/src/args.rs
                  graphics: None
              }
          );
-diff --git a/apps/filmcraft/src/main.rs b/apps/filmcraft/src/main.rs
 --- a/apps/filmcraft/src/main.rs
 +++ b/apps/filmcraft/src/main.rs
 @@ -187,7 +187,7 @@
@@ -340,7 +327,6 @@ diff --git a/apps/filmcraft/src/main.rs b/apps/filmcraft/src/main.rs
          app.graphics_notice = notice;
          if recover == Some(false) {
              app.dialog = None;
-diff --git a/crates/engine/Cargo.toml b/crates/engine/Cargo.toml
 --- a/crates/engine/Cargo.toml
 +++ b/crates/engine/Cargo.toml
 @@ -39,11 +39,13 @@
@@ -358,8 +344,6 @@ diff --git a/crates/engine/Cargo.toml b/crates/engine/Cargo.toml
  
  [dev-dependencies]
  filmcraft-testkit = { workspace = true }
-diff --git a/crates/engine/src/accepted_captions.rs b/crates/engine/src/accepted_captions.rs
-new file mode 100644
 --- /dev/null
 +++ b/crates/engine/src/accepted_captions.rs
 @@ -0,0 +1,521 @@
@@ -884,7 +868,6 @@ new file mode 100644
 +    Ok(json!({"owner":owner.0,"accepted":pin,"captions":m.cues.len(),"revision":s.revision,
 +        "sourceIdentityCheck":"native stored import identity only; original source SHA is retained provenance, not a fresh media rehash"}))
 +}
-diff --git a/crates/engine/src/autosave.rs b/crates/engine/src/autosave.rs
 --- a/crates/engine/src/autosave.rs
 +++ b/crates/engine/src/autosave.rs
 @@ -1039,11 +1039,14 @@
@@ -907,7 +890,6 @@ diff --git a/crates/engine/src/autosave.rs b/crates/engine/src/autosave.rs
                      }
                  }
                  Ok(path)
-diff --git a/crates/engine/src/captions.rs b/crates/engine/src/captions.rs
 --- a/crates/engine/src/captions.rs
 +++ b/crates/engine/src/captions.rs
 @@ -177,7 +177,8 @@
@@ -935,10 +917,9 @@ diff --git a/crates/engine/src/captions.rs b/crates/engine/src/captions.rs
  }
  
  fn export(s: &mut Session, p: &Value) -> Result<Value> {
-diff --git a/crates/engine/src/commands.rs b/crates/engine/src/commands.rs
 --- a/crates/engine/src/commands.rs
 +++ b/crates/engine/src/commands.rs
-@@ -1,4445 +1,4490 @@
+@@ -1,4445 +1,4491 @@
 -//! The command registry. Ids follow Premiere's menu structure; every menu item, panel button,
 -//! shortcut and timeline gesture maps to exactly one of these.
 -
@@ -8776,6 +8757,7 @@ diff --git a/crates/engine/src/commands.rs b/crates/engine/src/commands.rs
 +            enabled: always, run: save_linked_snapshot, journal: false,
 +        },
 +        cmd!("clipline.acceptCaptions", "Accept Linked Captions", [], None, r#"{"owner":id,"expectedProjectPath":str|null,"expectedRevision":int,"expectedLinksRevisions":array,"expectedAcceptedRevision":object|null,"projectionInput":object,"source":object,"tracks":array}"#, always, crate::accepted_captions::accept),
++        cmd!("clipline.addCreativeTitle", "Add Creative Title", [], None, r#"{"expectedProjectPath":str,"expectedRevision":int,"expectedLinksRevisions":array,"owner":id,"sequence":id,"kind":"hook|cta","text":str,"durationSeconds":number,"placement":"top|bottom","recipe":str,"evidence":str,"destination":str|null}"#, always, crate::creative_titles::add),
 +        query!("clipline.validate", "Validate Linked Document", r#"{"expectedRevision":int?,"expectedLinksRevisions":[{"owner":id,"revision":int}]}"#, crate::linked_edits::validate_command),
 +        query!("project.inspect", "Inspect Project", "{}", |s, _| Ok(crate::commands::inspect_project(s))),
 +        query!("sequence.inspect", "Inspect Sequence", r#"{"item":id?}"#, |s, p| {
@@ -9874,8 +9856,178 @@ diff --git a/crates/engine/src/commands.rs b/crates/engine/src/commands.rs
 +fn auto_save_name(s: &Session) -> String {
 +    s.path.as_deref().and_then(|p| std::path::Path::new(p).file_stem()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| s.project.name.clone())
 +}
-diff --git a/crates/engine/src/creator_kit.rs b/crates/engine/src/creator_kit.rs
-new file mode 100644
+--- /dev/null
++++ b/crates/engine/src/creative_titles.rs
+@@ -0,0 +1,169 @@
++//! A guarded title on one explicit linked composition; native graphics own the edit.
++use crate::{EngineError, Result, Session};
++use filmcraft_project::{ClipId, ItemId};
++use filmcraft_time::Tick;
++use serde::Deserialize;
++use serde_json::{Value, json};
++
++const COMMAND: &str = "clipline.addCreativeTitle";
++pub(crate) const KEY: &str = "clipline.creativeTitles.v1";
++
++#[derive(Deserialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++struct Request {
++    expected_project_path: String,
++    expected_revision: u64,
++    expected_links_revisions: Value,
++    owner: u64,
++    sequence: u64,
++    kind: String,
++    text: String,
++    duration_seconds: f64,
++    placement: String,
++    recipe: String,
++    evidence: String,
++    destination: Option<String>,
++}
++
++fn bad(message: impl Into<String>) -> EngineError {
++    EngineError::BadParams { cmd: COMMAND.into(), msg: message.into() }
++}
++fn bounded(text: &str, maximum: usize) -> bool {
++    !text.trim().is_empty() && text.len() <= maximum && !text.chars().any(|c| c.is_control())
++}
++fn request(s: &mut Session, p: &Value) -> Result<Request> {
++    if !p.is_object() {
++        return Err(bad("title parameters must be an object"));
++    }
++    let r: Request = serde_json::from_value(p.clone()).map_err(|_| bad("invalid or unknown title parameter"))?;
++    if s.path.as_deref() != Some(r.expected_project_path.as_str()) || r.expected_project_path.is_empty() {
++        return Err(bad("the working project changed"));
++    }
++    if s.trim_play.active() || s.edit_group_depth != 0 {
++        return Err(bad("finish the staged edit or trim playback first"));
++    }
++    if !matches!(r.kind.as_str(), "hook" | "cta")
++        || !matches!(r.placement.as_str(), "top" | "bottom")
++        || !bounded(&r.text, 1024)
++        || r.text.chars().count() > 160
++        || !bounded(&r.recipe, 64)
++        || !bounded(&r.evidence, 2000)
++        || !r.duration_seconds.is_finite()
++        || !(0.25..=5.0).contains(&r.duration_seconds)
++    {
++        return Err(bad("use one short approved title, evidence, placement and 0.25–5 seconds"));
++    }
++    if let Some(destination) = &r.destination {
++        if r.kind != "cta" || !bounded(destination, 2048) || !destination.starts_with("https://") || destination.chars().any(char::is_whitespace) {
++            return Err(bad("CTA destination must be an explicit bounded HTTPS address"));
++        }
++    }
++    let inventory = crate::linked_edits::validate_command(
++        s,
++        &json!({
++            "expectedRevision":r.expected_revision,"expectedLinksRevisions":r.expected_links_revisions
++        }),
++    )?;
++    let owner = inventory["owners"]
++        .as_array()
++        .and_then(|owners| owners.iter().find(|v| v["owner"].as_u64() == Some(r.owner)))
++        .ok_or_else(|| bad("the requested linked owner is absent"))?;
++    if !["shared", "landscape", "portrait"].iter().any(|role| owner["sequences"][*role].as_u64() == Some(r.sequence)) {
++        return Err(bad("the title must target one composition of that linked owner"));
++    }
++    Ok(r)
++}
++
++pub(crate) fn preflight(s: &mut Session, id: &str, p: &Value) -> Result<()> {
++    if id == COMMAND {
++        request(s, p)?;
++    }
++    Ok(())
++}
++
++pub(crate) fn add(s: &mut Session, p: &Value) -> Result<Value> {
++    let r = request(s, p)?;
++    let owner = ItemId(r.owner);
++    let sequence = ItemId(r.sequence);
++    let item = s.project.item(owner).ok_or_else(|| bad("missing title owner"))?;
++    let creation = item
++        .metadata
++        .get("clipline.creatorKit.v1")
++        .filter(|v| v.len() <= 32768)
++        .cloned()
++        .ok_or_else(|| bad("the saved Creator Kit creation identity is required"))?;
++    let mut records: Vec<Value> = match item.metadata.get(KEY) {
++        None => Vec::new(),
++        Some(raw) if raw.len() <= 65536 => serde_json::from_str(raw).map_err(|_| bad("invalid title provenance"))?,
++        _ => return Err(bad("title provenance exceeds its bound")),
++    };
++    if records.len() > 6
++        || records
++            .iter()
++            .any(|v| !v.is_object() || v["sequence"].as_u64().is_none() || v["clip"].as_u64().is_none() || !matches!(v["kind"].as_str(), Some("hook" | "cta")))
++    {
++        return Err(bad("invalid title provenance entries"));
++    }
++    for entry in &records {
++        if entry["sequence"].as_u64() == Some(r.sequence)
++            && entry["kind"].as_str() == Some(r.kind.as_str())
++            && entry["clip"].as_u64().is_some_and(|id| s.project.sequence(sequence).is_some_and(|q| q.find_item(ClipId(id)).is_some()))
++        {
++            return Err(bad("this composition already has that title; edit its graphic in Filmcraft instead of replacing it"));
++        }
++    }
++    records.retain(|entry| entry["sequence"].as_u64() != Some(r.sequence) || entry["kind"].as_str() != Some(r.kind.as_str()));
++    if records.len() >= 6 {
++        return Err(bad("the title slot inventory is full"));
++    }
++    let q = s.project.sequence(sequence).ok_or_else(|| bad("missing title composition"))?;
++    let rate = q.settings.frame_rate;
++    let end = rate.snap(q.duration());
++    if end < rate.frame_duration() {
++        return Err(bad("the composition has no complete native frame"));
++    }
++    let duration = rate.snap_nearest(Tick::from_seconds_f64(r.duration_seconds)).max(rate.frame_duration()).min(end);
++    let start = if r.kind == "hook" { Tick::ZERO } else { end - duration };
++    let (w, h) = (q.settings.width as f64, q.settings.height as f64);
++    let y = if r.placement == "top" { h * 0.12 } else { h * 0.70 };
++    let size = w.min(h) * 0.055;
++    s.edit_group("Add creative title", |s| {
++        let ui = s.state.clone();
++        s.state.active_sequence = Some(sequence);
++        let created = s.execute_linked_native(
++            "graphics.newText",
++            &json!({
++                "text":r.text,"newClip":true,"time":start.0,"seconds":duration.seconds(),
++                "position":[w*0.08,y],"box":[w*0.84,h*0.25],"size":size,"font":"Segoe UI","fontStyle":"Bold"
++            }),
++        )?;
++        let clip = created["clip"].as_u64().ok_or_else(|| bad("native graphics did not return its clip"))?;
++        // The explicit plain text remains exact even when native smart quotes are enabled.
++        s.execute_linked_native("graphics.setText", &json!({"clip":clip,"layer":0,"text":r.text}))?;
++        s.execute_linked_native(
++            "graphics.set",
++            &json!({"clip":clip,"layer":0,"props":{
++                "align":"center","fill_color":"#ffffff","stroke":true,"stroke_width":3,"background":true
++            }}),
++        )?;
++        let native = s.project.sequence(sequence).and_then(|q| q.find_item(ClipId(clip))).map(|(_, c)| c).ok_or_else(|| bad("the native title is absent"))?;
++        if native.start != start || native.duration != duration {
++            return Err(bad("the native title range differs"));
++        }
++        let result = json!({"sequence":r.sequence,"owner":r.owner,"clip":clip,"kind":r.kind,
++            "text":r.text,"startTicks":start.0,"durationTicks":duration.0,"recipe":r.recipe,
++            "evidence":r.evidence,"destination":r.destination,"performance":"unmeasured",
++            "creatorKitIdentity":creation,"scope":"one explicit composition"});
++        records.push(result.clone());
++        let raw = serde_json::to_string(&records).map_err(|_| bad("title provenance cannot be encoded"))?;
++        if raw.len() > 65536 {
++            return Err(bad("title provenance exceeds its bound"));
++        }
++        s.edit("Creative title provenance", |pr, _| {
++            pr.item_mut(owner).ok_or_else(|| bad("title owner disappeared"))?.metadata.insert(KEY.into(), raw);
++            Ok(())
++        })?;
++        s.state = ui;
++        Ok(result)
++    })
++}
 --- /dev/null
 +++ b/crates/engine/src/creator_kit.rs
 @@ -0,0 +1,1109 @@
@@ -10988,8 +11140,6 @@ new file mode 100644
 +    receipt["requestSha256"] = json!(hash(request_json));
 +    Ok(receipt)
 +}
-diff --git a/crates/engine/src/export_snapshot.rs b/crates/engine/src/export_snapshot.rs
-new file mode 100644
 --- /dev/null
 +++ b/crates/engine/src/export_snapshot.rs
 @@ -0,0 +1,268 @@
@@ -11261,7 +11411,6 @@ new file mode 100644
 +        "outputs":resolved.iter().map(|o|json!({"composition":o.composition,"sequence":o.sequence.0,"path":o.settings.path,"facts":o.facts})).collect::<Vec<_>>()});
 +    Ok(Captured { project: s.project.clone(), outputs: resolved, receipt })
 +}
-diff --git a/crates/engine/src/export_tools.rs b/crates/engine/src/export_tools.rs
 --- a/crates/engine/src/export_tools.rs
 +++ b/crates/engine/src/export_tools.rs
 @@ -464,6 +464,7 @@
@@ -11296,10 +11445,9 @@ diff --git a/crates/engine/src/export_tools.rs b/crates/engine/src/export_tools.
      let cmd = "export.quick";
      let name = str_p(p, "preset").map(str::to_string).or_else(|| s.export_queue.quick_preset.clone()).unwrap_or_else(|| DEFAULT_PRESET.to_string());
      let mut q = p.clone();
-diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
 --- a/crates/engine/src/lib.rs
 +++ b/crates/engine/src/lib.rs
-@@ -1,1334 +1,1424 @@
+@@ -1,1334 +1,1426 @@
 -//! The FilmCraft engine façade.
 -//!
 -//! Every user-visible action is a command with a stable id (`sequence.addEdit`,
@@ -12662,6 +12810,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
 +pub mod keyboard;
 +mod keyframe_move;
 +mod linked_edits;
++mod creative_titles;
 +mod accepted_captions;
 +pub mod creator_kit;
 +pub mod export_snapshot;
@@ -13348,6 +13497,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
 +    /// Run a command by id.
 +    pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
 +        let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
++        creative_titles::preflight(self, id, &params)?;
 +        accepted_captions::preflight(self, id)?;
 +        linked_edits::preflight_snapshot(self, id)?;
 +        let linked_plan = linked_edits::prepare(self, id, &params)?;
@@ -14058,8 +14208,6 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
 +mod frame_export_tests;
 +#[cfg(test)]
 +mod wasm_clock_tests;
-diff --git a/crates/engine/src/linked_edits.rs b/crates/engine/src/linked_edits.rs
-new file mode 100644
 --- /dev/null
 +++ b/crates/engine/src/linked_edits.rs
 @@ -0,0 +1,543 @@
@@ -14606,8 +14754,6 @@ new file mode 100644
 +
 +#[cfg(test)]
 +mod tests;
-diff --git a/crates/engine/src/linked_edits/tests.rs b/crates/engine/src/linked_edits/tests.rs
-new file mode 100644
 --- /dev/null
 +++ b/crates/engine/src/linked_edits/tests.rs
 @@ -0,0 +1,308 @@
@@ -14919,8 +15065,6 @@ new file mode 100644
 +    assert_rejected(&mut s,"timeline.razor",json!({"clip":m.units[0].portrait,"time":3*TPS}));
 +    assert_rejected(&mut s,"timeline.trim",json!({"clip":m.units[0].portrait,"edge":"out","deltaFrames":-30}));
 +}
-diff --git a/crates/engine/src/managed_exit.rs b/crates/engine/src/managed_exit.rs
-new file mode 100644
 --- /dev/null
 +++ b/crates/engine/src/managed_exit.rs
 @@ -0,0 +1,385 @@
@@ -15309,7 +15453,6 @@ new file mode 100644
 +    Ok(Value::Object(result))
 +}
 +
-diff --git a/crates/engine/src/mixer.rs b/crates/engine/src/mixer.rs
 --- a/crates/engine/src/mixer.rs
 +++ b/crates/engine/src/mixer.rs
 @@ -413,7 +413,7 @@
@@ -15321,7 +15464,6 @@ diff --git a/crates/engine/src/mixer.rs b/crates/engine/src/mixer.rs
      result?;
      Ok(json!({"recording": false, "lanes": written.len(), "keyframes": keyframes, "written": written}))
  }
-diff --git a/crates/engine/src/project_manager.rs b/crates/engine/src/project_manager.rs
 --- a/crates/engine/src/project_manager.rs
 +++ b/crates/engine/src/project_manager.rs
 @@ -81,6 +81,7 @@
@@ -15348,7 +15490,6 @@ diff --git a/crates/engine/src/project_manager.rs b/crates/engine/src/project_ma
      let data = filmcraft_format::encode(&proj, false);
      filmcraft_format::atomic_write(Path::new(project_path), &data).map_err(|e| format!("{project_path}: {e}"))?;
      prog.done.fetch_add(1, Ordering::Relaxed);
-diff --git a/crates/engine/src/project_tools.rs b/crates/engine/src/project_tools.rs
 --- a/crates/engine/src/project_tools.rs
 +++ b/crates/engine/src/project_tools.rs
 @@ -628,6 +628,7 @@
@@ -15375,8 +15516,6 @@ diff --git a/crates/engine/src/project_tools.rs b/crates/engine/src/project_tool
      s.services.write_file(&path, &filmcraft_format::encode(&sub, false)).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
      Ok(json!({"path": path, "items": keep.iter().map(|i| i.0).collect::<Vec<_>>()}))
  }
-diff --git a/crates/engine/tests/clipline_caption_inventory.rs b/crates/engine/tests/clipline_caption_inventory.rs
-new file mode 100644
 --- /dev/null
 +++ b/crates/engine/tests/clipline_caption_inventory.rs
 @@ -0,0 +1,138 @@
@@ -15518,8 +15657,6 @@ new file mode 100644
 +        assert_eq!(caption_inventory_snapshot(&s), before);
 +    }
 +}
-diff --git a/crates/engine/tests/clipline_caption_projection.rs b/crates/engine/tests/clipline_caption_projection.rs
-new file mode 100644
 --- /dev/null
 +++ b/crates/engine/tests/clipline_caption_projection.rs
 @@ -0,0 +1,266 @@
@@ -15789,8 +15926,160 @@ new file mode 100644
 + Arc::make_mut(&mut s.project).sequence_mut(sequence).unwrap().caption_tracks[0].captions.iter_mut().find(|c|c.id.0==id).unwrap().text=receipt["text"].as_str().unwrap().into();s.revision+=1;
 + assert!(Arc::ptr_eq(&s.project,&s.playback_project()));run(&mut s,"metadata.get",json!({"item":owner.0}));assert!(Arc::ptr_eq(&s.project,&s.previews.live.project().unwrap()));s.shutdown();
 +}
-diff --git a/crates/engine/tests/clipline_export_snapshot.rs b/crates/engine/tests/clipline_export_snapshot.rs
-new file mode 100644
+--- /dev/null
++++ b/crates/engine/tests/clipline_creative_titles.rs
+@@ -0,0 +1,151 @@
++use filmcraft_engine::{Session, project::ItemId};
++use serde_json::{Value, json};
++const TPS: i64 = filmcraft_engine::time::TICKS_PER_SECOND;
++const CMD: &str = "clipline.addCreativeTitle";
++const KEY: &str = "clipline.creativeTitles.v1";
++
++fn run(s: &mut Session, id: &str, p: Value) -> Value {
++    s.execute(id, p).unwrap()
++}
++fn fixture() -> (Session, Vec<u64>) {
++    let mut s = Session::default();
++    run(&mut s, "file.newProject", json!({"name":"Creative fixture"}));
++    run(&mut s, "file.newOfflineFile", json!({"name":"Footage","seconds":20,"fps":60,"video":true,"audio":true,"width":1920,"height":1080}));
++    let source = s.project.items.values().find(|i| i.as_media().is_some()).unwrap().id;
++    let mut sequences = Vec::new();
++    let mut clips = Vec::new();
++    for (name, w, h) in [("Shared", 1920, 1080), ("Landscape", 1920, 1080), ("Portrait", 1080, 1920)] {
++        let seq = run(&mut s, "file.newSequence", json!({"name":name,"fps":60,"video":2,"audio":2,"width":w,"height":h}))["sequence"].as_u64().unwrap();
++        run(&mut s, "timeline.place", json!({"item":source.0,"track":"V1","audioTrack":"A1","time":0,"sourceIn":0,"duration":6*TPS}));
++        clips.push(s.active_sequence().unwrap().video_tracks[0].items[0].id.0);
++        sequences.push(seq);
++    }
++    run(
++        &mut s,
++        "metadata.set",
++        json!({"item":sequences[0],"field":"clipline.links.v1","value":json!({
++        "schema":1,"revision":0,"sharedSequence":sequences[0],"landscapeSequence":sequences[1],"portraitSequence":sequences[2],
++        "units":[{"id":"root","parent":null,"shared":clips[0],"landscape":clips[1],"portrait":clips[2]}]}).to_string()}),
++    );
++    run(
++        &mut s,
++        "metadata.set",
++        json!({"item":sequences[0],"field":"clipline.creatorKit.v1","value":"{\"kitId\":\"fixture\",\"kitVersion\":3,\"sourceSHA256\":\"authored-fixture\"}"}),
++    );
++    run(&mut s, "sequence.open", json!({"item":sequences[0]}));
++    s.path = Some("C:/owned/working.fcproj".into());
++    (s, sequences)
++}
++fn request(s: &Session, sequences: &[u64]) -> Value {
++    json!({"expectedProjectPath":s.path,"expectedRevision":s.revision,
++        "expectedLinksRevisions":[{"owner":sequences[0],"revision":0}],"owner":sequences[0],"sequence":sequences[2],
++        "kind":"hook","text":"i picked the worst time to reload","durationSeconds":2.0,"placement":"top",
++        "recipe":"H04","evidence":"Reload and its consequence are visible in this authored fixture.","destination":null})
++}
++fn state(s: &Session) -> Value {
++    json!({"project":&*s.project,"state":s.state,"revision":s.revision,"saved":s.saved_revision,
++        "undo":s.history.undo.iter().map(|(label,p)|json!([label,&**p])).collect::<Vec<_>>(),
++        "redo":s.history.redo.iter().map(|(label,p)|json!([label,&**p])).collect::<Vec<_>>(),
++        "journal":s.journal,"events":s.events})
++}
++fn rejected(s: &mut Session, p: Value) {
++    let before = state(s);
++    assert!(s.execute(CMD, p).is_err());
++    assert_eq!(state(s), before);
++}
++
++#[test]
++fn explicit_inactive_title_preserves_other_compositions_and_is_one_undo() {
++    let (mut s, seqs) = fixture();
++    let before = serde_json::to_value(&*s.project).unwrap();
++    let ui = serde_json::to_value(&s.state).unwrap();
++    let undo = s.history.undo.len();
++    let shared = s.project.sequence(ItemId(seqs[0])).unwrap().clone();
++    let landscape = s.project.sequence(ItemId(seqs[1])).unwrap().clone();
++    let p = request(&s, &seqs);
++    let result = run(&mut s, CMD, p);
++    assert_eq!(result["sequence"], seqs[2]);
++    assert_eq!(result["startTicks"], 0);
++    assert_eq!(result["durationTicks"], 2 * TPS);
++    assert_eq!(s.project.sequence(ItemId(seqs[0])).unwrap(), &shared);
++    assert_eq!(s.project.sequence(ItemId(seqs[1])).unwrap(), &landscape);
++    assert_eq!(serde_json::to_value(&s.state).unwrap(), ui);
++    assert_eq!(s.history.undo.len(), undo + 1);
++    let after = serde_json::to_value(&*s.project).unwrap();
++    run(&mut s, "edit.undo", json!({}));
++    assert_eq!(serde_json::to_value(&*s.project).unwrap(), before);
++    run(&mut s, "edit.redo", json!({}));
++    assert_eq!(serde_json::to_value(&*s.project).unwrap(), after);
++}
++#[test]
++fn stale_wrong_path_owner_target_and_unknown_fields_are_atomic_refusals() {
++    let (mut s, seqs) = fixture();
++    for (field, value) in [
++        ("expectedRevision", json!(0)),
++        ("expectedProjectPath", json!("C:/another.fcproj")),
++        ("expectedLinksRevisions", json!([])),
++        ("sequence", json!(999999)),
++        ("owner", json!(999999)),
++        ("unexpected", json!(true)),
++        ("durationSeconds", json!(0)),
++        ("text", json!("")),
++    ] {
++        let mut p = request(&s, &seqs);
++        p[field] = value;
++        rejected(&mut s, p);
++    }
++    rejected(&mut s, json!([]));
++}
++#[test]
++fn end_cta_uses_native_bounds_and_keeps_the_destination_provenance() {
++    let (mut s, seqs) = fixture();
++    let mut p = request(&s, &seqs);
++    p["kind"] = json!("cta");
++    p["recipe"] = json!("stream");
++    p["text"] = json!("come make the next bad decision with chat");
++    p["destination"] = json!("https://twitch.tv/authored");
++    p["durationSeconds"] = json!(1.5);
++    let r = run(&mut s, CMD, p);
++    assert_eq!(r["startTicks"], TPS * 9 / 2);
++    assert_eq!(r["durationTicks"], TPS * 3 / 2);
++    assert_eq!(s.project.sequence(ItemId(seqs[2])).unwrap().duration().0, 6 * TPS);
++    assert_eq!(r["performance"], "unmeasured");
++    assert_eq!(r["destination"], "https://twitch.tv/authored");
++}
++#[test]
++fn existing_title_slot_refuses_overwrite_and_preserves_native_edits() {
++    let (mut s, seqs) = fixture();
++    let p = request(&s, &seqs);
++    let r = run(&mut s, CMD, p);
++    run(&mut s, "sequence.open", json!({"item":seqs[2]}));
++    run(&mut s, "graphics.setText", json!({"clip":r["clip"],"layer":0,"text":"my native correction"}));
++    let mut p = request(&s, &seqs);
++    p["text"] = json!("overwrite");
++    rejected(&mut s, p);
++}
++#[test]
++fn exact_plain_text_and_creator_kit_identity_survive_native_encoding() {
++    let (mut s, seqs) = fixture();
++    let creation = s.project.item(ItemId(seqs[0])).unwrap().metadata["clipline.creatorKit.v1"].clone();
++    let mut p = request(&s, &seqs);
++    p["text"] = json!("<b> &amp; {\\an8} it's Ω");
++    let r = run(&mut s, CMD, p);
++    assert_eq!(r["text"], "<b> &amp; {\\an8} it's Ω");
++    assert_eq!(s.project.item(ItemId(seqs[0])).unwrap().metadata["clipline.creatorKit.v1"], creation);
++    let bytes = filmcraft_format::encode(&s.project, false);
++    let decoded = filmcraft_format::decode(&bytes).unwrap();
++    assert_eq!(serde_json::to_value(&decoded.project).unwrap(), serde_json::to_value(&*s.project).unwrap());
++}
++#[test]
++fn provenance_size_failure_after_graphics_rolls_back_every_edit() {
++    let (mut s, seqs) = fixture();
++    s.edit("Large authored provenance", |p, _| {
++        let owner = p.item_mut(ItemId(seqs[0])).unwrap();
++        owner.metadata.insert("clipline.creatorKit.v1".into(), "c".repeat(30000));
++        owner.metadata.insert(KEY.into(), json!([{"sequence":seqs[0],"clip":999,"kind":"cta","extra":"x".repeat(40000)}]).to_string());
++        Ok(())
++    })
++    .unwrap();
++    let p = request(&s, &seqs);
++    rejected(&mut s, p);
++}
 --- /dev/null
 +++ b/crates/engine/tests/clipline_export_snapshot.rs
 @@ -0,0 +1,134 @@
@@ -15928,8 +16217,6 @@ new file mode 100644
 +    reject(&mut s, &root, &entry);
 +    std::fs::remove_dir_all(root).unwrap();
 +}
-diff --git a/crates/engine/tests/clipline_linked_commands.rs b/crates/engine/tests/clipline_linked_commands.rs
-new file mode 100644
 --- /dev/null
 +++ b/crates/engine/tests/clipline_linked_commands.rs
 @@ -0,0 +1,597 @@
@@ -16530,8 +16817,6 @@ new file mode 100644
 + let(mut s,owner)=bundle_fixture();let files=Arc::new(MemoryFiles::default());s.services=files.clone();let before=direct_state(&s);let p=snapshot_params(&s,owner,"staged-snapshot.fcproj");
 + s.edit_group("Must not publish intermediate state",|s|{assert!(s.execute("clipline.saveSnapshot",p).is_err());Ok(())}).unwrap();assert!(files.0.lock().unwrap().is_empty());assert_eq!(direct_state(&s),before);
 +}
-diff --git a/crates/engine/tests/clipline_managed_exit.rs b/crates/engine/tests/clipline_managed_exit.rs
-new file mode 100644
 --- /dev/null
 +++ b/crates/engine/tests/clipline_managed_exit.rs
 @@ -0,0 +1,375 @@
@@ -16910,8 +17195,6 @@ new file mode 100644
 +        assert_eq!(fs::read(path).unwrap(), b"prior immutable evidence");
 +    }
 +}
-diff --git a/crates/engine/tests/edit_group_publication.rs b/crates/engine/tests/edit_group_publication.rs
-new file mode 100644
 --- /dev/null
 +++ b/crates/engine/tests/edit_group_publication.rs
 @@ -0,0 +1,339 @@
@@ -17254,7 +17537,6 @@ new file mode 100644
 +    reopened.execute("file.open", json!({"path":path})).unwrap();
 +    assert_eq!(reopened.project.to_json(), before.to_json());
 +}
-diff --git a/crates/project/src/caption.rs b/crates/project/src/caption.rs
 --- a/crates/project/src/caption.rs
 +++ b/crates/project/src/caption.rs
 @@ -261,6 +261,19 @@
@@ -17290,7 +17572,6 @@ diff --git a/crates/project/src/caption.rs b/crates/project/src/caption.rs
      fn plain() {
          assert_eq!(plain_text("<i>Hello</i> &amp; <b>bye</b>"), "Hello & bye");
          assert_eq!(plain_text("{\\an8}Top"), "Top");
-diff --git a/crates/ui-egui/src/control.rs b/crates/ui-egui/src/control.rs
 --- a/crates/ui-egui/src/control.rs
 +++ b/crates/ui-egui/src/control.rs
 @@ -103,9 +103,30 @@
@@ -17332,7 +17613,6 @@ diff --git a/crates/ui-egui/src/control.rs b/crates/ui-egui/src/control.rs
              app.quit_confirmed = true;
              ctx.send_viewport_cmd(egui::ViewportCommand::Close);
              ok(Value::Null)
-diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
 --- a/crates/ui-egui/src/lib.rs
 +++ b/crates/ui-egui/src/lib.rs
 @@ -343,6 +343,10 @@
@@ -17408,7 +17688,6 @@ diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
      let provider = session.media.provider(project.clone(), session.services.clone());
      let previews = session.previews.clone();
      // Settings ▸ Audio Hardware ▸ Output Mapping
-diff --git a/crates/ui-egui/src/panels/clip_dialogs.rs b/crates/ui-egui/src/panels/clip_dialogs.rs
 --- a/crates/ui-egui/src/panels/clip_dialogs.rs
 +++ b/crates/ui-egui/src/panels/clip_dialogs.rs
 @@ -110,7 +110,9 @@

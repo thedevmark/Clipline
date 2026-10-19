@@ -7,7 +7,7 @@
   "archive_bytes": 21093176,
   "archive_sha256": "851a166241377875964251523594bb85c14171c740aa0d32b476ddeeb78d27e3",
   "patch_file": "clipline-native-edits.patch",
-  "patch_sha256": "0d8f38270d4b05470918ad3a3149eff781744cdf280e3b570c0945efe6fb6e18",
+  "patch_sha256": "2c3efe8ff7cb08819330e4f7d1ab44de246cc75736f3a570153d572bf3c1f34a",
   "patched_files_sha256": {
     "Cargo.lock": "0af81f685876f65a6865f84648c2c57efc00e0d16ff2314b406ac54bfa44f2a9",
     "apps/clipline-creator-kit/Cargo.toml": "2ca4b3f9d5024f62e432c9a62e84224a0543a51004ccb03c937e62d6e1ffc12c",
@@ -21,11 +21,12 @@
     "crates/engine/src/accepted_captions.rs": "904793f7bee52ab2acc9fb59156de427dd7d3d25dc50484523dac3209f3d4a76",
     "crates/engine/src/autosave.rs": "f6a1669164882f96e5aa7e8e14823a93628d1ffe01b319e2c5f0f5c2d497e28b",
     "crates/engine/src/captions.rs": "24df12899b2903ba2b42884452a4a38802bf794e65be29a2c20a87cb5e054f01",
-    "crates/engine/src/commands.rs": "e303b831f669cea67c67bb3fe042359a3989e5dd8149ce4f10156175fb077039",
+    "crates/engine/src/commands.rs": "28c46e1063ad58baa8c55ebe0b5be8c8d63bc0ae2ab033910e3c9682ec892e71",
+    "crates/engine/src/creative_titles.rs": "33e1836791e059bb40c951c9b9a0ce13a6d75ae6e3e332419ed5cf88232c1fb9",
     "crates/engine/src/creator_kit.rs": "123f4c8ef9f64072a6b136f29173373bb6c09dccd1fcea036097acd19c415dd4",
     "crates/engine/src/export_snapshot.rs": "3cb900e5d622f97f9262115d734f85838b3714d33d414718914234ed1a134b47",
     "crates/engine/src/export_tools.rs": "761189df9e5026b177f96b4c293bf274c395070b95517f95d793e441fc543bac",
-    "crates/engine/src/lib.rs": "3b8a1bf673f2c736bc7d860665a52941ab24824d3b706730f5226d3d97a09f9a",
+    "crates/engine/src/lib.rs": "9916caf32bf0fdd587c5be8f1aa8815a6d568957aaad671ff3496d05ee8dbdf9",
     "crates/engine/src/linked_edits.rs": "49849f9c22facaf7fe140a695300bf464dd7823f2acaacdfed3a6ff1efda096b",
     "crates/engine/src/linked_edits/tests.rs": "2c1b0233a39bac314d81765b5d27058c617bb3e81d1c3ae46e1d948eca6cdddc",
     "crates/engine/src/managed_exit.rs": "ca0413bfcc2acf8c2746d15934e6741d39edc13e0a6963a74fc4d207ebae9a7c",
@@ -34,6 +35,7 @@
     "crates/engine/src/project_tools.rs": "2945d0399a06ca9a766ff9e376db66fcebf50470d21f71a1b222269053bf5a0c",
     "crates/engine/tests/clipline_caption_inventory.rs": "85cfa423b46fbd91634cbcd8b7a585eec8f446aea223f847fcfbd60848581875",
     "crates/engine/tests/clipline_caption_projection.rs": "ca72fb886257537df4ecec33b5804e2226ad5a1344c6871af39e16c96bebcfea",
+    "crates/engine/tests/clipline_creative_titles.rs": "7e6ee1f9fa1a0afbf3f758696d3aa440b1b58363ef6da8e6fb5c77930bebb5ff",
     "crates/engine/tests/clipline_export_snapshot.rs": "2f1da3bf49ba1d9a1c6d77e6c817788f6722df11ee654a9dac849dfc3e505675",
     "crates/engine/tests/clipline_linked_commands.rs": "7875968d189ead58d8d92cac3a8394c84b066545822780f56cd78bbb51760e25",
     "crates/engine/tests/clipline_managed_exit.rs": "35b4cb2e09b2af09c9c1cb573f0e0e33724a8751342f39aa2006303e818c02cb",
@@ -43,6 +45,6 @@
     "crates/ui-egui/src/lib.rs": "24a3cd2c8861dfb1f293bb3099c430ccc4c2d0d6939cba00beae03769ddee943",
     "crates/ui-egui/src/panels/clip_dialogs.rs": "39cb69f8c6f6fdb1b6031ab380b08a0b041700464fdbc9ecdd54174a2c6e4f7d"
   },
-  "scope": "Native linked gameplay/facecam editing, document validation and atomic snapshots, accepted source-clock caption projection to three compositions, and validated committed playback publication. Full editor integration remains incomplete. Adds a native scratch-Session Creator Kit capture/instantiate helper with pinned creation identity receipts and supported static audio preservation. This does not add a second timeline, full Kit updates, or a UI command registry. Adds the dedicated headless immutable export snapshot module/helper, outside the GUI registry. Unified source identity only; combined build and real export qualification remain separate gates. Adds opt-in managed native exit evidence and correlated native Save/Don't Save/Cancel observation. Final document evidence remains separate from original process-scope cessation and canonical publication. Full integration and release qualification remain separate gates. Adds read-only caption-track and native-style inventory through explicit sequence.inspect, reusing captions.list serialization. Track creation, wrapping rules and caption acceptance remain separate existing owners. Adds the explicit clipline.h264.gpu-auto.v1 headless export recipe, existing offscreen DX12 renderer registration and detached native hardware/GPU/per-stage counters. The actual qualified run used NVENC for both full-resolution outputs; GPU composition fell back to CPU. Software runtime and historical receipts remain separate explicit profiles. No GUI rebuild is implied.",
+  "scope": "Native linked gameplay/facecam editing, document validation and atomic snapshots, accepted source-clock caption projection to three compositions, and validated committed playback publication. Full editor integration remains incomplete. Adds a native scratch-Session Creator Kit capture/instantiate helper with pinned creation identity receipts and supported static audio preservation. This does not add a second timeline, full Kit updates, or a UI command registry. Adds the dedicated headless immutable export snapshot module/helper, outside the GUI registry. Unified source identity only; combined build and real export qualification remain separate gates. Adds opt-in managed native exit evidence and correlated native Save/Don't Save/Cancel observation. Final document evidence remains separate from original process-scope cessation and canonical publication. Full integration and release qualification remain separate gates. Adds read-only caption-track and native-style inventory through explicit sequence.inspect, reusing captions.list serialization. Track creation, wrapping rules and caption acceptance remain separate existing owners. Adds the explicit clipline.h264.gpu-auto.v1 headless export recipe, existing offscreen DX12 renderer registration and detached native hardware/GPU/per-stage counters. The actual qualified run used NVENC for both full-resolution outputs; GPU composition fell back to CPU. Software runtime and historical receipts remain separate explicit profiles. No GUI rebuild is implied. Adds guarded authored hook/CTA graphics to one explicit composition, with literal wording, native frame-clock placement, edit-group undo/redo and preserved Creator Kit provenance. Linked title propagation and working transition recipes remain incomplete. Source reconstruction alone does not establish build or runtime behavior.",
   "archive_url_provenance": "Conventional tag archive reconstruction endpoint; original request URL was not retained. Verified archive ZIP comment equals upstream_commit."
 }

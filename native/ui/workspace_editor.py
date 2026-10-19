@@ -129,6 +129,8 @@ class EditorCompanionBinding(QObject):
         self.captions.setEnabled(available and not self.busy and outcome.state == 'open' and not outcome.requires_reconciliation
                                  and not (exporting is not None and exporting.unsettled))
         if self.caption_dialog is not None:self.caption_dialog.controls()
+        if getattr(self, 'creative_binding', None) is not None:
+            self.creative_binding.controls()
         self.close_editor.setEnabled(available and not self.busy and outcome.can_checkpoint and outcome.can_close_editor
                                      and callable(getattr(self.controller, 'save_and_close', None)))
         for button, capability in ((self.check_close, 'can_check_close'), (self.recover, 'can_recover_working')):

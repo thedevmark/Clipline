@@ -52,6 +52,8 @@ def main(argv=None):
         from native.ui.workspace_editor import EditorCompanionBinding
         controller = editor_runtime.controller(window.library,caption_runtime=caption_runtime,export_runtime=export_runtime)
         window.editor_binding = EditorCompanionBinding(window, controller)
+        from native.ui.workspace_creative import CreativeCompanionBinding
+        window.editor_binding.creative_binding = CreativeCompanionBinding(window.editor_binding)
     if intake_runtime is not None:
         from native.services.workspace_intake import WorkspaceIntakeController
         from native.ui.workspace_intake import IntakeCompanionBinding
