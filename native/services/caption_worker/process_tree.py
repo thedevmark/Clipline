@@ -52,6 +52,22 @@ class ProcessTree:
                 k.CloseHandle(handle)
         self.kernel,self.job,self.accounting=k,job,Accounting
 
+    def observe(self):
+        """Query this actual scope without terminating or releasing its handle."""
+        evidence = {"scope_id": self.scope_id, "pid": self.process.pid,
+                    "scope": "windows_job_object" if os.name == "nt" else "process_group",
+                    "disposition": "unknown", "active_processes": None}
+        if self.job:
+            import ctypes as c
+            accounting = self.accounting()
+            if self.kernel.QueryInformationJobObject(self.job, 1, c.byref(accounting),
+                                                     c.sizeof(accounting), None):
+                evidence["active_processes"] = accounting.active_processes
+                evidence["disposition"] = "stopped" if accounting.active_processes == 0 else "running"
+            else:
+                evidence["query_error"] = c.get_last_error()
+        return evidence
+
     def stop(self):
         """Verify the owned Windows scope is empty while its handle is still live."""
         evidence={"scope_id":self.scope_id,"pid":self.process.pid,

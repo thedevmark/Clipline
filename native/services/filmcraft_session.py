@@ -25,6 +25,9 @@ class SessionError(RuntimeError):
         self.cleanup_error=cleanup_error
         super().__init__(reason)
 
+class SessionUnavailable(SessionError):
+    """Control is absent or the owned parent exited; this proves no scope cessation."""
+
 @dataclass(frozen=True)
 class QualifiedEditor:
     path: Path
@@ -111,10 +114,17 @@ class SessionBridge(FilmcraftBridge):
 
 class NativeSession:
     @classmethod
-    def start(cls, store, working, editor, *, python, runs, cancel=None, readiness_seconds=30):
+    def start(cls, store, working, editor, *, python, runs, cancel=None, readiness_seconds=30,
+              managed_exit_nonce=None):
         if os.name!="nt":raise ValueError("Native session process ownership is qualified on Windows only")
         if type(working) is not WorkingCopy:raise ValueError("An explicit WorkingCopy is required")
         if type(editor) is not QualifiedEditor:raise ValueError("An explicit qualified editor is required")
+        if managed_exit_nonce is not None:
+            if not isinstance(managed_exit_nonce, str):
+                raise ValueError("A canonical managed-exit UUID4 is required")
+            nonce = uuid.UUID(managed_exit_nonce)
+            if str(nonce) != managed_exit_nonce or nonce.version != 4:
+                raise ValueError("A canonical managed-exit UUID4 is required")
         if type(readiness_seconds) not in (int,float) or not math.isfinite(readiness_seconds) or not 0<readiness_seconds<=60:
             raise ValueError("Readiness deadline must be finite and within 60 seconds")
         python=Path(python)
@@ -134,6 +144,7 @@ class NativeSession:
         self.directory.mkdir(parents=True,exist_ok=False)
         (self.directory/"data").mkdir()
         self.initial_hash=digest(path)
+        self.managed_exit = None
         self._lease(path.parent/"editor-owner.lock")
         try:
             write_once(path.parent/"editor-owner-uncertain.json",{
@@ -144,6 +155,18 @@ class NativeSession:
                 reserve.setsockopt(socket.SOL_SOCKET,socket.SO_EXCLUSIVEADDRUSE,1)
                 reserve.bind(("127.0.0.1",0));self.port=reserve.getsockname()[1]
                 argv=editor.command(self.port,self.directory/"data",path)
+                if managed_exit_nonce is not None:
+                    manifest = self.directory / "managed-exit.json"
+                    encoded = write_once(manifest, {"schema": 1, "nonce": managed_exit_nonce,
+                        "workingPath": str(path), "workingSHA256": self.initial_hash,
+                        "outputDirectory": str(self.directory / "managed-exit")})
+                    self._guard_input(manifest)
+                    if manifest.read_bytes() != encoded:
+                        raise SessionError("Managed launch manifest changed before admission")
+                    self.managed_exit = {"nonce": managed_exit_nonce,
+                        "manifest_sha256": hashlib.sha256(encoded).hexdigest(),
+                        "directory": self.directory / "managed-exit", "manifest": manifest}
+                    argv.extend(("--managed-exit", str(manifest)))
                 gate=Path(__file__).with_name("filmcraft_launch_gate.py")
                 for launch_input in dict.fromkeys((editor.path,python,gate)):
                     self._guard_input(launch_input)
@@ -153,6 +176,8 @@ class NativeSession:
                     "editor":{"path":str(editor.path),"sha256":editor.sha256,"version":editor.version},
                     "helper":{"python":str(python),"python_sha256":digest(python),"gate_sha256":digest(gate)},
                     "argv":argv,"child_receipt":str(self.directory/"child.json"),
+                    "managed_exit": {"nonce": managed_exit_nonce,
+                        "manifest_sha256": self.managed_exit["manifest_sha256"]} if self.managed_exit else None,
                     "control_authentication":"none","port_binding_race":"unresolved"})
                 self._guard_input(self.directory/"intent.json")
                 if (self.directory/"intent.json").read_bytes()!=intent:
@@ -255,14 +280,70 @@ class NativeSession:
 
     def _assert_usable(self):
         if self._stopped or self._bridge is None or self.process.poll() is not None:
-            raise SessionError("The native editor is not usable",self.directory)
-        if listener_pids(self.port)!={self.child_pid} or not in_job(self.tree,self.child_pid):
-            raise SessionError("The native control listener no longer belongs to this session",self.directory)
+            raise SessionUnavailable("The native editor is not usable",self.directory,owner=self)
+        try:
+            listeners=listener_pids(self.port)
+        except OSError as error:
+            raise SessionError("The native control listener ownership could not be verified",
+                               self.directory,owner=self) from error
+        if listeners==set():
+            raise SessionUnavailable("The native control listener is absent",self.directory,owner=self)
+        if listeners!={self.child_pid}:
+            raise SessionError("The native control listener no longer belongs to this session",
+                               self.directory,owner=self)
+        try:
+            belongs=in_job(self.tree,self.child_pid)
+        except OSError as error:
+            raise SessionError("The native control process ownership could not be verified",
+                               self.directory,owner=self) from error
+        if not belongs:
+            raise SessionError("The native control listener no longer belongs to this session",
+                               self.directory,owner=self)
 
     @property
     def bridge(self):
         self._assert_usable()
         return self._bridge
+
+    def observe_exit(self):
+        """Observe actual cessation; never quit, terminate, or close a live scope.
+
+        The caller keeps this owner strongly alive on every unknown result.
+        Document settlement remains separate from process-resource cleanup.
+        """
+        if self._stop_final:
+            return self.stop_receipt
+        proof = (self.tree.observe() if self.tree is not None else
+                 {"disposition": "unknown", "active_processes": None})
+        parent_code = self.process.poll() if self.process is not None else None
+        result = {"schema": 1, "scope": proof, "exit_code": parent_code,
+                  "parent_reaped": parent_code is not None, "streams_closed": False}
+        if (parent_code is None or proof.get("disposition") != "stopped"
+                or type(proof.get("active_processes")) is not int or proof["active_processes"] != 0):
+            return result
+        self._stopped = True
+        self._bridge = None
+        for stream in self._files:
+            stream.close()
+        result["streams_closed"] = all(stream.closed for stream in self._files)
+        # Persist observed evidence before releasing the only queryable scope.
+        write_once(self.directory / ("observed-exit-" + str(uuid.uuid4()) + ".json"), result)
+        marker = self.path.parent / "editor-owner-uncertain.json"
+        marker_data = json.loads(marker.read_text(encoding="utf8"))
+        if not isinstance(marker_data, dict) or marker_data.get("run") != str(self.directory):
+            raise SessionError("The native working lease identity changed", self.directory, owner=self)
+        marker.unlink()
+        if self._lock:
+            import msvcrt
+            self._lock.seek(0)
+            msvcrt.locking(self._lock.fileno(), msvcrt.LK_UNLCK, 1)
+            self._lock.close()
+            self._lock = None
+        self._input_guards.close()
+        self.tree.close()
+        self.stop_receipt = result
+        self._stop_final = True
+        return result
 
     def stop(self):
         """Terminate only the owned scope. Keep working bytes, recovery data and receipts."""

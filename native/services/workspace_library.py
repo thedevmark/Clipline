@@ -33,6 +33,14 @@ class ClipRefresh:
     cancelled: bool
 
 
+@dataclass(frozen=True)
+class MomentEditContext:
+    title: str
+    kit_name: str
+    kit_version: int
+    profiles: tuple[tuple[str, str], ...]
+
+
 def duration(us):
     seconds, micros = divmod(us, 1_000_000)
     minutes, seconds = divmod(seconds, 60)
@@ -118,6 +126,16 @@ class WorkspaceLibrary:
     def register_file(self, path):
         with self._library() as library:
             return self._asset_entry(library.register_asset(path))
+
+    def moment_edit_context(self, moment_id, expected_revision):
+        from native.core.creator_library import RevisionConflict
+        with self._library() as library:
+            moment = library.moment(moment_id)
+            if moment.revision != expected_revision:
+                raise RevisionConflict('The selected Moment changed. Reload it before opening the edit.')
+            kit = library.kit(moment.kit_id, moment.kit_version)
+            return MomentEditContext(moment.title, kit['name'], moment.kit_version,
+                tuple((profile['id'], profile['scene_key']) for profile in kit['layout_profiles']))
 
     def verify_file(self, asset_id):
         with self._library() as library:

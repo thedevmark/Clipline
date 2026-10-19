@@ -4,9 +4,9 @@ from datetime import datetime, timedelta, timezone
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QSortFilterProxyModel
 from PySide6.QtWidgets import (
-    QAbstractItemView, QDateEdit, QFileDialog, QGridLayout, QHBoxLayout, QHeaderView,
+    QAbstractItemView, QDateEdit, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLayout,
     QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton,
-    QTableView, QVBoxLayout, QWidget,
+    QScrollArea, QTableView, QVBoxLayout, QWidget,
 )
 
 from native.services.workspace_library import LibraryPage, WorkspaceLibrary
@@ -79,11 +79,13 @@ class CreatorLibraryWindow(QMainWindow):
         self.library = WorkspaceLibrary(directory)
         self.runner = runner or JobRunner()
         self.open_moment = open_moment
+        self.editor_available = True
         self.kind, self.context = 'clips', None
         self.next_cursor = None
         self._request = 0
         self._loading = False
         self._action_busy = False
+        self._action_owner = None
         self._cancel = None
         self.setWindowTitle('Clipline · Creator Library')
         self.resize(1180, 780)
@@ -100,8 +102,14 @@ class CreatorLibraryWindow(QMainWindow):
         self.setFont(font)
         body = QWidget()
         body.setObjectName('stage')
-        self.setCentralWidget(body)
-        layout = QVBoxLayout(body)
+        self.content = body
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setWidget(body)
+        self.setCentralWidget(self.scroll)
+        self.content_layout = layout = QVBoxLayout(body)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(14)
         brand = QLabel('Clipline')
@@ -190,6 +198,7 @@ class CreatorLibraryWindow(QMainWindow):
         self.proxy.setFilterKeyColumn(-1)
         self.proxy.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self.table = QTableView()
+        self.table.setMinimumHeight(100)
         self.table.setModel(self.proxy)
         self.table.setAccessibleName('Persistent creator library records')
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -222,6 +231,8 @@ class CreatorLibraryWindow(QMainWindow):
         self.message.setWordWrap(True)
         self.message.setTextFormat(Qt.TextFormat.PlainText)
         layout.addWidget(self.message)
+        from native.ui.creator_kit_setup import KitSetupBinding
+        self.kit_binding = KitSetupBinding(self)
         self.load_view('clips')
 
     def selected_entry(self):
@@ -231,7 +242,28 @@ class CreatorLibraryWindow(QMainWindow):
         index = self.proxy.mapToSource(rows[0])
         return self.model.entries[index.row()]
 
+    def action_allowed(self, owner):
+        return self._action_owner is None or self._action_owner is owner
+
+    def acquire_action(self, owner):
+        if not self.action_allowed(owner):
+            return False
+        self._action_owner = owner
+        self._action_busy = True
+        self._controls()
+        return True
+
+    def release_action(self, owner):
+        if self._action_owner is owner:
+            self._action_owner = None
+            self._action_busy = False
+            self._controls()
+
     def _controls(self):
+        for name in ('editor_binding', 'intake_binding', 'kit_binding'):
+            binding = getattr(self, name, None)
+            if binding is not None:
+                binding._gate_changed()
         entry = self.selected_entry()
         self.twitch.setVisible(self.kind == 'clips')
         self.add.setVisible(self.kind == 'assets')
@@ -241,7 +273,7 @@ class CreatorLibraryWindow(QMainWindow):
         self.versions.setVisible(self.kind == 'kits')
         self.versions.setEnabled(entry is not None)
         self.open.setVisible(self.kind == 'moments' and self.open_moment is not None)
-        self.open.setEnabled(entry is not None and not self._action_busy)
+        self.open.setEnabled(entry is not None and self.editor_available and not self._action_busy)
         self.more.setVisible(self.next_cursor is not None)
         self.more.setEnabled(not self._loading)
         self.reload.setEnabled(not self._loading)
@@ -348,13 +380,13 @@ class CreatorLibraryWindow(QMainWindow):
 
     def _open_moment(self):
         entry = self.selected_entry()
-        if entry and self.kind == 'moments' and self.open_moment is not None and not self._action_busy:
+        if (entry and self.kind == 'moments' and self.open_moment is not None
+                and self.editor_available and not self._action_busy):
             self.open_moment(entry.id, entry.revision)
 
     def _action(self, fn, label, *, success='', cancellable=False):
-        if self._action_busy:
+        if self._action_busy or not self.acquire_action(self):
             return
-        self._action_busy = True
         self._cancel = threading.Event() if cancellable else None
         self._action_success = success
         self.message.setText(label)
@@ -362,7 +394,7 @@ class CreatorLibraryWindow(QMainWindow):
         self.runner.run(fn, on_finished=self._action_finished, on_error=self._action_error)
 
     def _action_finished(self, result):
-        self._action_busy = False
+        self.release_action(self)
         self._cancel = None
         if isinstance(result, str):
             self.message.setText(result)
@@ -374,7 +406,7 @@ class CreatorLibraryWindow(QMainWindow):
         self.load_view(self.kind, self.context)
 
     def _action_error(self, error):
-        self._action_busy = False
+        self.release_action(self)
         self._cancel = None
         self.message.setText(error)
         self.load_view(self.kind, self.context)
@@ -408,7 +440,7 @@ class CreatorLibraryWindow(QMainWindow):
             self._controls()
 
     def closeEvent(self, event):
-        if self.runner._jobs:
+        if self.runner._jobs or self._action_busy:
             self._cancel_action()
             self.message.setText('A library operation is finishing. Close this window after it finishes.')
             event.ignore()
@@ -418,6 +450,9 @@ class CreatorLibraryWindow(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if hasattr(self, 'auth_actions'):
+            self.content_layout.setSpacing(8 if self.height() < 700 else 14)
+            if hasattr(self, 'details'):
+                self.details.setMaximumHeight(90 if self.height() < 700 else 150)
             self.twitch_grid.removeWidget(self.auth_actions)
             if self.width() < 1000:
                 self.twitch_grid.addWidget(self.auth_actions, 1, 0, 1, 2)

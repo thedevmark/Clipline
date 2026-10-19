@@ -55,10 +55,19 @@ class WorkspaceTests(WorkspaceFixture):
         for fn, args in ((self.service.page, ('assets',)), (self.service.register_file, (self.source,)),
                          (self.service.verify_file, (self.asset.id,)),
                          (self.service.kit_details, (self.kit, 1)),
+                         (self.service.moment_edit_context, (self.first.id, self.first.revision)),
                          (self.service.connect_twitch, (None, threading.Event())),
                          (self.service.refresh_clips, ('bad', 'bad', threading.Event()))):
             with self.subTest(function=fn.__name__), self.assertRaisesRegex(RuntimeError, 'background owner'):
                 fn(*args)
+
+    def test_edit_context_uses_selected_revision_and_pinned_kit_without_media_io(self):
+        with patch('native.core.creator_library._fingerprint', side_effect=AssertionError('No hashing for layout choices')):
+            context = self.bg(self.service.moment_edit_context, self.first.id, self.first.revision)
+        self.assertEqual((context.title, context.kit_name, context.kit_version), ('First moment', 'Original Kit', 1))
+        self.assertEqual(context.profiles, ())
+        with self.assertRaisesRegex(LibraryError, 'changed'):
+            self.bg(self.service.moment_edit_context, self.first.id, self.first.revision + 1)
 
     def test_restart_reuses_source_and_exact_pinned_kit_without_file_imports(self):
         with patch('native.core.creator_library._fingerprint', side_effect=AssertionError('No media IO on page load')):

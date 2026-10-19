@@ -91,7 +91,8 @@ def _inventory(value):
 
 
 def publish_checkpoint(store: ProjectStore, bridge: FilmcraftBridge, working: WorkingCopy, *,
-                       native_revision: int, links_revisions: list[dict], engine_version: str) -> tuple[NativeSnapshot, WorkingCopy]:
+                       native_revision: int, links_revisions: list[dict], engine_version: str,
+                       capture_details: dict | None = None) -> tuple[NativeSnapshot, WorkingCopy]:
     """Capture once, then publish with the working copy's base generation CAS.
 
     A lost native reply never publishes or retries. The owned capture is retained
@@ -102,6 +103,8 @@ def publish_checkpoint(store: ProjectStore, bridge: FilmcraftBridge, working: Wo
     """
     if type(working) is not WorkingCopy:
         raise CheckpointError("An explicit native working copy is required")
+    if capture_details is not None and (type(capture_details) is not dict or capture_details):
+        raise CheckpointError("Capture details must be an empty output dictionary")
     path = working.path.resolve(strict=True)
     working_root = (store.directory / "working").resolve()
     if not path.is_file() or path.suffix != ".fcproj" or not path.is_relative_to(working_root):
@@ -162,6 +165,8 @@ def publish_checkpoint(store: ProjectStore, bridge: FilmcraftBridge, working: Wo
         "publication_revision": current.revision + 1, "validation": validation,
         "engine": "filmcraft", "engine_version": engine_version,
     }))
+    if capture_details is not None:
+        capture_details.update(directory=directory, validation=validation)
     snapshot = store.publish(document, expected_generation=working.base_generation,
                              revision=current.revision + 1, engine="filmcraft",
                              engine_version=engine_version, suffix=".fcproj")

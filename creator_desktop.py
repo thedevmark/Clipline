@@ -13,11 +13,37 @@ from native.ui.creator_library import CreatorLibraryWindow
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Clipline Creator Library')
     parser.add_argument('--workspace', type=Path, default=APP_STATE_DIR / 'creator')
+    parser.add_argument('--runtime-manifest', type=Path,
+                        help='Explicit qualified local editor/helper identities for the native companion')
+    parser.add_argument('--intake-runtime-manifest', type=Path,
+                        help='Explicit qualified local source-download identities and public Twitch client ID')
     args = parser.parse_args(argv)
+    editor_runtime = intake_runtime = None
+    # Reject malformed opt-in configuration before the window starts library workers.
+    if args.runtime_manifest is not None:
+        from native.services.editor_runtime import load_editor_runtime
+        try:
+            editor_runtime = load_editor_runtime(args.runtime_manifest)
+        except Exception:
+            parser.error('The editor runtime configuration could not be loaded.')
+    if args.intake_runtime_manifest is not None:
+        from native.services.intake_runtime import load_intake_runtime
+        try:
+            intake_runtime = load_intake_runtime(args.intake_runtime_manifest)
+        except Exception:
+            parser.error('The source-download runtime configuration could not be loaded.')
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName('Clipline')
     app.setWindowIcon(QIcon(str(INTERNAL_DIR / 'static' / 'favicon.ico')))
     window = CreatorLibraryWindow(args.workspace)
+    if editor_runtime is not None:
+        from native.ui.workspace_editor import EditorCompanionBinding
+        controller = editor_runtime.controller(window.library)
+        window.editor_binding = EditorCompanionBinding(window, controller)
+    if intake_runtime is not None:
+        from native.services.workspace_intake import WorkspaceIntakeController
+        from native.ui.workspace_intake import IntakeCompanionBinding
+        window.intake_binding = IntakeCompanionBinding(window, WorkspaceIntakeController(window.library, intake_runtime))
     window.show()
     return app.exec()
 
