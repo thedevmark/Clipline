@@ -279,7 +279,7 @@ class LibraryTests(unittest.TestCase):
             with CreatorLibrary(target) as library:
                 return library.connection.execute("PRAGMA user_version").fetchone()[0]
         with ThreadPoolExecutor(max_workers=4) as pool:
-            self.assertEqual(list(pool.map(open_library, range(4))), [2, 2, 2, 2])
+            self.assertEqual(list(pool.map(open_library, range(4))), [3, 3, 3, 3])
 
     def test_second_connection_cannot_publish_a_stale_kit_version(self):
         with CreatorLibrary(self.path) as second:

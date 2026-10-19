@@ -70,8 +70,11 @@ def install_schema(c):
         if statement.strip():raise JobError("Incomplete migration")
 
 class DurableJobs:
-    def __init__(self,connection,*,settlement_verifier=None):
+    def __init__(self,connection,*,settlement_verifier=None,completed_output_committer=None):
         self.c=connection;self.verifier=settlement_verifier
+        if completed_output_committer is not None and not callable(completed_output_committer):
+            raise JobError("A trusted output committer must be callable")
+        self.completed_output_committer=completed_output_committer
         if connection.execute("PRAGMA foreign_keys").fetchone()[0]!=1:raise JobError("Foreign keys required")
         row=connection.execute("SELECT version FROM durable_job_schema WHERE singleton=1").fetchone()
         if row is None or row[0]!=1:raise JobError("Install job schema first")
@@ -233,6 +236,9 @@ class DurableJobs:
         with _write(self.c):
             current=self._expected(jid,revision,token)
             if current["state"] not in valid_states:raise StaleTransition("Job state changed during verification")
+            if outcome=="completed" and self.completed_output_committer is not None:
+                result=self.completed_output_committer(self.c,json.loads(_json(current)),json.loads(_json(attested)))
+                if result is not None:raise VerificationRequired("Output committer must return None")
             self.c.execute("INSERT INTO durable_job_settlements VALUES(?,?,?)",(jid,token,_json(attested)))
             self._cas(current,state=outcome,detail={"evidence_ref":evidence,"outputs_disposition":attested["outputs_disposition"]})
             self.c.execute("DELETE FROM durable_job_holds WHERE job_id=? AND claim_token=?",(jid,token))

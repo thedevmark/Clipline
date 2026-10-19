@@ -24,7 +24,7 @@ def test_caption_migration_preserves_old_catalog_and_uses_its_connection(tmp_pat
     old_library(path)
     with CreatorLibrary(path) as library:
         assert library.captions.connection is library.connection
-        assert library.connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert library.connection.execute("PRAGMA user_version").fetchone()[0] == 3
         assert library.connection.execute("SELECT version FROM caption_schema").fetchone()[0] == 1
         assert library.captions.list_accepted()["items"] == []
         assert library.asset("old-asset").path == "X:/source.mp4"

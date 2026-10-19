@@ -128,6 +128,21 @@ CREATE TABLE twitch_clips (
 PRAGMA user_version=2;
 """
 
+_TWITCH_SOURCE_SCHEMA = """
+CREATE TABLE twitch_clip_sources (
+ clip_id TEXT PRIMARY KEY REFERENCES twitch_clips(clip_id),
+ asset_id TEXT NOT NULL REFERENCES assets(id), selected_metadata TEXT NOT NULL,
+ profile_sha256 TEXT NOT NULL CHECK(length(profile_sha256)=64),
+ result_id TEXT NOT NULL, result_sha256 TEXT NOT NULL CHECK(length(result_sha256)=64),
+ job_id TEXT NOT NULL UNIQUE REFERENCES durable_job_intents(id)
+);
+CREATE TRIGGER twitch_clip_sources_no_update BEFORE UPDATE ON twitch_clip_sources BEGIN
+ SELECT RAISE(ABORT,'Twitch source bindings are immutable'); END;
+CREATE TRIGGER twitch_clip_sources_no_delete BEFORE DELETE ON twitch_clip_sources BEGIN
+ SELECT RAISE(ABORT,'Twitch source bindings are immutable'); END;
+PRAGMA user_version=3;
+"""
+
 
 def _json(value: Any) -> str:
     def validate_keys(item):
@@ -249,7 +264,7 @@ class CreatorLibrary:
                     if sqlite3.complete_statement(statement):
                         self.connection.execute(statement)
                         statement = ""
-            elif version != 2:
+            elif version not in (2, 3):
                 raise LibraryError(f"Unsupported library schema version {version}")
             self.connection.execute("COMMIT")
         except Exception:
@@ -261,6 +276,7 @@ class CreatorLibrary:
             install_caption_schema(self.connection)
             self.captions = AcceptedTranscriptStore(self.connection)
             install_job_schema(self.connection)
+            self._install_twitch_source_schema()
             self.jobs = DurableJobs(self.connection)
         except Exception:
             self.connection.close()
@@ -317,6 +333,86 @@ class CreatorLibrary:
         page = rows[:limit]
         return {"items": [TwitchClip(**json.loads(row["metadata"])) for row in page],
                 "next_cursor": page[-1]["sequence"] if len(rows) > limit else None}
+
+    def _install_twitch_source_schema(self) -> None:
+        with self._write():
+            version = self.connection.execute("PRAGMA user_version").fetchone()[0]
+            if version == 3:
+                return
+            if version != 2:
+                raise LibraryError("Twitch source migration requires schema2")
+            statement = ""
+            for line in _TWITCH_SOURCE_SCHEMA.splitlines(keepends=True):
+                statement += line
+                if sqlite3.complete_statement(statement):
+                    self.connection.execute(statement)
+                    statement = ""
+            if statement.strip():
+                raise LibraryError("Incomplete Twitch source migration")
+
+    def twitch_clip(self, clip_id: str) -> TwitchClip:
+        _name(clip_id, "clip ID")
+        row = self.connection.execute("SELECT metadata FROM twitch_clips WHERE clip_id=?", (clip_id,)).fetchone()
+        if row is None:
+            raise LibraryError("Unknown Twitch clip")
+        return TwitchClip(**json.loads(row["metadata"]))
+
+    def twitch_source(self, clip_id: str) -> dict | None:
+        _name(clip_id, "clip ID")
+        row = self.connection.execute("SELECT * FROM twitch_clip_sources WHERE clip_id=?", (clip_id,)).fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        value["selected_metadata"] = json.loads(value["selected_metadata"])
+        return value
+
+    def _commit_twitch_source(self, connection, current_job, attestation, verified_plan) -> None:
+        """SQL-only publisher for the trusted guarded intake settlement owner."""
+        from native.core.durable_jobs import _id, _reference, _sha
+
+        if connection is not self.connection or not connection.in_transaction:
+            raise LibraryError("Twitch publication requires the settlement transaction")
+        plan = json.loads(_json(verified_plan))
+        if set(plan) != {"job", "clip", "profile_sha256", "result_ref", "media", "existing"}:
+            raise LibraryError("Exact verified publication plan required")
+        if plan["job"] != current_job or current_job["kind"] != "io":
+            raise RevisionConflict("Publication belongs to another claim")
+        _reference(plan["result_ref"]); _sha(plan["profile_sha256"])
+        if (attestation["result_ref"] != plan["result_ref"]
+                or current_job["input"]["profile_sha256"] != plan["profile_sha256"]):
+            raise RevisionConflict("Publication result or profile differs")
+        selected = TwitchClip(**plan["clip"])
+        cached = self.twitch_clip(selected.id)
+        identity = lambda clip: (clip.broadcaster_id, clip.creator_id, timestamp_identity(clip.created_at))
+        if identity(selected) != identity(cached):
+            raise RevisionConflict("Selected Twitch identity changed")
+        if self.twitch_source(selected.id) is not None:
+            raise RevisionConflict("Twitch source already bound")
+        media = plan["media"]
+        if not isinstance(media, dict) or set(media) != {"id", "sha256", "path", "path_key", "bytes"}:
+            raise LibraryError("Exact verified source fingerprint required")
+        _id(media["id"]); _sha(media["sha256"])
+        if (type(media["bytes"]) is not int or not 0 < media["bytes"] <= 2**63-1
+                or not isinstance(media["path"], str) or len(media["path"]) > 32767
+                or not Path(media["path"]).is_absolute() or media["path_key"] != os.path.normcase(media["path"])):
+            raise LibraryError("Invalid verified source fingerprint")
+        row = connection.execute("SELECT * FROM assets WHERE sha256=?", (media["sha256"],)).fetchone()
+        actual = dict(row) if row is not None else None
+        if actual != plan["existing"]:
+            raise RevisionConflict("Source registration changed after guarded verification")
+        if actual is None:
+            if connection.execute("SELECT 1 FROM assets WHERE path_key=?", (media["path_key"],)).fetchone():
+                raise RevisionConflict("Managed source path is already registered")
+            connection.execute("INSERT INTO assets VALUES (?,?,?,?,?)",
+                               tuple(media[key] for key in ("id", "sha256", "path", "path_key", "bytes")))
+            asset_id = media["id"]
+        else:
+            if actual["bytes"] != media["bytes"]:
+                raise RevisionConflict("Existing source size differs")
+            asset_id = actual["id"]
+        connection.execute("INSERT INTO twitch_clip_sources VALUES(?,?,?,?,?,?,?)", (
+            selected.id, asset_id, _json(plan["clip"]), plan["profile_sha256"],
+            plan["result_ref"]["id"], plan["result_ref"]["sha256"], current_job["id"]))
 
     def asset(self, asset_id: str) -> Asset:
         row = self.connection.execute("SELECT id,sha256,path,bytes FROM assets WHERE id=?", (asset_id,)).fetchone()

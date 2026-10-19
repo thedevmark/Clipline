@@ -409,17 +409,22 @@ class NativeMomentTests(unittest.TestCase):
     def test_publication_survives_database_or_final_receipt_failure_without_atomicity_claim(self):
         original_write = CreatorLibrary._write
         original_receipt = owner.write_once
+        original_publish = ProjectStore.publish
         for failure in ('database-commit', 'published-receipt'):
             with self.subTest(failure=failure):
                 self.store = ProjectStore(self.root / failure)
-                count = []
+                publications = []
+
+                def publish(store, *args, **kwargs):
+                    snapshot = original_publish(store, *args, **kwargs)
+                    publications.append(snapshot)
+                    return snapshot
 
                 @contextmanager
                 def transaction(library):
-                    count.append(True)
                     with original_write(library):
                         yield
-                        if failure == 'database-commit' and len(count) == 3:
+                        if failure == 'database-commit' and publications:
                             raise sqlite3.OperationalError('injected final transaction failure')
 
                 def receipt(path, value):
@@ -427,13 +432,16 @@ class NativeMomentTests(unittest.TestCase):
                         raise OSError('injected final receipt failure')
                     return original_receipt(path, value)
 
-                with patch.object(CreatorLibrary, '_write', transaction), patch.object(owner, 'write_once', receipt):
+                with patch.object(CreatorLibrary, '_write', transaction), \
+                        patch.object(owner, 'write_once', receipt), \
+                        patch.object(ProjectStore, 'publish', publish):
                     with self.assertRaises(owner.NativeMomentCreationError) as caught:
                         self.background()
                 error = caught.exception
                 self.assertEqual(error.state, 'publication_unknown')
                 snapshot = self.store.load()
                 self.assertIsNotNone(snapshot)
+                self.assertEqual(publications, [snapshot])
                 self.assertEqual(snapshot.document, (error.directory / 'moment.fcproj').read_bytes())
                 self.assertTrue((error.directory / 'publish-intent.json').exists())
                 self.assertFalse((error.directory / 'published.json').exists())

@@ -23,13 +23,14 @@ from __future__ import annotations
 import http.server
 import json
 import os
+import re
 import secrets
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from native.services.settings import load_settings, save_settings
@@ -97,6 +98,17 @@ def _read_json(raw: bytes) -> dict:
         return {}
 
 
+class _RejectAuthRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise RuntimeError("Twitch authentication redirect refused.")
+
+
+def _open_bound_request(request):
+    """Do not forward a pinned token to redirects or ambient proxy credentials."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _RejectAuthRedirect())
+    return opener.open(request, timeout=15)
+
+
 # ── Loopback "Sign in with Twitch" (implicit grant) ────────────────
 
 _CAPTURE_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Clipline</title></head>
@@ -115,9 +127,9 @@ _DONE_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Clipline
 <p>You can close this tab and return to Clipline.</p></body></html>"""
 
 
-def authorize_url(state: str, scopes: str = DEFAULT_SCOPES) -> str:
+def authorize_url(state: str, scopes: str = DEFAULT_SCOPES, *, bound_client_id: str | None = None) -> str:
     return AUTHORIZE_URL + "?" + urllib.parse.urlencode({
-        "client_id": client_id(),
+        "client_id": client_id() if bound_client_id is None else bound_client_id,
         "redirect_uri": REDIRECT_URI,
         "response_type": "token",
         "scope": scopes,
@@ -133,7 +145,8 @@ def loopback_login(job, cancel: Optional["object"] = None, scopes: str = DEFAULT
     the port can't bind, raises ``PORT_BUSY_SENTINEL`` so the caller can fall
     back to the device-code flow.
     """
-    if not client_id():
+    cid = client_id()
+    if not cid:
         raise RuntimeError("No Twitch client ID configured.")
 
     state = secrets.token_urlsafe(16)
@@ -170,7 +183,7 @@ def loopback_login(job, cancel: Optional["object"] = None, scopes: str = DEFAULT
     server.timeout = 1.0
 
     job.progress.emit("Opening Twitch in your browser…")
-    webbrowser.open(authorize_url(state, scopes))
+    webbrowser.open(authorize_url(state, scopes, bound_client_id=cid))
 
     deadline = time.monotonic() + 300
     try:
@@ -196,7 +209,7 @@ def loopback_login(job, cancel: Optional["object"] = None, scopes: str = DEFAULT
         "refresh_token": "",  # implicit grant returns none
         "expires_in": int(got.get("expires_in", 0) or 0),
         "scope": (got.get("scope", "") or "").split(),
-    })
+    }, expected_client_id=cid)
 
 
 # ── Device Code Flow (fallback when the loopback port is busy) ──────
@@ -208,6 +221,7 @@ class DeviceCode:
     verification_uri: str
     interval: int
     expires_in: int
+    bound_client_id: str = ""
 
 
 def request_device_code(scopes: str = DEFAULT_SCOPES) -> DeviceCode:
@@ -224,6 +238,7 @@ def request_device_code(scopes: str = DEFAULT_SCOPES) -> DeviceCode:
         verification_uri=data.get("verification_uri") or "https://www.twitch.tv/activate",
         interval=int(data.get("interval", 5)),
         expires_in=int(data.get("expires_in", 1800)),
+        bound_client_id=cid,
     )
 
 
@@ -233,7 +248,7 @@ def poll_token(job, device: DeviceCode, cancel: Optional["object"] = None) -> di
     ``cancel`` is anything with ``.is_set()`` (a threading.Event) — checked
     between polls so the UI can abort. Returns the saved session dict.
     """
-    cid = client_id()
+    cid = device.bound_client_id or client_id()
     job.progress.emit(f"Waiting for approval — code {device.user_code}")
     deadline = time.monotonic() + device.expires_in
     interval = max(1, device.interval)
@@ -254,7 +269,7 @@ def poll_token(job, device: DeviceCode, cancel: Optional["object"] = None) -> di
             "grant_type": DEVICE_GRANT,
         })
         if status == 200 and data.get("access_token"):
-            return _finalize_session(data)
+            return _finalize_session(data, expected_client_id=cid)
         message = str(data.get("message", "")).lower()
         if "authorization_pending" in message or "pending" in message:
             continue
@@ -269,16 +284,90 @@ def poll_token(job, device: DeviceCode, cancel: Optional["object"] = None) -> di
     raise RuntimeError("Twitch login timed out — try again.")
 
 
-def _finalize_session(token: dict) -> dict:
+def _validated_summary(info, expected_client_id):
+    """Validate provider identity without persisting or returning token material."""
+    if not isinstance(info, dict):
+        raise RuntimeError("Twitch identity validation failed.")
+    for name in ("login", "user_id", "client_id"):
+        value = info.get(name)
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_\-]{1,512}", value):
+            raise RuntimeError("Twitch identity validation failed.")
+    if not expected_client_id or info["client_id"] != expected_client_id:
+        raise RuntimeError("Twitch client validation failed.")
+    scopes = info.get("scopes")
+    if (not isinstance(scopes, list) or len(scopes) > 100
+            or any(not isinstance(scope, str) or not re.fullmatch(r"[a-z][a-z0-9:_]{0,127}", scope) for scope in scopes)):
+        raise RuntimeError("Twitch scope validation failed.")
+    expiry = info.get("expires_in")
+    if type(expiry) is not int or not 0 < expiry <= 2**31-1:
+        raise RuntimeError("Twitch expiry validation failed.")
+    return {"login": info["login"], "user_id": info["user_id"],
+            "client_id": info["client_id"], "scopes": sorted(set(scopes)), "expires_in": expiry}
+
+
+@dataclass(frozen=True)
+class ValidatedTwitchConnection:
+    """One live-validated intake connection; never serialize the private token."""
+    _access_token: str = field(repr=False)
+    client_id: str
+    user_id: str
+    login: str
+    scopes: tuple[str, ...]
+    expires_at: float
+
+    def require_own_clip(self, broadcaster_id: str) -> None:
+        if (self.user_id != broadcaster_id or time.time() >= self.expires_at
+                or "channel:manage:clips" not in self.scopes):
+            raise RuntimeError("Twitch own-clip authorization required.")
+
+
+def validated_intake_connection(*, expected_broadcaster_id: str, bound_client_id: str | None = None) -> ValidatedTwitchConnection:
+    """Read and validate once inside the owned worker; leave stored auth unchanged."""
+    cid = client_id() if bound_client_id is None else bound_client_id
+    token = current_token()
+    if not isinstance(token, str) or not token or len(token) > 32768:
+        raise RuntimeError("Twitch own-clip authorization required.")
+    try:
+        info = _validated_summary(validate(token, max_bytes=65536), cid)
+    except Exception:
+        raise RuntimeError("Twitch own-clip authorization required.") from None
+    connection = ValidatedTwitchConnection(token, cid, info["user_id"], info["login"],
+                                          tuple(info["scopes"]), time.time() + info["expires_in"])
+    connection.require_own_clip(expected_broadcaster_id)
+    return connection
+
+
+def clip_download_scopes(validated_scopes) -> str:
+    """Explicit incremental-grant input; this function starts no authorization."""
+    if not isinstance(validated_scopes, (list, tuple)) or len(validated_scopes) > 100:
+        raise RuntimeError("Twitch scope validation failed.")
+    summary = _validated_summary({"login": "scope", "user_id": "scope", "client_id": "scope",
+                                  "scopes": list(validated_scopes), "expires_in": 1}, "scope")
+    return " ".join(sorted(set(summary["scopes"]) | {"channel:manage:clips"}))
+
+
+def _finalize_session(token: dict, *, expected_client_id: str | None = None) -> dict:
     """Validate the fresh token to capture login/user_id, then persist."""
-    info = validate(token["access_token"]) or {}
+    try:
+        if not isinstance(token, dict) or not isinstance(token.get("access_token"), str) or not token["access_token"]:
+            raise ValueError()
+        info = _validated_summary(validate(token["access_token"], max_bytes=65536),
+                                  client_id() if expected_client_id is None else expected_client_id)
+        expiry = token.get("expires_in", info["expires_in"])
+        if type(expiry) is not int or not 0 < expiry <= 2**31-1:
+            raise ValueError()
+        refresh = token.get("refresh_token", "")
+        if not isinstance(refresh, str) or len(refresh) > 32768:
+            raise ValueError()
+    except Exception:
+        raise RuntimeError("Twitch identity validation failed; the previous session is unchanged.") from None
     session = {
         "access_token": token["access_token"],
-        "refresh_token": token.get("refresh_token", ""),
-        "expires_at": time.time() + int(token.get("expires_in", 0)),
-        "login": info.get("login", ""),
-        "user_id": info.get("user_id", ""),
-        "scopes": token.get("scope", []),
+        "refresh_token": refresh,
+        "expires_at": time.time() + min(expiry, info["expires_in"]),
+        "login": info["login"],
+        "user_id": info["user_id"],
+        "scopes": info["scopes"],
     }
     save_session(session)
     return session
@@ -286,14 +375,18 @@ def _finalize_session(token: dict) -> dict:
 
 # ── Token validation + session storage ─────────────────────────────
 
-def validate(access_token: str) -> Optional[dict]:
+def validate(access_token: str, *, max_bytes: int | None = None) -> Optional[dict]:
     """GET /oauth2/validate — returns {login, user_id, client_id, ...} or None."""
+    if max_bytes is not None and (type(max_bytes) is not int or not 1 <= max_bytes <= 65536):
+        raise ValueError("Bounded validation response limit required")
     req = urllib.request.Request(
         VALIDATE_URL, headers={"Authorization": f"OAuth {access_token}"}
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return _read_json(resp.read())
+        response = urllib.request.urlopen(req, timeout=15) if max_bytes is None else _open_bound_request(req)
+        with response as resp:
+            raw = resp.read() if max_bytes is None else resp.read(max_bytes + 1)
+            return None if max_bytes is not None and len(raw) > max_bytes else _read_json(raw)
     except urllib.error.HTTPError:
         return None
     except urllib.error.URLError:

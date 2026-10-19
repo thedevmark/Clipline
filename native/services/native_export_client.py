@@ -75,7 +75,19 @@ class ExportOutcome:
     owner:ExportExecution
 
 class OwnedProcess:
-    def __init__(self,argv,directory,cancel,deadline,*,events=False,execution=None):
+    def __init__(self,argv,directory,cancel,deadline,*,events=False,execution=None,environment=None):
+        if environment is not None:
+            if (not isinstance(environment,dict) or len(environment)>256
+                    or any(not isinstance(k,str) or not k or '=' in k or '\0' in k
+                           or not isinstance(v,str) or '\0' in v
+                           or len(k)>32767 or len(v)>32767 for k,v in environment.items())):
+                raise ExportRuntimeError('Explicit child environment must contain bounded strings')
+            child_environment=dict(environment)
+            child_environment={key:value for key,value in child_environment.items()
+                               if key.upper() not in {'RAYON_NUM_THREADS','OMP_NUM_THREADS'}}
+        else:
+            child_environment=dict(os.environ)
+        child_environment.update(RAYON_NUM_THREADS='2',OMP_NUM_THREADS='2')
         self.directory=directory;directory.mkdir(exist_ok=False)
         self.cancel=cancel;self.deadline=deadline;self.events=queue.Queue(8) if events else None
         self.faults=[];self.threads=[];self.process=None;self.tree=None;self.proof={'disposition':'never_started','active_processes':0};self.closed=False
@@ -86,7 +98,7 @@ class OwnedProcess:
         if execution is not None:execution.register(self)
         try:
             self.process=subprocess.Popen(argv,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
-                creationflags=subprocess.CREATE_NO_WINDOW,env={**os.environ,'RAYON_NUM_THREADS':'2','OMP_NUM_THREADS':'2'})
+                creationflags=subprocess.CREATE_NO_WINDOW,env=child_environment)
             self.proof={'disposition':'unknown'};self.tree=ProcessTree(self.process)
             for pipe,name,limit in [(self.process.stdout,'stdout.log',MAX_WIRE),(self.process.stderr,'stderr.log',1024*1024)]:
                 thread=threading.Thread(target=self._read,args=(pipe,name,limit),daemon=True);thread.start();self.threads.append(thread)

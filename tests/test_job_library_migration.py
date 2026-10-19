@@ -23,7 +23,7 @@ def test_job_migration_preserves_catalog_and_caption_domain(tmp_path):
     with CreatorLibrary(path) as library:
         assert library.jobs.c is library.connection
         assert library.jobs.verifier is None
-        assert library.connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert library.connection.execute("PRAGMA user_version").fetchone()[0] == 3
         assert library.connection.execute("SELECT version FROM caption_schema").fetchone()[0] == 1
         assert library.connection.execute("SELECT version FROM durable_job_schema").fetchone()[0] == 1
         assert library.asset("old-asset").path == "X:/source.mp4"

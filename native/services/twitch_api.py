@@ -52,7 +52,7 @@ class TemporaryClipDownload:
     landscape_url: str = field(repr=False)
 
 
-def own_clip_download(clip: TwitchClip) -> TemporaryClipDownload:
+def own_clip_download(clip: TwitchClip, *, connection: twitch_auth.ValidatedTwitchConnection | None = None) -> TemporaryClipDownload:
     """Resolve one selected broadcaster-owned clip immediately before transfer.
 
     This does not download media or change OAuth grants. Official downloading
@@ -63,8 +63,13 @@ def own_clip_download(clip: TwitchClip) -> TemporaryClipDownload:
         raise ValueError("Select a validated Twitch clip")
     # Revalidate frozen records; callers can still bypass dataclass construction.
     TwitchClip(**vars(clip))
+    if connection is not None:
+        try:
+            connection.require_own_clip(clip.broadcaster_id)
+        except Exception:
+            raise TwitchAuthError("Twitch own-clip authorization required.") from None
     try:
-        account = current_user()
+        account = current_user() if connection is None else _bound_user(connection)
     except TwitchAuthError:
         raise TwitchAuthError("Reconnect Twitch before downloading clips.") from None
     except RuntimeError:
@@ -72,10 +77,11 @@ def own_clip_download(clip: TwitchClip) -> TemporaryClipDownload:
     if account['id'] != clip.broadcaster_id:
         raise TwitchAuthError("Connect the broadcaster's Twitch account to download this clip.")
     try:
-        response = _get("clips/downloads", {
+        params = {
             "broadcaster_id": clip.broadcaster_id,
             "editor_id": account['id'], "clip_id": clip.id,
-        })
+        }
+        response = _get("clips/downloads", params) if connection is None else _get_bound("clips/downloads", params, connection)
     except TwitchAuthError:
         raise TwitchAuthError("Reconnect Twitch with clip download permission.") from None
     except RuntimeError as exc:
@@ -102,6 +108,46 @@ def own_clip_download(clip: TwitchClip) -> TemporaryClipDownload:
     if not valid:
         raise ClipDownloadUnavailable("Twitch returned an invalid clip download.")
     return TemporaryClipDownload(clip.id, url)
+
+
+def _get_bound(path: str, params: dict, connection: twitch_auth.ValidatedTwitchConnection) -> dict:
+    """Intake-only requests with one pinned connection and bounded safe errors."""
+    if path not in {"users", "clips/downloads"}:
+        raise ValueError("Unsupported bound Twitch request")
+    connection.require_own_clip(connection.user_id)
+    req = urllib.request.Request(f"{HELIX}/{path}?{urllib.parse.urlencode(params)}", headers={
+        "Authorization": f"Bearer {connection._access_token}", "Client-Id": connection.client_id})
+    try:
+        with twitch_auth._open_bound_request(req) as resp:
+            raw = resp.read(65537)
+        if len(raw) > 65536:
+            raise ValueError()
+        def invalid_constant(_):
+            raise ValueError()
+        value = json.loads(raw.decode(), parse_constant=invalid_constant)
+        if not isinstance(value, dict):
+            raise ValueError()
+        return value
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        try:
+            exc.close()
+        except Exception:
+            pass
+        if status in (401, 403):
+            raise TwitchAuthError("Reconnect Twitch with clip download permission.") from None
+        raise ClipDownloadUnavailable("Twitch bound request failed.") from None
+    except Exception:
+        raise ClipDownloadUnavailable("Twitch bound request failed.") from None
+
+
+def _bound_user(connection):
+    value = _get_bound("users", {}, connection)
+    entries = value.get("data")
+    if (not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict)
+            or entries[0].get("id") != connection.user_id):
+        raise TwitchAuthError("Twitch bound account differs.")
+    return {"id": connection.user_id}
 
 
 def _get(path: str, params: dict) -> dict:
