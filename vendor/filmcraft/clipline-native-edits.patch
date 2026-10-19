@@ -1,7 +1,7 @@
 diff --git a/Cargo.lock b/Cargo.lock
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -845,6 +845,22 @@
+@@ -845,6 +845,28 @@
   "error-code",
  ]
  
@@ -18,13 +18,19 @@ diff --git a/Cargo.lock b/Cargo.lock
 +version = "0.9.0"
 +dependencies = [
 + "filmcraft-engine",
++ "filmcraft-export",
++ "filmcraft-gpu",
 + "filmcraft-platform",
++ "filmcraft-project",
++ "filmcraft-render",
++ "filmcraft-time",
 + "serde_json",
++ "wgpu",
 +]
  [[package]]
  name = "codespan-reporting"
  version = "0.13.1"
-@@ -1934,7 +1950,9 @@
+@@ -1934,7 +1956,9 @@
   "log",
   "serde",
   "serde_json",
@@ -105,7 +111,7 @@ diff --git a/apps/clipline-export-snapshot/Cargo.toml b/apps/clipline-export-sna
 new file mode 100644
 --- /dev/null
 +++ b/apps/clipline-export-snapshot/Cargo.toml
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,21 @@
 +[package]
 +name = "clipline-export-snapshot"
 +description = "Owned headless Clipline immutable native export helper"
@@ -121,11 +127,17 @@ new file mode 100644
 +filmcraft-engine = { workspace = true }
 +filmcraft-platform = { workspace = true }
 +serde_json = { workspace = true }
++filmcraft-export = { workspace = true }
++filmcraft-gpu = { workspace = true }
++filmcraft-project = { workspace = true }
++filmcraft-render = { workspace = true }
++filmcraft-time = { workspace = true }
++wgpu = { version = "30", default-features = false, features = ["wgsl", "dx12"] }
 diff --git a/apps/clipline-export-snapshot/src/main.rs b/apps/clipline-export-snapshot/src/main.rs
 new file mode 100644
 --- /dev/null
 +++ b/apps/clipline-export-snapshot/src/main.rs
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,96 @@
 +//! Gated headless protocol. The engine owns capture, native clocks and rendering.
 +use serde_json::{Value, json};
 +use std::io::{BufRead, Write};
@@ -155,6 +167,36 @@ new file mode 100644
 +    stream.flush()?;
 +    Ok(())
 +}
++// Same off-screen adapter used by the published Filmcraft CLI.
++struct GpuFrameRenderer(filmcraft_gpu::ExportRenderer);
++impl filmcraft_export::FrameRenderer for GpuFrameRenderer {
++    fn render(
++        &mut self,
++        project: &filmcraft_project::Project,
++        seq: filmcraft_project::ItemId,
++        t: filmcraft_time::Tick,
++        opts: filmcraft_render::RenderOptions,
++        sources: &dyn filmcraft_render::SourceProvider,
++    ) -> Option<filmcraft_render::Image> {
++        self.0.render(project, seq, t, opts, sources)
++    }
++}
++fn register_gpu_frame_renderer() {
++    filmcraft_export::register_frame_renderer(|| {
++        filmcraft_gpu::ExportRenderer::new().map(|r| Box::new(GpuFrameRenderer(r)) as Box<dyn filmcraft_export::FrameRenderer>)
++    });
++}
++fn acceleration_stats() -> Value {
++    let gpu = filmcraft_export::gpu_render_stats();
++    let timings = filmcraft_gpu::export_renderer::timing::get();
++    let hw = filmcraft_export::hw_encode_stats();
++    json!({"gpuFrames":gpu.frames,"gpuFallbacks":gpu.fallbacks,
++        "gpuCompositedFrames":timings.frames,"gpuSubmitMs":timings.submit.as_secs_f64()*1000.0,
++        "gpuReadbackWaitMs":timings.map_wait.as_secs_f64()*1000.0,
++        "gpuReadbackConvertMs":timings.convert.as_secs_f64()*1000.0,
++        "hardwareFrames":hw.frames,"hardwareSessions":hw.sessions,"hardwareDeclined":hw.declined})
++}
++
 +fn run() -> Result<(), Box<dyn std::error::Error>> {
 +    let input = std::io::stdin();
 +    let mut input = input.lock();
@@ -166,9 +208,8 @@ new file mode 100644
 +    if args.len() != 2 {
 +        return Err("usage: clipline-export-snapshot OWNED_WORKING_PROJECT".into());
 +    }
-+    // Published CLI initialization, with the GPU renderer intentionally absent:
-+    // the sole export profile explicitly uses CPU composition/software encoding.
 +    filmcraft_platform::register();
++    register_gpu_frame_renderer();
 +    let mut session = filmcraft_engine::Session::default();
 +    session.execute("file.open", json!({"path":args[1]}))?;
 +    emit(json!({"event":"ready","observation":filmcraft_engine::export_snapshot::inspect(&mut session)?}))?;
@@ -179,7 +220,11 @@ new file mode 100644
 +    if line(&mut input, 32)? != "render\n" {
 +        return Err("render authorization was not received".into());
 +    }
-+    emit(json!({"event":"result","result":captured.render(&mut session)?}))?;
++    let before = acceleration_stats();
++    let mut result = captured.render(&mut session)?;
++    result["acceleration"] = json!({"profile":"clipline.h264.gpu-auto.v1",
++        "before":before,"after":acceleration_stats(),"perf":session.execute("perf.stats", json!({}))?});
++    emit(json!({"event":"result","result":result}))?;
 +    Ok(())
 +}
 +fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -10947,7 +10992,7 @@ diff --git a/crates/engine/src/export_snapshot.rs b/crates/engine/src/export_sna
 new file mode 100644
 --- /dev/null
 +++ b/crates/engine/src/export_snapshot.rs
-@@ -0,0 +1,260 @@
+@@ -0,0 +1,268 @@
 +//! Guarded immutable export capture for the dedicated headless export helper.
 +//! This blocking render API is deliberately absent from the GUI command registry.
 +use crate::{EngineError, Result, Session};
@@ -10973,10 +11018,10 @@ new file mode 100644
 +    value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 +}
 +
-+/// The first owner supports full native compositions and software H264 only.
++/// This qualified candidate keeps full native compositions and requests GPU/NVENC acceleration.
 +pub fn recipe() -> Value {
-+    json!({"id":"clipline.h264.software.v1","format":"h264","range":"entire",
-+    "gpuRendering":"off","hardwareEncoding":"off","burnCaptions":true,
++    json!({"id":"clipline.h264.gpu-auto.v1","format":"h264","range":"entire",
++    "gpuRendering":"auto","hardwareEncoding":"auto","burnCaptions":true,
 +    "audio":{"codec":"aac","sample_rate":48000,"channels":2},"scale":1})
 +}
 +
@@ -11067,6 +11112,9 @@ new file mode 100644
 +    pub fn render(self, s: &mut Session) -> Result<Value> {
 +        let mut results = Vec::new();
 +        for output in self.outputs {
++            let started = std::time::Instant::now();
++            let performance_before = crate::perf::stats(s);
++            let gpu_before = filmcraft_export::gpu_render_stats();
 +            // Reserve each previously absent destination exclusively before the
 +            // native encoder replaces its own empty reservation. A failed render
 +            // retains this namespace for the external owner's quarantine policy.
@@ -11083,7 +11131,12 @@ new file mode 100644
 +            let terminal = s.jobs.iter().find(|j| j.id == job).map(|j| crate::export_tools::job_json(s, j)).ok_or_else(|| bad("native export job missing"))?;
 +            let success =
 +                terminal["finished"] == true && terminal["result"]["error"].is_null() && terminal["offlineMedia"].as_array().is_some_and(Vec::is_empty);
-+            results.push(json!({"composition":output.composition,"sequence":output.sequence.0,
++            let gpu_after = filmcraft_export::gpu_render_stats();
++            results.push(json!({"performance":{"before":performance_before,"after":crate::perf::stats(s),
++                "wallSeconds":started.elapsed().as_secs_f64(),
++                "gpuFrames":gpu_after.frames.saturating_sub(gpu_before.frames),
++                "gpuFallbacks":gpu_after.fallbacks.saturating_sub(gpu_before.fallbacks)},
++                "composition":output.composition,"sequence":output.sequence.0,
 +                "path":path,"facts":output.facts,"job":job,"terminal":terminal}));
 +            if !success {
 +                return Ok(json!({"schema":1,"state":"failed","capture":self.receipt,"outputs":results}));
@@ -11179,8 +11232,8 @@ new file mode 100644
 +        let range = filmcraft_time::TimeRange::new(filmcraft_time::Tick::ZERO, q.duration());
 +        let (_, mut settings) = crate::export_tools::settings_from_params(
 +            s,
-+            &json!({"format":"h264","gpuRendering":"off",
-+            "hardwareEncoding":"off","burnCaptions":true,"settings":{"audio":{"codec":"aac","sampleRate":48000,"channels":2}}}),
++            &json!({"format":"h264","gpuRendering":"auto",
++            "hardwareEncoding":"auto","burnCaptions":true,"settings":{"audio":{"codec":"aac","sampleRate":48000,"channels":2}}}),
 +            "native.exportSnapshot",
 +        )?;
 +        settings.path = output.path;
