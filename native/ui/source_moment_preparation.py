@@ -287,9 +287,9 @@ class MomentPreparationDialog(QDialog):
 
 
 class MomentPreparationBinding:
-    def __init__(self, window):
+    def __init__(self, window, *, python=None):
         self.window = window
-        self.service = SourceMomentPreparation(window.library)
+        self.service = SourceMomentPreparation(window.library, python=python)
         self.active = False
         self.dialog = None
         self.panel = QWidget(window)

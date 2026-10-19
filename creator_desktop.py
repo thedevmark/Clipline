@@ -47,7 +47,7 @@ def main(argv=None):
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName('Clipline')
     app.setWindowIcon(QIcon(str(INTERNAL_DIR / 'static' / 'favicon.ico')))
-    window = CreatorLibraryWindow(args.workspace)
+    window = CreatorLibraryWindow(args.workspace, probe_python=editor_runtime.python if editor_runtime else None)
     if editor_runtime is not None:
         from native.ui.workspace_editor import EditorCompanionBinding
         controller = editor_runtime.controller(window.library,caption_runtime=caption_runtime,export_runtime=export_runtime)

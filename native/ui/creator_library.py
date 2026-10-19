@@ -74,7 +74,7 @@ class LibraryModel(QAbstractTableModel):
 
 
 class CreatorLibraryWindow(QMainWindow):
-    def __init__(self, directory, *, runner=None, open_moment=None, parent=None):
+    def __init__(self, directory, *, runner=None, open_moment=None, probe_python=None, parent=None):
         super().__init__(parent)
         self.library = WorkspaceLibrary(directory)
         self.runner = runner or JobRunner()
@@ -234,7 +234,7 @@ class CreatorLibraryWindow(QMainWindow):
         from native.ui.creator_kit_setup import KitSetupBinding
         self.kit_binding = KitSetupBinding(self)
         from native.ui.source_moment_preparation import MomentPreparationBinding
-        self.moment_preparation_binding = MomentPreparationBinding(self)
+        self.moment_preparation_binding = MomentPreparationBinding(self, python=probe_python)
         self.load_view('clips')
 
     def selected_entry(self):

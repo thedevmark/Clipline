@@ -10,9 +10,24 @@ from native.services.twitch_intake_client import classify_probe
 
 
 class LocalVideoProbe(CaptionAudioPreparer):
-    def __init__(self):
+    def __init__(self, *, python=None):
         # The video-only inspection uses no FFmpeg extraction or model runtime.
-        super().__init__(None,TOOLS.ffprobe,python=sys.executable)
+        if python is None:
+            if getattr(sys, 'frozen', False):
+                raise LibraryError('Configure an explicit helper Python in the editor runtime before preparing a local source.')
+            python = sys.executable
+        super().__init__(None,TOOLS.ffprobe,python=python)
+        self._check_python()
+
+    def _check_python(self):
+        try:
+            interpreter = _path(self.python)
+            if getattr(sys, 'frozen', False) and interpreter.samefile(sys.executable):
+                raise LibraryError('The helper Python must be a separate interpreter, not the Clipline application.')
+        except (OSError, ValueError, TypeError) as exc:
+            if isinstance(exc, LibraryError):
+                raise
+            raise LibraryError('Configure an existing absolute local helper Python before preparing a local source.') from exc
 
     def inspect_video(self,asset,output_root,*,cancel=None):
         if not self._busy.acquire(False):
@@ -20,6 +35,7 @@ class LocalVideoProbe(CaptionAudioPreparer):
         try:
             if self.has_unsettled:
                 raise ExecutionUncertain('Check or stop the original source inspection first',self,self._directory)
+            self._check_python()
             cancel=cancel or threading.Event();started=time.monotonic()
             def checkpoint():
                 if cancel.is_set():raise LibraryError('Source inspection cancelled.')

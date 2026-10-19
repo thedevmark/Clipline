@@ -102,8 +102,9 @@ def validate_source_facts(facts):
 
 
 class SourceMomentPreparation:
-    def __init__(self, workspace):
+    def __init__(self, workspace, *, python=None):
         self.workspace = workspace
+        self.python = python
         self.directory = workspace.directory / 'source-intake'
         self.local_probe = None
         self._local_sources = {}
@@ -128,7 +129,7 @@ class SourceMomentPreparation:
             asset = library.verify_asset(asset_id)
         if self.local_probe is None:
             from native.services.local_video_probe import LocalVideoProbe
-            self.local_probe = LocalVideoProbe()
+            self.local_probe = LocalVideoProbe(python=self.python) if self.python is not None else LocalVideoProbe()
         facts = self.local_probe.inspect_video(asset,self.workspace.directory/'local-source-inspection')
         duration_us = validate_source_facts(facts)
         binding = {'kind':'local','asset_id':asset.id}
