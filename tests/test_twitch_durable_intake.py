@@ -226,13 +226,14 @@ def test_actual_worker_with_child_local_provider_http_doubles_has_no_secret_egre
     c=case; root=c['client'].tools.code_root
     (root/'native/core').mkdir(exist_ok=True)
     shutil.copyfile(PRODUCT/'native/core/twitch_inbox.py',root/'native/core/twitch_inbox.py')
-    (root/'native/services/twitch_auth.py').write_text(
-        'def validated_intake_connection(*,expected_broadcaster_id,bound_client_id):\n'
-        ' assert expected_broadcaster_id=="42" and bound_client_id=="client"\n'
-        ' return object()\n',encoding='utf8')
-    api_code='''import io,urllib.request
+    child_code='''import io,urllib.request,sys
+from pathlib import Path
 from types import SimpleNamespace
-class TwitchAuthError(RuntimeError): pass
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from native.services import twitch_auth,twitch_api,twitch_transfer_worker
+def validated_intake_connection(*,expected_broadcaster_id,bound_client_id):
+ assert expected_broadcaster_id=="42" and bound_client_id=="client"
+ return object()
 class Headers(dict):
  def get_all(self,key,default): return ['20'] if key=='Content-Length' else default
 class Response:
@@ -251,10 +252,22 @@ def own_clip_download(selected,*,connection):
  assert selected.id=='Clip-One'
  urllib.request.build_opener=lambda *args:Opener()
  return SimpleNamespace(landscape_url='https://cdn.example.test/source?signature=authored-private-signed')
+twitch_auth.validated_intake_connection=validated_intake_connection
+twitch_api.own_clip_download=own_clip_download
+raise SystemExit(twitch_transfer_worker.main())
 '''
-    (root/'native/services/twitch_api.py').write_text(api_code,encoding='utf8')
+    # Keep caller/worker source pins identical; inject provider doubles only in
+    # the child. Other collected tests can already have loaded the auth owner.
+    wrapper=root/'native/fixture_transfer.py'
+    wrapper.write_text(child_code,encoding='utf8')
     closure={str(p.relative_to(root)).replace('\\','/'):hash_file(p) for p in root.rglob('*') if p.is_file() and p.suffix in ('.py','.sql')}
     c['client']=TwitchIntakeClient(replace(c['client'].tools,code=closure))
+    owned=TwitchIntakeClient._owned
+    def child_with_provider_doubles(self,argv,*args,**kwargs):
+        if argv[-1]==str(self.tools.worker.path):
+            argv=[*argv[:-1],str(wrapper)]
+        return owned(self,argv,*args,**kwargs)
+    monkeypatch.setattr(TwitchIntakeClient,'_owned',child_with_provider_doubles)
     # Use the production transfer dispatch, not the per-case generic child double.
     monkeypatch.setattr(TwitchIntakeClient,'transfer',ORIGINAL_TRANSFER)
     submit(c); result=run(c)

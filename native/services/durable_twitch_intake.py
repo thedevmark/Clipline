@@ -117,8 +117,9 @@ class DurableTwitchIntake:
             current=self.jobs.mark_interrupted(job['id'],expected_revision=current['revision'],reason='cleanup_uncertain')
         return current
 
-    def run_next(self,*,cancel=None,timeout=300):
+    def run_next(self,*,cancel=None,timeout=300,job_id=None):
         self._background()
+        if job_id is not None:identifier(job_id)
         if type(timeout) not in (int,float) or not math.isfinite(timeout) or not 0<timeout<=300:
             raise IntakeError('FINITE_INTAKE_DEADLINE_REQUIRED')
         if not self._busy.acquire(False): raise IntakeError('INTAKE_BUSY')
@@ -127,7 +128,7 @@ class DurableTwitchIntake:
                 raise ExportOwnershipError('INTAKE_PREVIOUS_OWNER_UNKNOWN',[self._execution])
             if self._publication is not None and not self._publication.closed:
                 raise PublicationGuardError(self._publication)
-            return self._run(cancel or threading.Event(),time.monotonic()+timeout)
+            return self._run(cancel or threading.Event(),time.monotonic()+timeout,job_id=job_id)
         except PublicationGuardError as error:
             self._publication=error.publication
             raise
@@ -141,9 +142,9 @@ class DurableTwitchIntake:
             raise
         finally: self._busy.release()
 
-    def _run(self,cancel,deadline):
+    def _run(self,cancel,deadline,*,job_id=None):
         if cancel.is_set(): return None
-        job=self.jobs.claim_next(owner_id=self.owner_id,kinds=['io'])
+        job=self.jobs.claim_next(owner_id=self.owner_id,kinds=['io'],job_id=job_id)
         if job is None: return None
         execution=ExportExecution({'database':str(self.database),'job_id':job['id'],'claim_token':job['claim_token'],
                                    'intent_sha256':job['intent_sha256'],'output_set_id':job['output_set_id']})

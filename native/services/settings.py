@@ -7,7 +7,9 @@ Flask.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import tempfile
 from typing import Any
 
 from native.services.paths import APP_STATE_DIR, DEFAULT_OUTPUT_DIR, SETTINGS_FILE
@@ -25,8 +27,19 @@ def load_settings() -> dict[str, Any]:
 
 def save_settings(settings: dict[str, Any]) -> None:
     APP_STATE_DIR.mkdir(parents=True, exist_ok=True)
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(settings, f, indent=2)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=SETTINGS_FILE.parent,
+                                         prefix=SETTINGS_FILE.name + ".", suffix=".tmp", delete=False) as f:
+            temporary = Path(f.name)
+            json.dump(settings, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, SETTINGS_FILE)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def get_output_dir() -> Path:

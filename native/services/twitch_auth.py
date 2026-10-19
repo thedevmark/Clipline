@@ -137,7 +137,9 @@ def authorize_url(state: str, scopes: str = DEFAULT_SCOPES, *, bound_client_id: 
     })
 
 
-def loopback_login(job, cancel: Optional["object"] = None, scopes: str = DEFAULT_SCOPES) -> dict:
+def loopback_login(job, cancel: Optional["object"] = None, scopes: str = DEFAULT_SCOPES, *,
+                   bound_client_id: str | None = None, expected_user_id: str | None = None,
+                   required_scopes: tuple[str, ...] = ()) -> dict:
     """Worker: open Twitch in the browser, catch the redirect on a local port.
 
     Implicit grant (no secret). The user just clicks Authorize and Twitch
@@ -145,7 +147,7 @@ def loopback_login(job, cancel: Optional["object"] = None, scopes: str = DEFAULT
     the port can't bind, raises ``PORT_BUSY_SENTINEL`` so the caller can fall
     back to the device-code flow.
     """
-    cid = client_id()
+    cid = client_id() if bound_client_id is None else bound_client_id
     if not cid:
         raise RuntimeError("No Twitch client ID configured.")
 
@@ -209,7 +211,7 @@ def loopback_login(job, cancel: Optional["object"] = None, scopes: str = DEFAULT
         "refresh_token": "",  # implicit grant returns none
         "expires_in": int(got.get("expires_in", 0) or 0),
         "scope": (got.get("scope", "") or "").split(),
-    }, expected_client_id=cid)
+    }, expected_client_id=cid, expected_user_id=expected_user_id, required_scopes=required_scopes, cancel=cancel)
 
 
 # ── Device Code Flow (fallback when the loopback port is busy) ──────
@@ -346,13 +348,20 @@ def clip_download_scopes(validated_scopes) -> str:
     return " ".join(sorted(set(summary["scopes"]) | {"channel:manage:clips"}))
 
 
-def _finalize_session(token: dict, *, expected_client_id: str | None = None) -> dict:
+def _finalize_session(token: dict, *, expected_client_id: str | None = None,
+                      expected_user_id: str | None = None, required_scopes: tuple[str, ...] = (), cancel=None) -> dict:
     """Validate the fresh token to capture login/user_id, then persist."""
     try:
         if not isinstance(token, dict) or not isinstance(token.get("access_token"), str) or not token["access_token"]:
             raise ValueError()
         info = _validated_summary(validate(token["access_token"], max_bytes=65536),
                                   client_id() if expected_client_id is None else expected_client_id)
+        if expected_user_id is not None and info['user_id'] != expected_user_id:
+            raise ValueError()
+        if (not isinstance(required_scopes, (tuple, list)) or len(required_scopes)>100
+                or any(not isinstance(scope,str) or not re.fullmatch(r'[a-z][a-z0-9:_]{0,127}',scope) for scope in required_scopes)
+                or not set(required_scopes).issubset(info['scopes'])):
+            raise ValueError()
         expiry = token.get("expires_in", info["expires_in"])
         if type(expiry) is not int or not 0 < expiry <= 2**31-1:
             raise ValueError()
@@ -369,8 +378,34 @@ def _finalize_session(token: dict, *, expected_client_id: str | None = None) -> 
         "user_id": info["user_id"],
         "scopes": info["scopes"],
     }
+    if cancel is not None and cancel.is_set():
+        raise RuntimeError('Twitch authorization cancelled; the previous session is unchanged.')
     save_session(session)
     return session
+
+
+def authorize_clip_downloads(job, cancel, *, expected_broadcaster_id: str, bound_client_id: str) -> dict:
+    """Explicit incremental action. Only the auth owner handles private session data."""
+    if (not isinstance(expected_broadcaster_id,str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,512}',expected_broadcaster_id)
+            or not isinstance(bound_client_id,str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,512}',bound_client_id)):
+        raise RuntimeError('The selected Twitch account is invalid.')
+    if cancel is not None and cancel.is_set():
+        raise RuntimeError('Twitch clip authorization cancelled.')
+    try:
+        previous=load_session()
+        recorded=previous.get('scopes',[]) if isinstance(previous,dict) and previous.get('user_id')==expected_broadcaster_id else []
+        try:
+            requested=clip_download_scopes(recorded)
+        except RuntimeError:
+            requested=clip_download_scopes([])
+        # Recorded scope names are request input, never proof of permission.
+        session=loopback_login(job,cancel,requested,bound_client_id=bound_client_id,
+            expected_user_id=expected_broadcaster_id,required_scopes=('channel:manage:clips',))
+        return {'user_id':session['user_id'],'login':session['login'],'scopes':tuple(session['scopes'])}
+    except Exception:
+        if cancel is not None and cancel.is_set():
+            raise RuntimeError('Twitch clip authorization cancelled.') from None
+        raise RuntimeError('Twitch clip authorization failed. The previous session is unchanged.') from None
 
 
 # ── Token validation + session storage ─────────────────────────────
