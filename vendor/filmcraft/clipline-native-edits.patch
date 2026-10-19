@@ -1,22 +1,29 @@
-diff --git a/Cargo.lock b/Cargo.lock
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -843,6 +843,14 @@
- checksum = "bde03770d3df201d4fb868f2c9c59e66a3e4e2bd06692a0fe701e7103c7e84d4"
- dependencies = [
+@@ -845,6 +845,22 @@
   "error-code",
-+]
-+
+ ]
+ 
 +[[package]]
 +name = "clipline-creator-kit"
 +version = "0.9.0"
 +dependencies = [
 + "filmcraft-engine",
 + "serde_json",
- ]
- 
++]
++
++[[package]]
++name = "clipline-export-snapshot"
++version = "0.9.0"
++dependencies = [
++ "filmcraft-engine",
++ "filmcraft-platform",
++ "serde_json",
++]
  [[package]]
-@@ -1934,7 +1942,9 @@
+ name = "codespan-reporting"
+ version = "0.13.1"
+@@ -1934,7 +1950,9 @@
   "log",
   "serde",
   "serde_json",
@@ -26,8 +33,6 @@ diff --git a/Cargo.lock b/Cargo.lock
   "web-time",
  ]
  
-diff --git a/apps/clipline-creator-kit/Cargo.toml b/apps/clipline-creator-kit/Cargo.toml
-new file mode 100644
 --- /dev/null
 +++ b/apps/clipline-creator-kit/Cargo.toml
 @@ -0,0 +1,14 @@
@@ -45,8 +50,6 @@ new file mode 100644
 +[dependencies]
 +filmcraft-engine = { workspace = true }
 +serde_json = { workspace = true }
-diff --git a/apps/clipline-creator-kit/README.md b/apps/clipline-creator-kit/README.md
-new file mode 100644
 --- /dev/null
 +++ b/apps/clipline-creator-kit/README.md
 @@ -0,0 +1,14 @@
@@ -64,8 +67,6 @@ new file mode 100644
 +```
 +
 +It reads bounded JSON bytes and delegates document creation to the native owner. The canonical caller admits explicit Moment/Kit/source/template records, owns the gated process and verifies compact creation receipts. Successful files require ProjectStore publication. Creation receipts do not overwrite canonical records or become later timeline authority. Stderr, nonzero exits, partial outputs and unknown process/publication states require explicit reconciliation; the helper adds no automatic retry, command registry, general batch API or Python timeline.
-diff --git a/apps/clipline-creator-kit/src/main.rs b/apps/clipline-creator-kit/src/main.rs
-new file mode 100644
 --- /dev/null
 +++ b/apps/clipline-creator-kit/src/main.rs
 @@ -0,0 +1,24 @@
@@ -93,7 +94,90 @@ new file mode 100644
 +    println!("{}", serde_json::to_string(&result)?);
 +    Ok(())
 +}
-diff --git a/crates/engine/Cargo.toml b/crates/engine/Cargo.toml
+--- /dev/null
++++ b/apps/clipline-export-snapshot/Cargo.toml
+@@ -0,0 +1,15 @@
++[package]
++name = "clipline-export-snapshot"
++description = "Owned headless Clipline immutable native export helper"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++rust-version.workspace = true
++
++[lints]
++workspace = true
++
++[dependencies]
++filmcraft-engine = { workspace = true }
++filmcraft-platform = { workspace = true }
++serde_json = { workspace = true }
+--- /dev/null
++++ b/apps/clipline-export-snapshot/src/main.rs
+@@ -0,0 +1,63 @@
++//! Gated headless protocol. The engine owns capture, native clocks and rendering.
++use serde_json::{Value, json};
++use std::io::{BufRead, Write};
++fn line(input: &mut impl BufRead, max: usize) -> Result<String, Box<dyn std::error::Error>> {
++    let mut bytes = Vec::new();
++    loop {
++        let available = input.fill_buf()?;
++        if available.is_empty() {
++            return Err("protocol ended before an explicit instruction".into());
++        }
++        let n = available.iter().position(|b| *b == b'\n').map_or(available.len(), |i| i + 1);
++        if bytes.len() + n > max {
++            return Err("protocol line exceeds bound".into());
++        }
++        bytes.extend_from_slice(&available[..n]);
++        input.consume(n);
++        if bytes.last() == Some(&b'\n') {
++            return Ok(String::from_utf8(bytes)?);
++        }
++    }
++}
++fn emit(value: Value) -> Result<(), Box<dyn std::error::Error>> {
++    let stdout = std::io::stdout();
++    let mut stream = stdout.lock();
++    serde_json::to_writer(&mut stream, &value)?;
++    stream.write_all(b"\n")?;
++    stream.flush()?;
++    Ok(())
++}
++fn run() -> Result<(), Box<dyn std::error::Error>> {
++    let input = std::io::stdin();
++    let mut input = input.lock();
++    // The parent attaches the new process to its Job Object before this gate.
++    if line(&mut input, 32)? != "start\n" {
++        return Err("owned launch gate was not released".into());
++    }
++    let args: Vec<_> = std::env::args().collect();
++    if args.len() != 2 {
++        return Err("usage: clipline-export-snapshot OWNED_WORKING_PROJECT".into());
++    }
++    // Published CLI initialization, with the GPU renderer intentionally absent:
++    // the sole export profile explicitly uses CPU composition/software encoding.
++    filmcraft_platform::register();
++    let mut session = filmcraft_engine::Session::default();
++    session.execute("file.open", json!({"path":args[1]}))?;
++    emit(json!({"event":"ready","observation":filmcraft_engine::export_snapshot::inspect(&mut session)?}))?;
++    let params: Value = serde_json::from_str(&line(&mut input, 65537)?)?;
++    let captured = filmcraft_engine::export_snapshot::capture(&mut session, &params)?;
++    emit(json!({"event":"captured","capture":captured.receipt()}))?;
++    // The parent verifies the native resolved source paths/closure before export.
++    if line(&mut input, 32)? != "render\n" {
++        return Err("render authorization was not received".into());
++    }
++    emit(json!({"event":"result","result":captured.render(&mut session)?}))?;
++    Ok(())
++}
++fn main() -> Result<(), Box<dyn std::error::Error>> {
++    if let Err(error) = run() {
++        let _ = emit(json!({"event":"error","message":error.to_string()}));
++        return Err(error);
++    }
++    Ok(())
++}
 --- a/crates/engine/Cargo.toml
 +++ b/crates/engine/Cargo.toml
 @@ -39,11 +39,13 @@
@@ -111,8 +195,6 @@ diff --git a/crates/engine/Cargo.toml b/crates/engine/Cargo.toml
  
  [dev-dependencies]
  filmcraft-testkit = { workspace = true }
-diff --git a/crates/engine/src/accepted_captions.rs b/crates/engine/src/accepted_captions.rs
-new file mode 100644
 --- /dev/null
 +++ b/crates/engine/src/accepted_captions.rs
 @@ -0,0 +1,521 @@
@@ -637,7 +719,6 @@ new file mode 100644
 +    Ok(json!({"owner":owner.0,"accepted":pin,"captions":m.cues.len(),"revision":s.revision,
 +        "sourceIdentityCheck":"native stored import identity only; original source SHA is retained provenance, not a fresh media rehash"}))
 +}
-diff --git a/crates/engine/src/autosave.rs b/crates/engine/src/autosave.rs
 --- a/crates/engine/src/autosave.rs
 +++ b/crates/engine/src/autosave.rs
 @@ -1039,11 +1039,14 @@
@@ -660,7 +741,6 @@ diff --git a/crates/engine/src/autosave.rs b/crates/engine/src/autosave.rs
                      }
                  }
                  Ok(path)
-diff --git a/crates/engine/src/commands.rs b/crates/engine/src/commands.rs
 --- a/crates/engine/src/commands.rs
 +++ b/crates/engine/src/commands.rs
 @@ -3382,6 +3382,15 @@
@@ -715,8 +795,6 @@ diff --git a/crates/engine/src/commands.rs b/crates/engine/src/commands.rs
      let t0 = web_time::Instant::now();
      // Save As renames the project after its new file (not an edit: no undo step, not dirty).
      if adopt
-diff --git a/crates/engine/src/creator_kit.rs b/crates/engine/src/creator_kit.rs
-new file mode 100644
 --- /dev/null
 +++ b/crates/engine/src/creator_kit.rs
 @@ -0,0 +1,1109 @@
@@ -1829,7 +1907,269 @@ new file mode 100644
 +    receipt["requestSha256"] = json!(hash(request_json));
 +    Ok(receipt)
 +}
-diff --git a/crates/engine/src/export_tools.rs b/crates/engine/src/export_tools.rs
+--- /dev/null
++++ b/crates/engine/src/export_snapshot.rs
+@@ -0,0 +1,260 @@
++//! Guarded immutable export capture for the dedicated headless export helper.
++//! This blocking render API is deliberately absent from the GUI command registry.
++use crate::{EngineError, Result, Session};
++use filmcraft_export::ExportSettings;
++use filmcraft_project::{ItemId, Project};
++use serde::Deserialize;
++use serde_json::{Value, json};
++use sha2::{Digest, Sha256};
++use std::{collections::BTreeMap, path::Path, sync::Arc};
++
++const MAX_SNAPSHOT: usize = 64 * 1024 * 1024;
++const KEYS: [&str; 3] = ["clipline.links.v1", "clipline.acceptedCaptions.v1", "clipline.creatorKit.v1"];
++fn bad(message: impl Into<String>) -> EngineError {
++    EngineError::BadParams { cmd: "native.exportSnapshot".into(), msg: message.into() }
++}
++fn hash(bytes: &[u8]) -> String {
++    format!("{:x}", Sha256::digest(bytes))
++}
++fn digest(value: &Value) -> Result<String> {
++    serde_json::to_vec(value).map(|b| hash(&b)).map_err(|e| bad(e.to_string()))
++}
++fn sha(value: &str) -> bool {
++    value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
++}
++
++/// The first owner supports full native compositions and software H264 only.
++pub fn recipe() -> Value {
++    json!({"id":"clipline.h264.software.v1","format":"h264","range":"entire",
++    "gpuRendering":"off","hardwareEncoding":"off","burnCaptions":true,
++    "audio":{"codec":"aac","sample_rate":48000,"channels":2},"scale":1})
++}
++
++fn metadata(s: &Session, validation: &Value) -> Result<(Value, Value)> {
++    let mut bodies = BTreeMap::new();
++    let mut hashes = BTreeMap::new();
++    for owner in validation["owners"].as_array().ok_or_else(|| bad("invalid owner inventory"))? {
++        let id = owner["owner"].as_u64().ok_or_else(|| bad("invalid owner"))?;
++        let item = s.project.item(ItemId(id)).ok_or_else(|| bad("missing owner"))?;
++        let mut body = BTreeMap::new();
++        let mut pins = BTreeMap::new();
++        for key in KEYS {
++            if let Some(text) = item.metadata.get(key) {
++                if text.len() > 8 * 1024 * 1024 {
++                    return Err(bad("owner metadata exceeds its bound"));
++                }
++                body.insert(key, text.clone());
++                pins.insert(key, hash(text.as_bytes()));
++            }
++        }
++        bodies.insert(id.to_string(), body);
++        hashes.insert(id.to_string(), pins);
++    }
++    Ok((json!(bodies), json!(hashes)))
++}
++fn dependencies(project: &Project) -> Value {
++    json!(
++        project
++            .items
++            .values()
++            .filter_map(|item| item.as_media().and_then(|media| match &media.media {
++                filmcraft_project::MediaRef::File { path } => Some(json!({"item":item.id.0,"path":path,
++            "offline":media.offline,"storedMediaIdentity":media.identity})),
++                filmcraft_project::MediaRef::Generator(_) => None,
++            }))
++            .collect::<Vec<_>>()
++    )
++}
++
++/// Read-only preflight observation. The later capture repeats CAS and all checks.
++pub fn inspect(s: &mut Session) -> Result<Value> {
++    let validation = crate::linked_edits::validate_command(s, &json!({}))?;
++    let (bodies, hashes) = metadata(s, &validation)?;
++    Ok(json!({"projectPath":s.path,"revision":s.revision,"savedRevision":s.saved_revision,
++        "validation":validation,"ownerMetadata":bodies,"ownerMetadataSHA256":hashes,
++        "recipe":recipe(),"recipeSHA256":digest(&recipe())?,"mediaDependencies":dependencies(&s.project)}))
++}
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields, rename_all = "camelCase")]
++struct Request {
++    expected_project_path: String,
++    expected_revision: u64,
++    expected_links_revisions: Value,
++    #[serde(rename = "expectedSnapshotSHA256")]
++    expected_snapshot_sha256: String,
++    #[serde(rename = "expectedOwnerMetadataSHA256")]
++    expected_owner_metadata_sha256: Value,
++    #[serde(rename = "expectedRecipeSHA256")]
++    expected_recipe_sha256: String,
++    outputs: Vec<Output>,
++}
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields, rename_all = "camelCase")]
++struct Output {
++    composition: String,
++    sequence: u64,
++    path: String,
++}
++struct Resolved {
++    composition: String,
++    sequence: ItemId,
++    settings: ExportSettings,
++    facts: Value,
++}
++
++/// A validated project Arc and native settings, inaccessible to external mutation.
++pub struct Captured {
++    project: Arc<Project>,
++    outputs: Vec<Resolved>,
++    receipt: Value,
++}
++impl Captured {
++    pub fn receipt(&self) -> Value {
++        self.receipt.clone()
++    }
++    /// Synchronous sequential rendering; invoke only in the owned headless helper.
++    pub fn render(self, s: &mut Session) -> Result<Value> {
++        let mut results = Vec::new();
++        for output in self.outputs {
++            // Reserve each previously absent destination exclusively before the
++            // native encoder replaces its own empty reservation. A failed render
++            // retains this namespace for the external owner's quarantine policy.
++            std::fs::OpenOptions::new().write(true).create_new(true).open(&output.settings.path).map_err(|e| bad(format!("cannot reserve output: {e}")))?;
++            let path = output.settings.path.clone();
++            let job = crate::export_tools::spawn_export(
++                s,
++                self.project.clone(),
++                output.sequence,
++                output.settings,
++                format!("Pinned {} export", output.composition),
++                true,
++            )?;
++            let terminal = s.jobs.iter().find(|j| j.id == job).map(|j| crate::export_tools::job_json(s, j)).ok_or_else(|| bad("native export job missing"))?;
++            let success =
++                terminal["finished"] == true && terminal["result"]["error"].is_null() && terminal["offlineMedia"].as_array().is_some_and(Vec::is_empty);
++            results.push(json!({"composition":output.composition,"sequence":output.sequence.0,
++                "path":path,"facts":output.facts,"job":job,"terminal":terminal}));
++            if !success {
++                return Ok(json!({"schema":1,"state":"failed","capture":self.receipt,"outputs":results}));
++            }
++        }
++        Ok(json!({"schema":1,"state":"completed","capture":self.receipt,"outputs":results}))
++    }
++}
++
++/// Validate exact document/CAS/metadata, then capture one immutable native Arc.
++/// No export job, output write, history mutation or project adoption occurs here.
++pub fn capture(s: &mut Session, params: &Value) -> Result<Captured> {
++    if serde_json::to_vec(params).map_err(|e| bad(e.to_string()))?.len() > 65536 {
++        return Err(bad("capture request exceeds 64 KiB"));
++    }
++    if !params.is_object() || params.get("outputs").and_then(Value::as_array).is_none_or(|outputs| outputs.iter().any(|output| !output.is_object())) {
++        return Err(bad("capture parameters and output entries must be named objects"));
++    }
++    let request: Request = serde_json::from_value(params.clone()).map_err(|e| bad(e.to_string()))?;
++    if s.edit_group_depth != 0 || s.trim_play.active() {
++        return Err(bad("finish staged edits before capture"));
++    }
++    if request.expected_project_path.len() > 32768 || s.path.as_deref() != Some(request.expected_project_path.as_str()) {
++        return Err(bad("stale expectedProjectPath"));
++    }
++    if !sha(&request.expected_snapshot_sha256) || !sha(&request.expected_recipe_sha256) {
++        return Err(bad("canonical snapshot/recipe SHA256 required"));
++    }
++    let validation = crate::linked_edits::validate_command(
++        s,
++        &json!({"expectedRevision":request.expected_revision,
++        "expectedLinksRevisions":request.expected_links_revisions}),
++    )?;
++    let (bodies, hashes) = metadata(s, &validation)?;
++    if hashes != request.expected_owner_metadata_sha256 {
++        return Err(bad("stale owner metadata pins"));
++    }
++    if digest(&recipe())? != request.expected_recipe_sha256 {
++        return Err(bad("unsupported recipe pin"));
++    }
++    let size = s.services.file_size(&request.expected_project_path).map_err(|e| bad(e.to_string()))?;
++    if size == 0 || size > MAX_SNAPSHOT as u64 {
++        return Err(bad("snapshot exceeds 64 MiB"));
++    }
++    let bytes = s.services.read_range(&request.expected_project_path, 0, MAX_SNAPSHOT + 1).map_err(|e| bad(e.to_string()))?;
++    if bytes.len() > MAX_SNAPSHOT || bytes.len() as u64 != size || hash(&bytes) != request.expected_snapshot_sha256 {
++        return Err(bad("immutable snapshot bytes changed"));
++    }
++    let decoded = filmcraft_format::decode(&bytes).map_err(|e| bad(e.to_string()))?;
++    if decoded.project != *s.project {
++        return Err(bad("working project differs from immutable snapshot"));
++    }
++    if s.services.export_in_memory() {
++        return Err(bad("headless local filesystem export required"));
++    }
++    if request.outputs.is_empty() || request.outputs.len() > 2 {
++        return Err(bad("select one or two compositions"));
++    }
++    let owners = validation["owners"].as_array().ok_or_else(|| bad("invalid owner inventory"))?;
++    if owners.len() != 1 {
++        return Err(bad("this export profile requires one complete linked moment"));
++    }
++    let mut modes = std::collections::BTreeSet::new();
++    let mut paths = std::collections::BTreeSet::new();
++    let mut resolved = Vec::new();
++    for output in request.outputs {
++        if !matches!(output.composition.as_str(), "landscape" | "portrait") || !modes.insert(output.composition.clone()) {
++            return Err(bad("unknown or repeated composition"));
++        }
++        if owners[0]["sequences"][&output.composition].as_u64() != Some(output.sequence) {
++            return Err(bad("sequence does not match pinned composition"));
++        }
++        let path = Path::new(&output.path);
++        if output.path.len() > 32768
++            || !path.is_absolute()
++            || path.extension().and_then(|s| s.to_str()) != Some("mp4")
++            || !paths.insert(output.path.to_lowercase())
++            || path.exists()
++            || output.path == request.expected_project_path
++            || path.parent().is_none_or(|p| !p.is_dir())
++        {
++            return Err(bad("new explicit owned MP4 output paths required"));
++        }
++        let sequence = ItemId(output.sequence);
++        let q = s.project.sequence(sequence).ok_or_else(|| bad("missing sequence"))?;
++        if q.settings.par != (1, 1)
++            || q.duration().0 <= 0
++            || q.settings.width == q.settings.height
++            || (output.composition == "portrait") != (q.settings.height > q.settings.width)
++        {
++            return Err(bad("positive square-pixel composition with matching orientation required"));
++        }
++        let range = filmcraft_time::TimeRange::new(filmcraft_time::Tick::ZERO, q.duration());
++        let (_, mut settings) = crate::export_tools::settings_from_params(
++            s,
++            &json!({"format":"h264","gpuRendering":"off",
++            "hardwareEncoding":"off","burnCaptions":true,"settings":{"audio":{"codec":"aac","sampleRate":48000,"channels":2}}}),
++            "native.exportSnapshot",
++        )?;
++        settings.path = output.path;
++        settings.range = Some(range);
++        settings.pixel_aspect = Some((1, 1));
++        settings.validate().map_err(|e| bad(e.to_string()))?;
++        let actual = settings.resolve(q.settings.width, q.settings.height, q.settings.frame_rate, q.settings.sample_rate);
++        if actual.width == actual.height || (output.composition == "portrait") != (actual.height > actual.width) {
++            return Err(bad("resolved encoder geometry does not match the composition"));
++        }
++        let (a, b) = filmcraft_export::frame_span(actual.rate, range);
++        if b <= a {
++            return Err(bad("composition has no complete output frame"));
++        }
++        let facts = json!({"width":actual.width,"height":actual.height,"pixelAspect":[1,1],
++            "frameRate":{"num":actual.rate.num,"den":actual.rate.den},"frames":b-a,
++            "audio":{"sampleRate":actual.sample_rate,"channels":actual.channels},
++            "range":{"startTicks":range.start.0,"durationTicks":range.duration.0},"settings":settings});
++        resolved.push(Resolved { composition: output.composition, sequence, settings, facts });
++    }
++    let receipt = json!({"schema":1,"projectPath":s.path,"nativeRevision":s.revision,
++        "snapshotSHA256":request.expected_snapshot_sha256,"validation":validation,
++        "ownerMetadata":bodies,"ownerMetadataSHA256":hashes,"recipe":recipe(),"recipeSHA256":request.expected_recipe_sha256,
++        "mediaDependencies":dependencies(&s.project),
++        "outputs":resolved.iter().map(|o|json!({"composition":o.composition,"sequence":o.sequence.0,"path":o.settings.path,"facts":o.facts})).collect::<Vec<_>>()});
++    Ok(Captured { project: s.project.clone(), outputs: resolved, receipt })
++}
 --- a/crates/engine/src/export_tools.rs
 +++ b/crates/engine/src/export_tools.rs
 @@ -464,6 +464,7 @@
@@ -1864,20 +2204,20 @@ diff --git a/crates/engine/src/export_tools.rs b/crates/engine/src/export_tools.
      let cmd = "export.quick";
      let name = str_p(p, "preset").map(str::to_string).or_else(|| s.export_queue.quick_preset.clone()).unwrap_or_else(|| DEFAULT_PRESET.to_string());
      let mut q = p.clone();
-diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
 --- a/crates/engine/src/lib.rs
 +++ b/crates/engine/src/lib.rs
-@@ -25,6 +25,9 @@
+@@ -25,6 +25,10 @@
  pub mod interchange;
  pub mod keyboard;
  mod keyframe_move;
 +mod linked_edits;
 +mod accepted_captions;
 +pub mod creator_kit;
++pub mod export_snapshot;
  mod marker_export;
  pub mod masks;
  pub mod media_browser;
-@@ -443,6 +446,13 @@
+@@ -443,6 +447,13 @@
      pub browser: media_browser::BrowserState,
      /// Nesting depth of [`Session::execute`] (commands that run other commands).
      exec_depth: u32,
@@ -1891,7 +2231,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
      /// Each media file's size and modification time when last seen (Settings ▸ Media ▸
      /// Automatically refresh growing files, [`media_watch`]).
      pub media_stamps: std::collections::HashMap<String, media_watch::Stamp>,
-@@ -495,8 +505,9 @@
+@@ -495,8 +506,9 @@
  
  impl Session {
      pub fn new(services: Arc<dyn Services>) -> Self {
@@ -1902,7 +2242,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
              history: History { limit: 200, ..Default::default() },
              revision: 1,
              saved_revision: 1,
-@@ -538,6 +549,10 @@
+@@ -538,6 +550,10 @@
              log: Default::default(),
              browser: Default::default(),
              exec_depth: 0,
@@ -1913,7 +2253,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
              media_stamps: Default::default(),
              media_scan: None,
          }
-@@ -605,6 +620,9 @@
+@@ -605,6 +621,9 @@
      /// Tell the worker about the current project state if it changed (cheap: an `Arc` clone and a
      /// channel send; serialization happens on the worker). Called after every command.
      pub fn sync_persistence(&mut self) {
@@ -1923,7 +2263,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
          let dirty = self.is_dirty();
          let Some(p) = self.persistence.as_mut() else { return };
          let cur = autosave::Sent { revision: self.revision, saved_revision: self.saved_revision, path: self.path.clone() };
-@@ -692,6 +710,9 @@
+@@ -692,6 +711,9 @@
      /// Run a command by id.
      pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
          let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
@@ -1933,7 +2273,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
          if self.exec_depth == 0 && spec.journal && self.trim_play.active() {
              self.settle_trim_playback(id);
          }
-@@ -706,10 +727,15 @@
+@@ -706,10 +728,15 @@
          // Last-resort guard: a panic in a command (a bug that escaped the never-crash rules)
          // becomes an error for the caller (UI, CLI, control channel, MCP) instead of taking the
          // session and its unsaved project down. The panic hook has logged where it happened.
@@ -1951,7 +2291,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
              source_monitor::track_history(self);
          }
          // source graphics: an edited instance updates the shared layers and the other instances
-@@ -721,9 +747,7 @@
+@@ -721,9 +748,7 @@
          {
              self.log.push(panels::Level::Error, id, e.to_string());
          }
@@ -1962,7 +2302,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
          if r.is_ok() && spec.journal {
              self.journal.push((id.to_string(), params));
              if self.journal.len() > 10_000 {
-@@ -731,6 +755,14 @@
+@@ -731,6 +756,14 @@
              }
          }
          r
@@ -1977,7 +2317,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
      }
  
      /// Another command arrives while trim-mode playback runs: a dynamic trim is committed first
-@@ -838,6 +870,7 @@
+@@ -838,6 +871,7 @@
          let mut st = self.state.clone();
          let r = f(&mut p, &mut st)?;
          self.refuse_self_nesting(&p)?;
@@ -1985,7 +2325,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
          let old = std::mem::replace(&mut self.project, Arc::new(p));
          self.history.undo.push((label.to_string(), old));
          if self.history.undo.len() > self.history.limit {
-@@ -864,6 +897,7 @@
+@@ -864,6 +898,7 @@
          let mut st = self.state.clone();
          let r = f(&mut p, &mut st)?;
          self.refuse_self_nesting(&p)?;
@@ -1993,7 +2333,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
          self.project = Arc::new(p);
          self.state = st;
          self.drop_stale_gap();
-@@ -871,43 +905,95 @@
+@@ -871,43 +906,95 @@
          Ok(r)
      }
  
@@ -2121,7 +2461,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
              }
          }
      }
-@@ -988,6 +1074,7 @@
+@@ -988,6 +1075,7 @@
          self.history.redo.push((label.clone(), cur));
          self.fix_state();
          self.bump();
@@ -2129,7 +2469,7 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
          Some(label)
      }
  
-@@ -998,6 +1085,7 @@
+@@ -998,6 +1086,7 @@
          self.history.undo.push((label.clone(), cur));
          self.fix_state();
          self.bump();
@@ -2137,8 +2477,6 @@ diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
          Some(label)
      }
  
-diff --git a/crates/engine/src/linked_edits.rs b/crates/engine/src/linked_edits.rs
-new file mode 100644
 --- /dev/null
 +++ b/crates/engine/src/linked_edits.rs
 @@ -0,0 +1,543 @@
@@ -2685,8 +3023,6 @@ new file mode 100644
 +
 +#[cfg(test)]
 +mod tests;
-diff --git a/crates/engine/src/linked_edits/tests.rs b/crates/engine/src/linked_edits/tests.rs
-new file mode 100644
 --- /dev/null
 +++ b/crates/engine/src/linked_edits/tests.rs
 @@ -0,0 +1,308 @@
@@ -2998,7 +3334,6 @@ new file mode 100644
 +    assert_rejected(&mut s,"timeline.razor",json!({"clip":m.units[0].portrait,"time":3*TPS}));
 +    assert_rejected(&mut s,"timeline.trim",json!({"clip":m.units[0].portrait,"edge":"out","deltaFrames":-30}));
 +}
-diff --git a/crates/engine/src/mixer.rs b/crates/engine/src/mixer.rs
 --- a/crates/engine/src/mixer.rs
 +++ b/crates/engine/src/mixer.rs
 @@ -413,7 +413,7 @@
@@ -3010,7 +3345,6 @@ diff --git a/crates/engine/src/mixer.rs b/crates/engine/src/mixer.rs
      result?;
      Ok(json!({"recording": false, "lanes": written.len(), "keyframes": keyframes, "written": written}))
  }
-diff --git a/crates/engine/src/project_manager.rs b/crates/engine/src/project_manager.rs
 --- a/crates/engine/src/project_manager.rs
 +++ b/crates/engine/src/project_manager.rs
 @@ -81,6 +81,7 @@
@@ -3037,7 +3371,6 @@ diff --git a/crates/engine/src/project_manager.rs b/crates/engine/src/project_ma
      let data = filmcraft_format::encode(&proj, false);
      filmcraft_format::atomic_write(Path::new(project_path), &data).map_err(|e| format!("{project_path}: {e}"))?;
      prog.done.fetch_add(1, Ordering::Relaxed);
-diff --git a/crates/engine/src/project_tools.rs b/crates/engine/src/project_tools.rs
 --- a/crates/engine/src/project_tools.rs
 +++ b/crates/engine/src/project_tools.rs
 @@ -628,6 +628,7 @@
@@ -3064,8 +3397,6 @@ diff --git a/crates/engine/src/project_tools.rs b/crates/engine/src/project_tool
      s.services.write_file(&path, &filmcraft_format::encode(&sub, false)).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
      Ok(json!({"path": path, "items": keep.iter().map(|i| i.0).collect::<Vec<_>>()}))
  }
-diff --git a/crates/engine/tests/clipline_caption_projection.rs b/crates/engine/tests/clipline_caption_projection.rs
-new file mode 100644
 --- /dev/null
 +++ b/crates/engine/tests/clipline_caption_projection.rs
 @@ -0,0 +1,266 @@
@@ -3335,8 +3666,143 @@ new file mode 100644
 + Arc::make_mut(&mut s.project).sequence_mut(sequence).unwrap().caption_tracks[0].captions.iter_mut().find(|c|c.id.0==id).unwrap().text=receipt["text"].as_str().unwrap().into();s.revision+=1;
 + assert!(Arc::ptr_eq(&s.project,&s.playback_project()));run(&mut s,"metadata.get",json!({"item":owner.0}));assert!(Arc::ptr_eq(&s.project,&s.previews.live.project().unwrap()));s.shutdown();
 +}
-diff --git a/crates/engine/tests/clipline_linked_commands.rs b/crates/engine/tests/clipline_linked_commands.rs
-new file mode 100644
+--- /dev/null
++++ b/crates/engine/tests/clipline_export_snapshot.rs
+@@ -0,0 +1,134 @@
++//! Public capture boundary tests. No GUI command installs this blocking API.
++use filmcraft_engine::{Session, export_snapshot};
++use serde_json::{Value, json};
++use sha2::{Digest, Sha256};
++use std::{path::PathBuf, sync::Arc};
++
++fn fixture() -> (Session, PathBuf, Value) {
++    let parent = PathBuf::from(std::env::var_os("CLIPLINE_EXPORT_TEST_ROOT").expect("explicit owned fixture root required"));
++    assert!(parent.is_absolute() && parent.is_dir());
++    let root = parent.join(format!("clipline-export-owner-{}", uuid::Uuid::new_v4()));
++    std::fs::create_dir(&root).unwrap();
++    let mut s = Session::default();
++    s.execute("file.newProject", json!({"name":"Export capture"})).unwrap();
++    s.execute("file.newOfflineFile", json!({"name":"Offline fixture","seconds":2,"fps":60,"video":true,"audio":true,"width":64,"height":36})).unwrap();
++    let source = s.project.items.values().find(|i| i.as_media().is_some()).unwrap().id;
++    let mut sequences = Vec::new();
++    let mut clips = Vec::new();
++    for (name, w, h) in [("Shared", 64, 36), ("Landscape", 64, 36), ("Portrait", 36, 64)] {
++        let sequence =
++            s.execute("file.newSequence", json!({"name":name,"fps":60,"video":1,"audio":1,"width":w,"height":h})).unwrap()["sequence"].as_u64().unwrap();
++        s.execute(
++            "timeline.place",
++            json!({"item":source.0,"track":"V1","audioTrack":"A1","time":0,"sourceIn":0,"duration":3*filmcraft_engine::time::TICKS_PER_SECOND/60}),
++        )
++        .unwrap();
++        clips.push(s.active_sequence().unwrap().video_tracks[0].items[0].id.0);
++        sequences.push(sequence);
++    }
++    s.execute("metadata.set",json!({"item":sequences[0],"field":"clipline.links.v1","value":json!({"schema":1,"revision":0,"sharedSequence":sequences[0],"landscapeSequence":sequences[1],"portraitSequence":sequences[2],"units":[{"id":"fixture-root","parent":null,"shared":clips[0],"landscape":clips[1],"portrait":clips[2]}]}).to_string()})).unwrap();
++    let path = root.join("working.fcproj");
++    s.execute("file.saveAs", json!({"path":path})).unwrap();
++    let observation = export_snapshot::inspect(&mut s).unwrap();
++    let bytes = std::fs::read(&path).unwrap();
++    let params = json!({"expectedProjectPath":s.path,"expectedRevision":s.revision,
++        "expectedLinksRevisions":[{"owner":sequences[0],"revision":0}],"expectedSnapshotSHA256":format!("{:x}",Sha256::digest(bytes)),
++        "expectedOwnerMetadataSHA256":observation["ownerMetadataSHA256"],"expectedRecipeSHA256":observation["recipeSHA256"],
++        "outputs":[{"composition":"landscape","sequence":sequences[1],"path":root.join("landscape.mp4")},{"composition":"portrait","sequence":sequences[2],"path":root.join("portrait.mp4")}]});
++    (s, root, params)
++}
++fn reject(s: &mut Session, root: &PathBuf, params: &Value) {
++    let before = (*s.project).clone();
++    let rev = s.revision;
++    let undo = s.history.undo.len();
++    let redo = s.history.redo.len();
++    assert!(export_snapshot::capture(s, params).is_err());
++    assert_eq!(*s.project, before);
++    assert_eq!(s.revision, rev);
++    assert_eq!(s.history.undo.len(), undo);
++    assert_eq!(s.history.redo.len(), redo);
++    assert!(s.jobs.is_empty());
++    assert!(!root.join("landscape.mp4").exists());
++    assert!(!root.join("portrait.mp4").exists());
++}
++#[test]
++fn capture_has_exact_native_frame_facts_and_no_job_or_output() {
++    let (mut s, root, p) = fixture();
++    let before = (*s.project).clone();
++    let captured = export_snapshot::capture(&mut s, &p).unwrap();
++    let r = captured.receipt();
++    assert_eq!(r["snapshotSHA256"], p["expectedSnapshotSHA256"]);
++    assert_eq!(r["outputs"][0]["facts"]["frames"], 3);
++    assert_eq!(r["outputs"][1]["facts"]["frameRate"], json!({"num":60,"den":1}));
++    assert_eq!(*s.project, before);
++    assert!(s.jobs.is_empty());
++    assert!(!root.join("landscape.mp4").exists());
++    std::fs::remove_dir_all(root).unwrap();
++}
++#[test]
++fn stale_path_revision_owner_metadata_recipe_and_unknown_fields_reject_before_jobs() {
++    for field in ["path", "revision", "owners", "metadata", "recipe", "extra"] {
++        let (mut s, root, mut p) = fixture();
++        match field {
++            "path" => p["expectedProjectPath"] = json!("another.fcproj"),
++            "revision" => p["expectedRevision"] = json!(s.revision + 1),
++            "owners" => p["expectedLinksRevisions"] = json!([]),
++            "metadata" => p["expectedOwnerMetadataSHA256"] = json!({}),
++            "recipe" => p["expectedRecipeSHA256"] = json!("0".repeat(64)),
++            _ => p["wait"] = json!(true),
++        };
++        reject(&mut s, &root, &p);
++        std::fs::remove_dir_all(root).unwrap();
++    }
++}
++#[test]
++fn same_revision_raw_project_divergence_is_not_an_immutable_snapshot() {
++    let (mut s, root, p) = fixture();
++    Arc::make_mut(&mut s.project).name = "raw mutation".into();
++    reject(&mut s, &root, &p);
++    std::fs::remove_dir_all(root).unwrap();
++}
++#[test]
++fn changed_snapshot_bytes_reject_without_output() {
++    let (mut s, root, p) = fixture();
++    std::fs::write(root.join("working.fcproj"), b"changed").unwrap();
++    reject(&mut s, &root, &p);
++    std::fs::remove_dir_all(root).unwrap();
++}
++#[test]
++fn third_role_and_duplicate_format_are_not_silently_ignored() {
++    for mode in ["shared", "landscape"] {
++        let (mut s, root, mut p) = fixture();
++        p["outputs"][1]["composition"] = json!(mode);
++        reject(&mut s, &root, &p);
++        std::fs::remove_dir_all(root).unwrap();
++    }
++}
++#[test]
++fn existing_second_destination_rejects_before_first_job_and_preserves_foreign_bytes() {
++    let (mut s, root, p) = fixture();
++    std::fs::write(root.join("portrait.mp4"), b"existing foreign output").unwrap();
++    assert!(export_snapshot::capture(&mut s, &p).is_err());
++    assert!(s.jobs.is_empty());
++    assert!(!root.join("landscape.mp4").exists());
++    assert_eq!(std::fs::read(root.join("portrait.mp4")).unwrap(), b"existing foreign output");
++    std::fs::remove_dir_all(root).unwrap();
++}
++#[test]
++fn positional_request_and_output_arrays_reject_before_jobs() {
++    let (mut s, root, p) = fixture();
++    let positional = json!([
++        p["expectedProjectPath"],
++        p["expectedRevision"],
++        p["expectedLinksRevisions"],
++        p["expectedSnapshotSHA256"],
++        p["expectedOwnerMetadataSHA256"],
++        p["expectedRecipeSHA256"],
++        p["outputs"]
++    ]);
++    reject(&mut s, &root, &positional);
++    let mut entry = p.clone();
++    entry["outputs"][0] = json!([p["outputs"][0]["composition"], p["outputs"][0]["sequence"], p["outputs"][0]["path"]]);
++    reject(&mut s, &root, &entry);
++    std::fs::remove_dir_all(root).unwrap();
++}
 --- /dev/null
 +++ b/crates/engine/tests/clipline_linked_commands.rs
 @@ -0,0 +1,597 @@
@@ -3937,8 +4403,6 @@ new file mode 100644
 + let(mut s,owner)=bundle_fixture();let files=Arc::new(MemoryFiles::default());s.services=files.clone();let before=direct_state(&s);let p=snapshot_params(&s,owner,"staged-snapshot.fcproj");
 + s.edit_group("Must not publish intermediate state",|s|{assert!(s.execute("clipline.saveSnapshot",p).is_err());Ok(())}).unwrap();assert!(files.0.lock().unwrap().is_empty());assert_eq!(direct_state(&s),before);
 +}
-diff --git a/crates/engine/tests/edit_group_publication.rs b/crates/engine/tests/edit_group_publication.rs
-new file mode 100644
 --- /dev/null
 +++ b/crates/engine/tests/edit_group_publication.rs
 @@ -0,0 +1,339 @@
@@ -4281,7 +4745,6 @@ new file mode 100644
 +    reopened.execute("file.open", json!({"path":path})).unwrap();
 +    assert_eq!(reopened.project.to_json(), before.to_json());
 +}
-diff --git a/crates/project/src/caption.rs b/crates/project/src/caption.rs
 --- a/crates/project/src/caption.rs
 +++ b/crates/project/src/caption.rs
 @@ -261,6 +261,19 @@
@@ -4317,7 +4780,6 @@ diff --git a/crates/project/src/caption.rs b/crates/project/src/caption.rs
      fn plain() {
          assert_eq!(plain_text("<i>Hello</i> &amp; <b>bye</b>"), "Hello & bye");
          assert_eq!(plain_text("{\\an8}Top"), "Top");
-diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
 --- a/crates/ui-egui/src/lib.rs
 +++ b/crates/ui-egui/src/lib.rs
 @@ -2151,7 +2151,7 @@
