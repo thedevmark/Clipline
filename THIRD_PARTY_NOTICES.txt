@@ -4,6 +4,20 @@ Clipline downloads and/or bundles the following third-party components. Some are
 fetched on demand at runtime into a per-user runtime directory
 (LOCALAPPDATA\clipline\runtime on Windows).
 
+## Editor engine (built from a pinned upstream release plus a Clipline patch)
+
+FilmCraft 0.9.0
+  Project: https://github.com/storytold/filmcraft
+  License: MIT OR Apache-2.0 (LICENSE-MIT, LICENSE-APACHE in the upstream archive)
+  Pinned archive and patch: vendor/filmcraft/pin.json,
+  vendor/filmcraft/clipline-native-edits.patch
+
+## Desktop UI toolkit (bundled)
+
+Qt for Python (PySide6 / Shiboken6) and Qt
+  Project: https://doc.qt.io/qtforpython/
+  License: LGPL-3.0
+
 ## Media tools (downloaded on demand)
 
 FFmpeg
@@ -22,6 +36,20 @@ whisper.cpp (https://github.com/ggml-org/whisper.cpp) — MIT License.
 sherpa-onnx (https://github.com/k2-fsa/sherpa-onnx) — Apache License 2.0.
 pyannote/segmentation-3.0 (ONNX, via sherpa-onnx releases) — MIT License.
 3D-Speaker eres2net speaker embedding (English, via sherpa-onnx releases) — Apache License 2.0.
+
+## Local caption runtime (creator editor)
+
+faster-whisper (https://github.com/SYSTRAN/faster-whisper) — MIT License.
+CTranslate2 (https://github.com/OpenNMT/CTranslate2) — MIT License.
+OpenAI Whisper models, small.en and large-v3 (https://github.com/openai/whisper) — MIT License.
+WhisperX (https://github.com/m-bain/whisperX) — BSD 2-Clause License.
+pyannote.audio (https://github.com/pyannote/pyannote-audio) — MIT License.
+ONNX Runtime (https://github.com/microsoft/onnxruntime) — MIT License.
+PyTorch (https://pytorch.org/) — BSD 3-Clause License.
+Hugging Face Transformers (https://github.com/huggingface/transformers) — Apache License 2.0.
+
+GPU captioning uses NVIDIA CUDA libraries (cuBLAS, cuDNN), distributed under
+NVIDIA's own license terms. They are not open source.
 
 Full license texts are available at the upstream project pages above. Please
 review the upstream licenses and terms before redistribution.
